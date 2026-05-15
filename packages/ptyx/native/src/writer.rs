@@ -23,33 +23,31 @@ use crate::session::{BusyGuard, SessionInner};
 const WRITE_RETRY_INTERVAL: Duration = Duration::from_millis(10);
 
 pub(crate) struct WriteQueue {
+    inner: Arc<SessionInner>,
+    event_port: i64,
     shared: Arc<WriteQueueShared>,
-    handle: Option<JoinHandle<()>>,
+    handle: Mutex<Option<JoinHandle<()>>>,
 }
 
 impl WriteQueue {
-    pub(crate) fn start(
-        inner: Arc<SessionInner>,
-        event_port: i64,
-        max_bytes: usize,
-    ) -> Result<Self, PtyxError> {
-        let shared = Arc::new(WriteQueueShared::new(max_bytes));
-        let shared_for_thread = Arc::clone(&shared);
-        let handle = thread::Builder::new()
-            .name("ptyx-writer".to_string())
-            .spawn(move || writer_loop(inner, shared_for_thread, event_port))
-            .map_err(|error| PtyxError::io(PTYX_STATUS_NATIVE_ERROR, error))?;
-        Ok(Self {
-            shared,
-            handle: Some(handle),
-        })
+    pub(crate) fn new(inner: Arc<SessionInner>, event_port: i64, max_bytes: usize) -> Self {
+        Self {
+            inner,
+            event_port,
+            shared: Arc::new(WriteQueueShared::new(max_bytes)),
+            handle: Mutex::new(None),
+        }
     }
 
     pub(crate) fn enqueue_bytes(&self, bytes: &[u8]) -> Result<(), PtyxError> {
+        self.ensure_started()?;
         self.shared.enqueue_bytes(bytes)
     }
 
     pub(crate) fn enqueue_owned(&self, bytes: Vec<u8>) -> Result<(), (PtyxError, Vec<u8>)> {
+        if let Err(error) = self.ensure_started() {
+            return Err((error, bytes));
+        }
         self.shared.enqueue_owned(bytes)
     }
 
@@ -57,13 +55,39 @@ impl WriteQueue {
         self.shared.close()
     }
 
-    pub(crate) fn join(&mut self) -> Result<(), PtyxError> {
-        let Some(handle) = self.handle.take() else {
+    pub(crate) fn join(&self) -> Result<(), PtyxError> {
+        let handle = self
+            .handle
+            .lock()
+            .map_err(|_| PtyxError::new(PTYX_STATUS_ERROR, "writer handle lock poisoned"))?
+            .take();
+        let Some(handle) = handle else {
             return Ok(());
         };
         handle
             .join()
             .map_err(|_| PtyxError::new(PTYX_STATUS_NATIVE_ERROR, "writer panicked"))
+    }
+
+    fn ensure_started(&self) -> Result<(), PtyxError> {
+        let mut handle = self
+            .handle
+            .lock()
+            .map_err(|_| PtyxError::new(PTYX_STATUS_ERROR, "writer handle lock poisoned"))?;
+        if handle.is_some() {
+            return Ok(());
+        }
+
+        let inner = Arc::clone(&self.inner);
+        let shared = Arc::clone(&self.shared);
+        let event_port = self.event_port;
+        *handle = Some(
+            thread::Builder::new()
+                .name("ptyx-writer".to_string())
+                .spawn(move || writer_loop(inner, shared, event_port))
+                .map_err(|error| PtyxError::io(PTYX_STATUS_NATIVE_ERROR, error))?,
+        );
+        Ok(())
     }
 }
 

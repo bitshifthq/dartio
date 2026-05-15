@@ -161,10 +161,19 @@ void _sessionWriteOwned(int sessionHandle, Uint8List data) {
 }
 
 void _setNativeString(native.string target, String value, Arena arena) {
-  target.data = value.isEmpty
-      ? nullptr
-      : value.toNativeUtf8(allocator: arena).cast<Char>();
-  target.len = value.isEmpty ? 0 : utf8.encode(value).length;
+  if (value.isEmpty) {
+    target.data = nullptr;
+    target.len = 0;
+    return;
+  }
+
+  final bytes = utf8.encode(value);
+  final pointer = arena<Uint8>(bytes.length + 1);
+  final nativeBytes = pointer.asTypedList(bytes.length + 1);
+  nativeBytes.setRange(0, bytes.length, bytes);
+  nativeBytes[bytes.length] = 0;
+  target.data = pointer.cast<Char>();
+  target.len = bytes.length;
 }
 
 T _withNativeSessionOptions<T>(

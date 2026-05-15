@@ -316,11 +316,11 @@ fn start_runtime(session: &ptyx_session, options: ptyx_session_options_t) -> Res
     let output_config = config.output;
     let event_port = options.event_port;
 
-    let mut writer = WriteQueue::start(
+    let writer = WriteQueue::new(
         Arc::clone(&session.inner),
         event_port,
         config.write_queue_max_bytes,
-    )?;
+    );
 
     let handle = thread::Builder::new()
         .name("ptyx-reader".to_string())
