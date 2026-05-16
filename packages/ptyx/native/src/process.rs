@@ -3,10 +3,7 @@
 //! This module centralizes exit observation and signaling so the session never
 //! signals a stale PID after the child has been reaped.
 
-use crate::abi::{
-    PTYX_STATUS_CLOSED, PTYX_STATUS_ERROR, PTYX_STATUS_NATIVE_ERROR, PTYX_STATUS_WAIT_FAILED,
-};
-use crate::error::PtyxError;
+use crate::error::{PtyxError, PtyxErrorKind};
 use crate::session::SessionInner;
 
 #[cfg(target_os = "macos")]
@@ -22,7 +19,7 @@ impl ExitWatcher {
         let kqueue = unsafe { libc::kqueue() };
         if kqueue < 0 {
             return Err(PtyxError::io(
-                PTYX_STATUS_NATIVE_ERROR,
+                PtyxErrorKind::NativeError,
                 std::io::Error::last_os_error(),
             ));
         }
@@ -42,7 +39,7 @@ impl ExitWatcher {
             let error = std::io::Error::last_os_error();
             // Registration failed, so close the kqueue before returning.
             unsafe { libc::close(kqueue) };
-            return Err(PtyxError::io(PTYX_STATUS_NATIVE_ERROR, error));
+            return Err(PtyxError::io(PtyxErrorKind::NativeError, error));
         }
 
         Ok(Self { kqueue })
@@ -63,7 +60,7 @@ impl ExitWatcher {
         };
         if result < 0 {
             return Err(PtyxError::io(
-                PTYX_STATUS_WAIT_FAILED,
+                PtyxErrorKind::WaitFailed,
                 std::io::Error::last_os_error(),
             ));
         }
@@ -97,19 +94,34 @@ pub(crate) fn kill(inner: &SessionInner, signal: i32) -> Result<bool, PtyxError>
         let mut killer = inner
             .killer
             .lock()
-            .map_err(|_| PtyxError::new(PTYX_STATUS_ERROR, "child killer lock poisoned"))?;
+            .map_err(|_| PtyxError::new(PtyxErrorKind::Error, "child killer lock poisoned"))?;
         killer
             .kill()
-            .map_err(|e| PtyxError::io(PTYX_STATUS_NATIVE_ERROR, e))?;
+            .map_err(|e| PtyxError::io(PtyxErrorKind::NativeError, e))?;
         Ok(true)
     }
+}
+
+#[cfg(unix)]
+pub(crate) fn force_kill_signal() -> i32 {
+    libc::SIGKILL
+}
+
+#[cfg(all(unix, test))]
+pub(crate) fn terminate_signal_for_test() -> i32 {
+    libc::SIGTERM
+}
+
+#[cfg(not(unix))]
+pub(crate) fn force_kill_signal() -> i32 {
+    0
 }
 
 fn has_cached_exit(inner: &SessionInner) -> Result<bool, PtyxError> {
     let cache = inner
         .wait_cache
         .lock()
-        .map_err(|_| PtyxError::new(PTYX_STATUS_ERROR, "wait cache lock poisoned"))?;
+        .map_err(|_| PtyxError::new(PtyxErrorKind::Error, "wait cache lock poisoned"))?;
     Ok(cache.is_some())
 }
 
@@ -145,7 +157,7 @@ fn signal_child(inner: &SessionInner, signal: i32) -> Result<bool, PtyxError> {
         if error.raw_os_error() == Some(libc::ESRCH) {
             return Ok(false);
         }
-        return Err(PtyxError::io(PTYX_STATUS_NATIVE_ERROR, error));
+        return Err(PtyxError::io(PtyxErrorKind::NativeError, error));
     }
     Ok(true)
 }
@@ -157,7 +169,7 @@ pub(crate) fn wait_exit(inner: &SessionInner) -> Result<i32, PtyxError> {
         let cache = inner
             .wait_cache
             .lock()
-            .map_err(|_| PtyxError::new(PTYX_STATUS_ERROR, "wait cache lock poisoned"))?;
+            .map_err(|_| PtyxError::new(PtyxErrorKind::Error, "wait cache lock poisoned"))?;
         if let Some(exit_code) = *cache {
             return Ok(exit_code);
         }
@@ -176,18 +188,18 @@ pub(crate) fn wait_exit(inner: &SessionInner) -> Result<i32, PtyxError> {
     let mut child_guard = inner
         .child
         .lock()
-        .map_err(|_| PtyxError::new(PTYX_STATUS_ERROR, "child lock poisoned"))?;
+        .map_err(|_| PtyxError::new(PtyxErrorKind::Error, "child lock poisoned"))?;
     let child = child_guard
         .as_mut()
-        .ok_or_else(|| PtyxError::new(PTYX_STATUS_CLOSED, "child handle is closed"))?;
+        .ok_or_else(|| PtyxError::new(PtyxErrorKind::Closed, "child handle is closed"))?;
 
     match child.wait() {
         Ok(status) => cache_exit(inner, exit_code(status)),
         Err(e) if is_no_child_error(&e) => Err(PtyxError::new(
-            PTYX_STATUS_WAIT_FAILED,
+            PtyxErrorKind::WaitFailed,
             "child exit status was reaped before ptyx could observe it",
         )),
-        Err(e) => Err(PtyxError::io(PTYX_STATUS_WAIT_FAILED, e)),
+        Err(e) => Err(PtyxError::io(PtyxErrorKind::WaitFailed, e)),
     }
 }
 
@@ -212,7 +224,7 @@ fn cache_exit(inner: &SessionInner, exit_code: i32) -> Result<i32, PtyxError> {
     let mut cache = inner
         .wait_cache
         .lock()
-        .map_err(|_| PtyxError::new(PTYX_STATUS_ERROR, "wait cache lock poisoned"))?;
+        .map_err(|_| PtyxError::new(PtyxErrorKind::Error, "wait cache lock poisoned"))?;
     *cache = Some(exit_code);
     Ok(exit_code)
 }

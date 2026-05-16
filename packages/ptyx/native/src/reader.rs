@@ -8,10 +8,9 @@ use std::io::{ErrorKind, Read};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
-use crate::abi::{PTYX_STATUS_ERROR, PTYX_STATUS_IO_FAILED};
-use crate::error::PtyxError;
+use crate::error::{PtyxError, PtyxErrorKind};
 #[cfg(unix)]
-use crate::fd::{poll_readable, read_fd, set_fd_nonblocking, PollResult, ReadResult};
+use crate::fd::{read_context_for_inner, PollResult, ReadFdContext, ReadResult};
 use crate::output::{OutputBuffer, OutputConfig};
 use crate::session::{BusyGuard, SessionInner};
 
@@ -34,16 +33,17 @@ pub(crate) fn run(
 
     #[cfg(unix)]
     {
-        if let Some(fd) = match inner.master.lock() {
-            Ok(master) => master.as_raw_fd(),
-            Err(_) => {
-                output.post_error(PtyxError::new(PTYX_STATUS_ERROR, "master lock poisoned"));
+        match read_context_for_inner(inner.as_ref()) {
+            Ok(Some(context)) => {
+                read_unix_fd(context, &stop, &mut output);
+                return;
+            }
+            Ok(None) => {}
+            Err(error) => {
+                output.post_error(error);
                 output.close_ports();
                 return;
             }
-        } {
-            read_unix_fd(fd, &stop, &mut output);
-            return;
         }
     }
 
@@ -51,9 +51,9 @@ pub(crate) fn run(
 }
 
 #[cfg(unix)]
-fn read_unix_fd(fd: libc::c_int, stop: &AtomicBool, output: &mut OutputBuffer) {
+fn read_unix_fd(context: ReadFdContext, stop: &AtomicBool, output: &mut OutputBuffer) {
     let mut buffer = vec![0_u8; output.read_buffer_size()];
-    let _nonblocking = match set_fd_nonblocking(fd) {
+    let _nonblocking = match context.set_nonblocking() {
         Ok(guard) => guard,
         Err(error) => {
             output.post_error(error);
@@ -69,7 +69,7 @@ fn read_unix_fd(fd: libc::c_int, stop: &AtomicBool, output: &mut OutputBuffer) {
         }
 
         loop {
-            match read_fd(fd, &mut buffer) {
+            match context.read(&mut buffer) {
                 Ok(ReadResult::Data(n)) => {
                     if let Err(error) = output.append(&buffer[..n], stop) {
                         output.post_error(error);
@@ -92,7 +92,7 @@ fn read_unix_fd(fd: libc::c_int, stop: &AtomicBool, output: &mut OutputBuffer) {
             }
         }
 
-        match poll_readable(fd, output.poll_timeout()) {
+        match context.poll_readable(output.poll_timeout()) {
             Ok(PollResult::Timeout) => {
                 if let Err(error) = output.flush(stop) {
                     output.post_error(error);
@@ -115,7 +115,7 @@ fn read_blocking(inner: Arc<SessionInner>, stop: &AtomicBool, output: &mut Outpu
     let mut reader = match inner.reader.lock() {
         Ok(reader) => reader,
         Err(_) => {
-            output.post_error(PtyxError::new(PTYX_STATUS_ERROR, "reader lock poisoned"));
+            output.post_error(PtyxError::new(PtyxErrorKind::Error, "reader lock poisoned"));
             output.close_ports();
             return;
         }
@@ -150,7 +150,7 @@ fn read_blocking(inner: Arc<SessionInner>, stop: &AtomicBool, output: &mut Outpu
                 break;
             }
             Err(e) => {
-                output.flush_and_post_error(stop, PtyxError::io(PTYX_STATUS_IO_FAILED, e));
+                output.flush_and_post_error(stop, PtyxError::io(PtyxErrorKind::IoFailed, e));
                 break;
             }
         }

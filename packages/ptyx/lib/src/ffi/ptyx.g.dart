@@ -10,50 +10,103 @@ library;
 import 'dart:ffi' as ffi;
 import 'package:meta/meta.dart' show internal;
 
+/// Returns the ABI major version implemented by the loaded library.
 @ffi.Native<ffi.Uint32 Function()>()
 external int ptyx_abi_version_major();
 
+/// Returns the ABI minor version implemented by the loaded library.
 @ffi.Native<ffi.Uint32 Function()>()
 external int ptyx_abi_version_minor();
 
+/// Acknowledges output bytes delivered to the caller.
+///
+/// This is required when PTYX_SESSION_REQUIRE_OUTPUT_ACKS is set. Acknowledged
+/// bytes release native output backpressure.
+///
+/// @param session Session handle.
+/// @param byte_count Number of output bytes accepted or discarded by the caller.
+/// @return PTYX_STATUS_OK or an error status.
 @ffi.Native<status Function(ffi.Pointer<session>, ffi.Uint64)>()
 external int ptyx_ack_output(ffi.Pointer<session> session$1, int byte_count);
 
+/// Allocates a native buffer for ptyx_write_owned().
+///
+/// @param capacity Buffer capacity in bytes.
+/// @param out_buffer Receives the allocated buffer.
+/// @return PTYX_STATUS_OK or an error status.
 @ffi.Native<status Function(ffi.Size, ffi.Pointer<ffi.Pointer<owned_buffer>>)>()
 external int ptyx_buffer_alloc(
   int capacity,
   ffi.Pointer<ffi.Pointer<owned_buffer>> out_buffer,
 );
 
+/// Returns the writable data pointer for an owned buffer.
+///
+/// @param buffer Buffer handle.
+/// @return Pointer to capacity bytes, or NULL for an invalid buffer.
 @ffi.Native<ffi.Pointer<ffi.Uint8> Function(ffi.Pointer<owned_buffer>)>()
 external ffi.Pointer<ffi.Uint8> ptyx_buffer_data(
   ffi.Pointer<owned_buffer> buffer,
 );
 
+/// Frees an owned buffer.
+///
+/// @param buffer Buffer handle. NULL is allowed.
 @ffi.Native<ffi.Void Function(ffi.Pointer<owned_buffer>)>()
 external void ptyx_buffer_free(ffi.Pointer<owned_buffer> buffer);
 
+/// Closes and frees a session.
+///
+/// The session pointer is invalid after this call. NULL is allowed.
+///
+/// @param session Session handle.
 @ffi.Native<ffi.Void Function(ffi.Pointer<session>)>()
 external void ptyx_close(ffi.Pointer<session> session$1);
 
+/// Reads the child process ID.
+///
+/// @param session Session handle.
+/// @param out_pid Receives the process ID.
+/// @return PTYX_STATUS_OK, PTYX_STATUS_UNSUPPORTED, or an error status.
 @ffi.Native<status Function(ffi.Pointer<session>, ffi.Pointer<ffi.Uint64>)>()
 external int ptyx_get_child_pid(
   ffi.Pointer<session> session$1,
   ffi.Pointer<ffi.Uint64> out_pid,
 );
 
+/// Reads the current PTY size.
+///
+/// @param session Session handle.
+/// @param out_size Receives the PTY size.
+/// @return PTYX_STATUS_OK or an error status.
 @ffi.Native<status Function(ffi.Pointer<session>, ffi.Pointer<size>)>()
 external int ptyx_get_size(
   ffi.Pointer<session> session$1,
   ffi.Pointer<size> out_size,
 );
 
+/// Reads the current observable terminal mode.
+///
+/// @param session Session handle.
+/// @param out_mode Receives the terminal mode snapshot.
+/// @return PTYX_STATUS_OK or an error status.
 @ffi.Native<status Function(ffi.Pointer<session>, ffi.Pointer<term_mode>)>()
 external int ptyx_get_term_mode(
   ffi.Pointer<session> session$1,
   ffi.Pointer<term_mode> out_mode,
 );
 
+/// Reads the PTY device name.
+///
+/// When buffer is NULL or too small, inout_len receives the required byte count,
+/// including the trailing NUL, and PTYX_STATUS_BUFFER_TOO_SMALL is returned.
+///
+/// @param session Session handle.
+/// @param buffer Destination buffer, or NULL to query the required size.
+/// @param inout_len On input, buffer capacity. On output, required or written
+/// byte count including the trailing NUL.
+/// @return PTYX_STATUS_OK, PTYX_STATUS_UNSUPPORTED,
+/// PTYX_STATUS_BUFFER_TOO_SMALL, or an error status.
 @ffi.Native<
   status Function(
     ffi.Pointer<session>,
@@ -67,21 +120,48 @@ external int ptyx_get_tty_name(
   ffi.Pointer<ffi.Size> inout_len,
 );
 
+/// Initializes Dart native API access for the library.
+///
+/// @param dart_initialize_api_dl_data Pointer provided by Dart_InitializeApiDL.
+/// @return PTYX_STATUS_OK or an error status.
 @ffi.Native<status Function(ffi.Pointer<ffi.Void>)>()
 external int ptyx_init(ffi.Pointer<ffi.Void> dart_initialize_api_dl_data);
 
+/// Sends a signal to the child process.
+///
+/// @param session Session handle.
+/// @param signal Platform signal number. Ignored on platforms without signals.
+/// @return true when a live child was signaled, false otherwise.
 @ffi.Native<ffi.Bool Function(ffi.Pointer<session>, ffi.Int32)>()
 external bool ptyx_kill(ffi.Pointer<session> session$1, int signal);
 
+/// Returns the last error message for the current thread.
+///
+/// @return Thread-local NUL-terminated string. The pointer remains valid until
+/// the next fallible ptyx call on the same thread.
 @ffi.Native<ffi.Pointer<ffi.Char> Function()>()
 external ffi.Pointer<ffi.Char> ptyx_last_error_message();
 
+/// Resizes the PTY.
+///
+/// @param session Session handle.
+/// @param size New PTY size.
+/// @return PTYX_STATUS_OK or an error status.
 @ffi.Native<status Function(ffi.Pointer<session>, size)>()
 external int ptyx_resize(ffi.Pointer<session> session$1, size size$1);
 
+/// Initializes session options with defaults.
+///
+/// @param options Options struct to initialize. NULL is ignored.
 @ffi.Native<ffi.Void Function(ffi.Pointer<session_options>)>()
 external void ptyx_session_options_init(ffi.Pointer<session_options> options);
 
+/// Spawns a child process attached to a new PTY.
+///
+/// @param options Session options. The pointed-to data only needs to remain
+/// valid for the duration of this call.
+/// @param out_session Receives the new session handle on success.
+/// @return PTYX_STATUS_OK or an error status.
 @ffi.Native<
   status Function(
     ffi.Pointer<session_options>,
@@ -93,9 +173,19 @@ external int ptyx_spawn(
   ffi.Pointer<ffi.Pointer<session>> out_session,
 );
 
+/// Returns a static string for a status code.
+///
+/// @param status Status code to describe.
+/// @return Static NUL-terminated string. The caller must not free it.
 @ffi.Native<ffi.Pointer<ffi.Char> Function(status)>()
 external ffi.Pointer<ffi.Char> ptyx_status_string(int status$1);
 
+/// Queues bytes for the child process input.
+///
+/// @param session Session handle.
+/// @param data Bytes to write. May be NULL only when length is zero.
+/// @param length Number of bytes to write.
+/// @return PTYX_STATUS_OK or an error status.
 @ffi.Native<
   status Function(ffi.Pointer<session>, ffi.Pointer<ffi.Uint8>, ffi.Size)
 >()
@@ -105,6 +195,15 @@ external int ptyx_write(
   int length,
 );
 
+/// Queues an owned buffer for the child process input.
+///
+/// On success, ownership of buffer moves to the session. On failure, ownership
+/// remains with the caller and the buffer must be freed with ptyx_buffer_free().
+///
+/// @param session Session handle.
+/// @param buffer Buffer previously allocated by ptyx_buffer_alloc().
+/// @param length Number of initialized bytes in buffer.
+/// @return PTYX_STATUS_OK or an error status.
 @ffi.Native<
   status Function(ffi.Pointer<session>, ffi.Pointer<owned_buffer>, ffi.Size)
 >()
@@ -114,7 +213,7 @@ external int ptyx_write_owned(
   int length,
 );
 
-const int PTYX_ABI_VERSION_MAJOR = 11;
+const int PTYX_ABI_VERSION_MAJOR = 1;
 
 const int PTYX_ABI_VERSION_MINOR = 0;
 
@@ -190,105 +289,152 @@ const int PTYX_TERM_MODE_ECHO_VALID = 2;
 
 const int PTYX_TERM_MODE_SIGNALS_VALID = 4;
 
+/// Environment handling mode for a spawned child process.
 typedef env_mode = ffi.Uint32;
 typedef Dartenv_mode = int;
+
+/// Bitset used for option flags and validity masks.
 typedef flags = ffi.Uint32;
 typedef Dartflags = int;
+
+/// Opaque caller-filled buffer used by ptyx_write_owned().
 typedef owned_buffer = ptyx_owned_buffer;
 
 final class ptyx_owned_buffer extends ffi.Opaque {}
 
 final class ptyx_session extends ffi.Opaque {}
 
+/// Options for ptyx_spawn().
 final class ptyx_session_options extends ffi.Struct {
+  /// Bitset of PTYX_SESSION_* flags.
   @flags()
   external int flags$1;
 
+  /// Executable path or command name. Required.
   external string executable;
 
+  /// Argument array, not including executable.
   external ffi.Pointer<string> argv;
 
+  /// Number of entries in argv.
   @ffi.Size()
   external int argc;
 
+  /// Environment entries as KEY=VALUE strings.
+  ///
+  /// KEY must not be empty or contain NUL. VALUE must not contain NUL and may
+  /// contain '='.
   external ffi.Pointer<string> env_items;
 
+  /// Number of entries in env_items.
   @ffi.Size()
   external int env_count;
 
+  /// Environment handling mode.
   @env_mode()
   external int env_mode$1;
 
+  /// Working directory, or empty to inherit the parent working directory.
   external string cwd;
 
+  /// Initial PTY size.
   external size initial_size;
 
+  /// Dart native port that receives PTYX_MESSAGE_* output messages.
   @ffi.Int64()
   external int output_port;
 
+  /// Dart native port that receives PTYX_EVENT_* messages.
   @ffi.Int64()
   external int event_port;
 
+  /// Native read buffer size in bytes. Zero selects the default.
   @ffi.Uint32()
   external int read_buffer_size;
 
+  /// Maximum bytes per posted output batch. Zero selects the default.
   @ffi.Uint32()
   external int output_batch_max_bytes;
 
+  /// Maximum batching delay in microseconds. Zero selects the default.
   @ffi.Uint32()
   external int output_batch_max_delay_us;
 
+  /// Terminal mode polling interval in milliseconds. Zero selects the default.
   @ffi.Uint32()
   external int mode_poll_interval_ms;
 
+  /// Maximum unacknowledged output bytes. Zero selects the default.
   @ffi.Uint64()
   external int max_inflight_bytes;
 
+  /// Maximum outstanding external typed-data bytes. Zero selects the default.
   @ffi.Uint64()
   external int max_external_output_bytes;
 
+  /// Maximum queued input bytes. Zero selects the default.
   @ffi.Uint64()
   external int write_queue_max_bytes;
 }
 
+/// PTY cell and pixel size.
 final class ptyx_size extends ffi.Struct {
+  /// Number of terminal rows.
   @ffi.Uint32()
   external int rows;
 
+  /// Number of terminal columns.
   @ffi.Uint32()
   external int columns;
 
+  /// Width in pixels, or zero when unknown.
   @ffi.Uint32()
   external int pixel_width;
 
+  /// Height in pixels, or zero when unknown.
   @ffi.Uint32()
   external int pixel_height;
 }
 
+/// Borrowed byte string.
+///
+/// Strings are UTF-8 where text is required. The buffer does not need to be
+/// NUL-terminated and must remain valid for the duration of the call that
+/// receives it.
 final class ptyx_string extends ffi.Struct {
+  /// Pointer to the first byte, or NULL when len is zero.
   external ffi.Pointer<ffi.Char> data;
 
+  /// Number of bytes at data.
   @ffi.Size()
   external int len;
 }
 
+/// Snapshot of observable terminal input mode flags.
 final class ptyx_term_mode extends ffi.Struct {
+  /// Bitset of PTYX_TERM_MODE_*_VALID flags.
   @flags()
   external int valid_fields;
 
+  /// Canonical input processing state, valid when CANONICAL_VALID is set.
   @ffi.Bool()
   external bool canonical;
 
+  /// Input echo state, valid when ECHO_VALID is set.
   @ffi.Bool()
   external bool echo;
 
+  /// Terminal signal generation state, valid when SIGNALS_VALID is set.
   @ffi.Bool()
   external bool signals;
 }
 
+/// Opaque PTY session handle.
 typedef session = ptyx_session;
 typedef session_options = ptyx_session_options;
 typedef size = ptyx_size;
+
+/// Status code returned by fallible ABI functions.
 typedef status = ffi.Uint32;
 typedef Dartstatus = int;
 typedef string = ptyx_string;

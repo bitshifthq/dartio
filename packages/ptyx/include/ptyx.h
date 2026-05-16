@@ -39,7 +39,7 @@ extern "C" {
   #define PTYX_CALL
 #endif
 
-#define PTYX_ABI_VERSION_MAJOR 11u
+#define PTYX_ABI_VERSION_MAJOR 1u
 #define PTYX_ABI_VERSION_MINOR 0u
 
 /** Status code returned by fallible ABI functions. */

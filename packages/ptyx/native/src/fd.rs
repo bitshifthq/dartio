@@ -8,15 +8,20 @@ use std::io::ErrorKind;
 use std::thread;
 use std::time::Duration;
 
-#[cfg(unix)]
-use crate::abi::PTYX_STATUS_IO_FAILED;
-use crate::abi::{PTYX_STATUS_CLOSED, PTYX_STATUS_ERROR};
 use crate::error::PtyxError;
+#[cfg(unix)]
+use crate::error::PtyxErrorKind;
 use crate::session::SessionInner;
 
 pub(crate) struct WriteRetryContext {
     #[cfg(unix)]
     fd: Option<libc::c_int>,
+}
+
+#[cfg(unix)]
+#[derive(Clone, Copy)]
+pub(crate) struct ReadFdContext {
+    fd: libc::c_int,
 }
 
 pub(crate) fn write_retry_context_for_inner(
@@ -27,7 +32,7 @@ pub(crate) fn write_retry_context_for_inner(
         let master = inner
             .master
             .lock()
-            .map_err(|_| PtyxError::new(PTYX_STATUS_ERROR, "master lock poisoned"))?;
+            .map_err(|_| PtyxError::new(PtyxErrorKind::Error, "master lock poisoned"))?;
         Ok(WriteRetryContext {
             fd: master.as_raw_fd(),
         })
@@ -39,10 +44,32 @@ pub(crate) fn write_retry_context_for_inner(
     }
 }
 
+#[cfg(unix)]
+pub(crate) fn read_context_for_inner(
+    inner: &SessionInner,
+) -> Result<Option<ReadFdContext>, PtyxError> {
+    let master = inner
+        .master
+        .lock()
+        .map_err(|_| PtyxError::new(PtyxErrorKind::Error, "master lock poisoned"))?;
+    Ok(master.as_raw_fd().map(|fd| ReadFdContext { fd }))
+}
+
 impl WriteRetryContext {
     #[cfg(unix)]
-    pub(crate) fn raw_fd(&self) -> Option<libc::c_int> {
-        self.fd
+    pub(crate) fn uses_direct_io(&self) -> bool {
+        self.fd.is_some()
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn write_direct(&self, data: &[u8]) -> std::io::Result<DirectWriteResult> {
+        match self.fd {
+            Some(fd) => write_fd(fd, data),
+            None => Err(std::io::Error::new(
+                ErrorKind::Unsupported,
+                "raw fd writes are unavailable",
+            )),
+        }
     }
 
     pub(crate) fn wait_writable_for(&self, timeout: Duration) -> std::io::Result<bool> {
@@ -55,6 +82,28 @@ impl WriteRetryContext {
         thread::sleep(timeout);
         Ok(true)
     }
+}
+
+#[cfg(unix)]
+impl ReadFdContext {
+    pub(crate) fn set_nonblocking(&self) -> Result<FdNonblockingGuard, PtyxError> {
+        set_fd_nonblocking(self.fd)
+    }
+
+    pub(crate) fn read(&self, buffer: &mut [u8]) -> Result<ReadResult, PtyxError> {
+        read_fd(self.fd, buffer)
+    }
+
+    pub(crate) fn poll_readable(&self, timeout: Option<Duration>) -> Result<PollResult, PtyxError> {
+        poll_readable(self.fd, timeout)
+    }
+}
+
+#[cfg(unix)]
+pub(crate) enum DirectWriteResult {
+    Wrote(usize),
+    Interrupted,
+    WouldBlock,
 }
 
 #[cfg(unix)]
@@ -119,12 +168,12 @@ impl Drop for FdNonblockingGuard {
 }
 
 #[cfg(unix)]
-pub(crate) fn set_fd_nonblocking(fd: libc::c_int) -> Result<FdNonblockingGuard, PtyxError> {
+fn set_fd_nonblocking(fd: libc::c_int) -> Result<FdNonblockingGuard, PtyxError> {
     // `fd` is owned by the session and valid while the guard is alive.
     let original_flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
     if original_flags < 0 {
         return Err(PtyxError::io(
-            PTYX_STATUS_IO_FAILED,
+            PtyxErrorKind::IoFailed,
             std::io::Error::last_os_error(),
         ));
     }
@@ -133,7 +182,7 @@ pub(crate) fn set_fd_nonblocking(fd: libc::c_int) -> Result<FdNonblockingGuard, 
         let result = unsafe { libc::fcntl(fd, libc::F_SETFL, original_flags | libc::O_NONBLOCK) };
         if result < 0 {
             return Err(PtyxError::io(
-                PTYX_STATUS_IO_FAILED,
+                PtyxErrorKind::IoFailed,
                 std::io::Error::last_os_error(),
             ));
         }
@@ -142,10 +191,7 @@ pub(crate) fn set_fd_nonblocking(fd: libc::c_int) -> Result<FdNonblockingGuard, 
 }
 
 #[cfg(unix)]
-pub(crate) fn poll_readable(
-    fd: libc::c_int,
-    timeout: Option<Duration>,
-) -> Result<PollResult, PtyxError> {
+fn poll_readable(fd: libc::c_int, timeout: Option<Duration>) -> Result<PollResult, PtyxError> {
     let mut poll_fd = libc::pollfd {
         fd,
         events: libc::POLLIN | libc::POLLHUP | libc::POLLERR,
@@ -158,7 +204,7 @@ pub(crate) fn poll_readable(
         if result > 0 {
             if poll_fd.revents & libc::POLLNVAL != 0 {
                 return Err(PtyxError::new(
-                    PTYX_STATUS_CLOSED,
+                    PtyxErrorKind::Closed,
                     "PTY file descriptor is closed",
                 ));
             }
@@ -171,7 +217,7 @@ pub(crate) fn poll_readable(
         if error.kind() == ErrorKind::Interrupted {
             continue;
         }
-        return Err(PtyxError::io(PTYX_STATUS_IO_FAILED, error));
+        return Err(PtyxError::io(PtyxErrorKind::IoFailed, error));
     }
 }
 
@@ -184,7 +230,7 @@ fn duration_to_poll_timeout_ms(duration: Duration) -> libc::c_int {
 }
 
 #[cfg(unix)]
-pub(crate) fn read_fd(fd: libc::c_int, buffer: &mut [u8]) -> Result<ReadResult, PtyxError> {
+fn read_fd(fd: libc::c_int, buffer: &mut [u8]) -> Result<ReadResult, PtyxError> {
     loop {
         // `buffer` is valid for writes of its full length for this call.
         let result = unsafe { libc::read(fd, buffer.as_mut_ptr().cast(), buffer.len()) };
@@ -204,6 +250,27 @@ pub(crate) fn read_fd(fd: libc::c_int, buffer: &mut [u8]) -> Result<ReadResult, 
         if error.raw_os_error() == Some(libc::EIO) {
             return Ok(ReadResult::Eof);
         }
-        return Err(PtyxError::io(PTYX_STATUS_IO_FAILED, error));
+        return Err(PtyxError::io(PtyxErrorKind::IoFailed, error));
+    }
+}
+
+#[cfg(unix)]
+fn write_fd(fd: libc::c_int, data: &[u8]) -> std::io::Result<DirectWriteResult> {
+    let result = unsafe { libc::write(fd, data.as_ptr().cast(), data.len()) };
+    if result > 0 {
+        return Ok(DirectWriteResult::Wrote(result as usize));
+    }
+    if result == 0 {
+        return Err(std::io::Error::new(
+            ErrorKind::WriteZero,
+            "failed to write to PTY",
+        ));
+    }
+
+    let error = std::io::Error::last_os_error();
+    match error.kind() {
+        ErrorKind::Interrupted => Ok(DirectWriteResult::Interrupted),
+        ErrorKind::WouldBlock => Ok(DirectWriteResult::WouldBlock),
+        _ => Err(error),
     }
 }

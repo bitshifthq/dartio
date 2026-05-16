@@ -10,14 +10,11 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use crate::abi::{
-    PTYX_ERROR_SOURCE_WRITE, PTYX_STATUS_BROKEN_PIPE, PTYX_STATUS_CLOSED, PTYX_STATUS_ERROR,
-    PTYX_STATUS_IO_FAILED, PTYX_STATUS_NATIVE_ERROR, PTYX_STATUS_OUT_OF_MEMORY,
-    PTYX_STATUS_WOULD_BLOCK,
-};
-use crate::error::PtyxError;
+use crate::error::{PtyxError, PtyxErrorKind};
+#[cfg(unix)]
+use crate::fd::DirectWriteResult;
 use crate::fd::{write_retry_context_for_inner, WriteRetryContext};
-use crate::message::post_error;
+use crate::message::{post_error, ErrorSource};
 use crate::session::{BusyGuard, SessionInner};
 
 const WRITE_RETRY_INTERVAL: Duration = Duration::from_millis(10);
@@ -59,21 +56,21 @@ impl WriteQueue {
         let handle = self
             .handle
             .lock()
-            .map_err(|_| PtyxError::new(PTYX_STATUS_ERROR, "writer handle lock poisoned"))?
+            .map_err(|_| PtyxError::new(PtyxErrorKind::Error, "writer handle lock poisoned"))?
             .take();
         let Some(handle) = handle else {
             return Ok(());
         };
         handle
             .join()
-            .map_err(|_| PtyxError::new(PTYX_STATUS_NATIVE_ERROR, "writer panicked"))
+            .map_err(|_| PtyxError::new(PtyxErrorKind::NativeError, "writer panicked"))
     }
 
     fn ensure_started(&self) -> Result<(), PtyxError> {
         let mut handle = self
             .handle
             .lock()
-            .map_err(|_| PtyxError::new(PTYX_STATUS_ERROR, "writer handle lock poisoned"))?;
+            .map_err(|_| PtyxError::new(PtyxErrorKind::Error, "writer handle lock poisoned"))?;
         if handle.is_some() {
             return Ok(());
         }
@@ -85,7 +82,7 @@ impl WriteQueue {
             thread::Builder::new()
                 .name("ptyx-writer".to_string())
                 .spawn(move || writer_loop(inner, shared, event_port))
-                .map_err(|error| PtyxError::io(PTYX_STATUS_NATIVE_ERROR, error))?,
+                .map_err(|error| PtyxError::io(PtyxErrorKind::NativeError, error))?,
         );
         Ok(())
     }
@@ -152,7 +149,7 @@ impl WriteQueueShared {
             Ok(state) => state,
             Err(_) => {
                 return Err((
-                    PtyxError::new(PTYX_STATUS_ERROR, "write queue lock poisoned"),
+                    PtyxError::new(PtyxErrorKind::Error, "write queue lock poisoned"),
                     bytes,
                 ))
             }
@@ -171,7 +168,7 @@ impl WriteQueueShared {
         let state = self
             .state
             .lock()
-            .map_err(|_| PtyxError::new(PTYX_STATUS_ERROR, "write queue lock poisoned"))?;
+            .map_err(|_| PtyxError::new(PtyxErrorKind::Error, "write queue lock poisoned"))?;
         self.validate_enqueue(&state, byte_count)
     }
 
@@ -185,7 +182,7 @@ impl WriteQueueShared {
         }
         if state.closed {
             return Err(PtyxError::new(
-                PTYX_STATUS_CLOSED,
+                PtyxErrorKind::Closed,
                 "session runtime is closed",
             ));
         }
@@ -200,7 +197,7 @@ impl WriteQueueShared {
         let mut state = self
             .state
             .lock()
-            .map_err(|_| PtyxError::new(PTYX_STATUS_ERROR, "write queue lock poisoned"))?;
+            .map_err(|_| PtyxError::new(PtyxErrorKind::Error, "write queue lock poisoned"))?;
         loop {
             if let Some(chunk) = state.queue.pop_front() {
                 state.queued_bytes = state.queued_bytes.saturating_sub(chunk.len());
@@ -215,7 +212,7 @@ impl WriteQueueShared {
             state = self
                 .ready
                 .wait(state)
-                .map_err(|_| PtyxError::new(PTYX_STATUS_ERROR, "write queue lock poisoned"))?;
+                .map_err(|_| PtyxError::new(PtyxErrorKind::Error, "write queue lock poisoned"))?;
         }
     }
 
@@ -223,7 +220,7 @@ impl WriteQueueShared {
         let mut state = self
             .state
             .lock()
-            .map_err(|_| PtyxError::new(PTYX_STATUS_ERROR, "write queue lock poisoned"))?;
+            .map_err(|_| PtyxError::new(PtyxErrorKind::Error, "write queue lock poisoned"))?;
         state.closed = true;
         state.queue.clear();
         state.queued_bytes = 0;
@@ -236,7 +233,7 @@ impl WriteQueueShared {
         let mut state = self
             .state
             .lock()
-            .map_err(|_| PtyxError::new(PTYX_STATUS_ERROR, "write queue lock poisoned"))?;
+            .map_err(|_| PtyxError::new(PtyxErrorKind::Error, "write queue lock poisoned"))?;
         state.failure = Some(error);
         state.queue.clear();
         state.queued_bytes = 0;
@@ -249,7 +246,7 @@ impl WriteQueueShared {
         let state = self
             .state
             .lock()
-            .map_err(|_| PtyxError::new(PTYX_STATUS_ERROR, "write queue lock poisoned"))?;
+            .map_err(|_| PtyxError::new(PtyxErrorKind::Error, "write queue lock poisoned"))?;
         Ok(state.closed)
     }
 }
@@ -268,7 +265,7 @@ fn writer_loop(inner: Arc<SessionInner>, shared: Arc<WriteQueueShared>, event_po
             Ok(Some(chunk)) => chunk,
             Ok(None) => return,
             Err(error) => {
-                post_error(event_port, PTYX_ERROR_SOURCE_WRITE, error);
+                post_error(event_port, ErrorSource::Write, error);
                 return;
             }
         };
@@ -277,7 +274,7 @@ fn writer_loop(inner: Arc<SessionInner>, shared: Arc<WriteQueueShared>, event_po
             record_failure(
                 &shared,
                 event_port,
-                PtyxError::new(PTYX_STATUS_CLOSED, "session is closed"),
+                PtyxError::new(PtyxErrorKind::Closed, "session is closed"),
             );
             return;
         }
@@ -285,15 +282,13 @@ fn writer_loop(inner: Arc<SessionInner>, shared: Arc<WriteQueueShared>, event_po
         let result = (|| {
             let _guard = BusyGuard::enter(&inner.write_busy)?;
             #[cfg(unix)]
-            if let Some(fd) = write_context.raw_fd() {
-                // The raw fd path avoids blocking on a trait object write when
-                // poll can tell us the PTY is not ready yet.
-                return write_fd_chunk(fd, &chunk, &write_context, &shared);
+            if write_context.uses_direct_io() {
+                return write_direct_chunk(&chunk, &write_context, &shared);
             }
             let mut writer = inner
                 .writer
                 .lock()
-                .map_err(|_| PtyxError::new(PTYX_STATUS_ERROR, "writer lock poisoned"))?;
+                .map_err(|_| PtyxError::new(PtyxErrorKind::Error, "writer lock poisoned"))?;
             write_chunk(&mut *writer, &chunk, &write_context, &shared)
         })();
 
@@ -321,7 +316,7 @@ fn write_chunk(
         match writer.write(data) {
             Ok(0) => {
                 return Err(PtyxError::io(
-                    PTYX_STATUS_IO_FAILED,
+                    PtyxErrorKind::IoFailed,
                     std::io::Error::new(ErrorKind::WriteZero, "failed to write to PTY"),
                 ));
             }
@@ -330,20 +325,19 @@ fn write_chunk(
             Err(error) if error.kind() == ErrorKind::WouldBlock => {
                 if !context
                     .wait_writable_for(WRITE_RETRY_INTERVAL)
-                    .map_err(|error| map_write_error(error, PTYX_STATUS_IO_FAILED))?
+                    .map_err(|error| map_write_error(error, PtyxErrorKind::IoFailed))?
                 {
                     continue;
                 }
             }
-            Err(error) => return Err(map_write_error(error, PTYX_STATUS_IO_FAILED)),
+            Err(error) => return Err(map_write_error(error, PtyxErrorKind::IoFailed)),
         }
     }
     Ok(true)
 }
 
 #[cfg(unix)]
-fn write_fd_chunk(
-    fd: libc::c_int,
+fn write_direct_chunk(
     mut data: &[u8],
     context: &WriteRetryContext,
     queue: &WriteQueueShared,
@@ -352,49 +346,38 @@ fn write_fd_chunk(
         if queue.is_closed()? {
             return Ok(false);
         }
-        // `data` is borrowed for this call and the fd is owned by the session.
-        let result = unsafe { libc::write(fd, data.as_ptr().cast(), data.len()) };
-        if result > 0 {
-            data = &data[result as usize..];
-            continue;
-        }
-        if result == 0 {
-            return Err(PtyxError::io(
-                PTYX_STATUS_IO_FAILED,
-                std::io::Error::new(ErrorKind::WriteZero, "failed to write to PTY"),
-            ));
-        }
-
-        let error = std::io::Error::last_os_error();
-        match error.kind() {
-            ErrorKind::Interrupted => {}
-            ErrorKind::WouldBlock => {
+        match context
+            .write_direct(data)
+            .map_err(|error| map_write_error(error, PtyxErrorKind::IoFailed))?
+        {
+            DirectWriteResult::Wrote(n) => data = &data[n..],
+            DirectWriteResult::Interrupted => {}
+            DirectWriteResult::WouldBlock => {
                 if !context
                     .wait_writable_for(WRITE_RETRY_INTERVAL)
-                    .map_err(|error| map_write_error(error, PTYX_STATUS_IO_FAILED))?
+                    .map_err(|error| map_write_error(error, PtyxErrorKind::IoFailed))?
                 {
                     continue;
                 }
             }
-            _ => return Err(map_write_error(error, PTYX_STATUS_IO_FAILED)),
         }
     }
     Ok(true)
 }
 
 fn normalize_write_error(error: PtyxError) -> PtyxError {
-    if error.status == PTYX_STATUS_BROKEN_PIPE {
-        return PtyxError::new(PTYX_STATUS_CLOSED, error.message);
+    if error.kind == PtyxErrorKind::BrokenPipe {
+        return PtyxError::new(PtyxErrorKind::Closed, error.message);
     }
     error
 }
 
-fn map_write_error(error: std::io::Error, fallback: u32) -> PtyxError {
+fn map_write_error(error: std::io::Error, fallback: PtyxErrorKind) -> PtyxError {
     match error.kind() {
-        ErrorKind::BrokenPipe => PtyxError::new(PTYX_STATUS_BROKEN_PIPE, error.to_string()),
-        ErrorKind::WouldBlock => PtyxError::new(PTYX_STATUS_WOULD_BLOCK, error.to_string()),
+        ErrorKind::BrokenPipe => PtyxError::new(PtyxErrorKind::BrokenPipe, error.to_string()),
+        ErrorKind::WouldBlock => PtyxError::new(PtyxErrorKind::WouldBlock, error.to_string()),
         ErrorKind::PermissionDenied => {
-            PtyxError::new(crate::abi::PTYX_STATUS_PERMISSION_DENIED, error.to_string())
+            PtyxError::new(PtyxErrorKind::PermissionDenied, error.to_string())
         }
         _ => PtyxError::new(fallback, error.to_string()),
     }
@@ -402,15 +385,15 @@ fn map_write_error(error: std::io::Error, fallback: u32) -> PtyxError {
 
 fn record_failure(shared: &WriteQueueShared, event_port: i64, error: PtyxError) {
     shared.fail(error.clone()).ok();
-    post_error(event_port, PTYX_ERROR_SOURCE_WRITE, error);
+    post_error(event_port, ErrorSource::Write, error);
 }
 
 fn queue_full_error() -> PtyxError {
-    PtyxError::new(PTYX_STATUS_WOULD_BLOCK, "PTY write queue is full")
+    PtyxError::new(PtyxErrorKind::WouldBlock, "PTY write queue is full")
 }
 
 fn allocation_error() -> PtyxError {
-    PtyxError::new(PTYX_STATUS_OUT_OF_MEMORY, "failed to allocate write chunk")
+    PtyxError::new(PtyxErrorKind::OutOfMemory, "failed to allocate write chunk")
 }
 
 #[cfg(test)]
@@ -444,7 +427,7 @@ mod tests {
 
         let error = queue.enqueue_bytes(&[1, 2, 3]).unwrap_err();
 
-        assert_eq!(error.status, PTYX_STATUS_WOULD_BLOCK);
+        assert_eq!(error.kind, PtyxErrorKind::WouldBlock);
     }
 
     #[test]
@@ -454,7 +437,7 @@ mod tests {
 
         let error = queue.enqueue_bytes(&[3, 4]).unwrap_err();
 
-        assert_eq!(error.status, PTYX_STATUS_WOULD_BLOCK);
+        assert_eq!(error.kind, PtyxErrorKind::WouldBlock);
     }
 
     #[test]
@@ -464,18 +447,18 @@ mod tests {
 
         let error = queue.enqueue_bytes(&[1]).unwrap_err();
 
-        assert_eq!(error.status, PTYX_STATUS_CLOSED);
+        assert_eq!(error.kind, PtyxErrorKind::Closed);
     }
 
     #[test]
     fn queue_rejects_writes_after_failure() {
         let queue = WriteQueueShared::new(16);
         queue
-            .fail(PtyxError::new(PTYX_STATUS_IO_FAILED, "write failed"))
+            .fail(PtyxError::new(PtyxErrorKind::IoFailed, "write failed"))
             .unwrap();
 
         let error = queue.enqueue_bytes(&[1]).unwrap_err();
 
-        assert_eq!(error.status, PTYX_STATUS_IO_FAILED);
+        assert_eq!(error.kind, PtyxErrorKind::IoFailed);
     }
 }

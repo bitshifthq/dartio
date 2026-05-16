@@ -8,9 +8,10 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
-use crate::abi::{PTYX_ERROR_SOURCE_OUTPUT, PTYX_STATUS_CLOSED, PTYX_STATUS_ERROR};
-use crate::error::PtyxError;
-use crate::message::{post_error, post_output_closed, post_output_copied, post_output_external};
+use crate::error::{PtyxError, PtyxErrorKind};
+use crate::message::{
+    post_error, post_output_closed, post_output_copied, post_output_external, ErrorSource,
+};
 
 const IDLE_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const BACKPRESSURE_WAIT_INTERVAL: Duration = Duration::from_millis(10);
@@ -103,8 +104,7 @@ impl OutputBuffer {
                 Arc::clone(&self.external_bytes),
             )
         } else {
-            let posted =
-                post_output_copied(self.config.output_port, self.batch.as_ptr(), len as isize);
+            let posted = post_output_copied(self.config.output_port, self.batch.as_ptr(), len);
             if posted {
                 self.batch.clear();
             }
@@ -116,7 +116,10 @@ impl OutputBuffer {
             // does not wait for capacity the receiver can no longer
             // acknowledge.
             self.release_inflight(len as u64)?;
-            return Err(PtyxError::new(PTYX_STATUS_CLOSED, "failed to post output"));
+            return Err(PtyxError::new(
+                PtyxErrorKind::Closed,
+                "failed to post output",
+            ));
         }
 
         self.first_pending_at = None;
@@ -151,7 +154,7 @@ impl OutputBuffer {
     }
 
     pub(crate) fn post_error(&self, error: PtyxError) {
-        post_error(self.config.event_port, PTYX_ERROR_SOURCE_OUTPUT, error);
+        post_error(self.config.event_port, ErrorSource::Output, error);
     }
 
     fn wait_for_inflight_capacity(&self, stop: &AtomicBool) -> Result<bool, PtyxError> {
@@ -162,11 +165,14 @@ impl OutputBuffer {
         let (lock, cv) = &*self.inflight;
         let mut bytes = lock
             .lock()
-            .map_err(|_| PtyxError::new(PTYX_STATUS_ERROR, "inflight lock poisoned"))?;
+            .map_err(|_| PtyxError::new(PtyxErrorKind::Error, "inflight lock poisoned"))?;
         while *bytes >= self.config.max_inflight && !stop.load(Ordering::SeqCst) {
             let result = cv.wait_timeout(bytes, BACKPRESSURE_WAIT_INTERVAL);
             let Ok((guard, _)) = result else {
-                return Err(PtyxError::new(PTYX_STATUS_ERROR, "inflight lock poisoned"));
+                return Err(PtyxError::new(
+                    PtyxErrorKind::Error,
+                    "inflight lock poisoned",
+                ));
             };
             bytes = guard;
         }
@@ -181,7 +187,7 @@ impl OutputBuffer {
         let (lock, _) = &*self.inflight;
         let mut bytes = lock
             .lock()
-            .map_err(|_| PtyxError::new(PTYX_STATUS_ERROR, "inflight lock poisoned"))?;
+            .map_err(|_| PtyxError::new(PtyxErrorKind::Error, "inflight lock poisoned"))?;
         *bytes = bytes.saturating_add(len);
         Ok(())
     }
@@ -194,7 +200,7 @@ impl OutputBuffer {
         let (lock, cv) = &*self.inflight;
         let mut bytes = lock
             .lock()
-            .map_err(|_| PtyxError::new(PTYX_STATUS_ERROR, "inflight lock poisoned"))?;
+            .map_err(|_| PtyxError::new(PtyxErrorKind::Error, "inflight lock poisoned"))?;
         *bytes = bytes.saturating_sub(len);
         cv.notify_all();
         Ok(())
@@ -243,7 +249,7 @@ mod tests {
 
         output.append(b"abc", &stop).unwrap();
 
-        assert_eq!(output.flush(&stop).unwrap_err().status, PTYX_STATUS_CLOSED);
+        assert_eq!(output.flush(&stop).unwrap_err().kind, PtyxErrorKind::Closed);
         assert_eq!(*inflight.0.lock().unwrap(), 0);
     }
 }

@@ -3,29 +3,26 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn main() {
-    println!("cargo:rustc-check-cfg=cfg(ptyx_dart_dl)");
     println!("cargo:rerun-if-env-changed=PTYX_DART_SDK");
     println!("cargo:rerun-if-env-changed=DART_SDK");
 
-    let sdk = env::var("PTYX_DART_SDK")
-        .or_else(|_| env::var("DART_SDK"))
-        .ok()
-        .map(PathBuf::from)
-        .and_then(normalize_dart_sdk)
-        .or_else(resolve_dart_sdk);
+    let sdk = match resolve_configured_dart_sdk() {
+        Some(sdk) => sdk,
+        None => match resolve_dart_sdk() {
+            Some(sdk) => sdk,
+            None => missing_dart_sdk(),
+        },
+    };
+    let include = sdk.join("include");
+    require_file(&include.join("dart_api_dl.h"), "Dart DL header");
+    require_file(&include.join("dart_api_dl.c"), "Dart DL source");
 
-    if let Some(sdk) = sdk {
-        let include = sdk.join("include");
-        if include.join("dart_api_dl.h").exists() {
-            let mut build = cc::Build::new();
-            build.file(include.join("dart_api_dl.c"));
-            build.include(include);
-            build.warnings(false);
-            add_apple_sdk_sysroot(&mut build);
-            build.compile("ptyx_dart_api_dl");
-            println!("cargo:rustc-cfg=ptyx_dart_dl");
-        }
-    }
+    let mut build = cc::Build::new();
+    build.file(include.join("dart_api_dl.c"));
+    build.include(include);
+    build.warnings(false);
+    add_apple_sdk_sysroot(&mut build);
+    build.compile("ptyx_dart_api_dl");
 }
 
 fn add_apple_sdk_sysroot(build: &mut cc::Build) {
@@ -64,6 +61,12 @@ fn resolve_dart_sdk() -> Option<PathBuf> {
     normalize_dart_sdk(dart.parent()?.parent()?.to_path_buf())
 }
 
+fn resolve_configured_dart_sdk() -> Option<PathBuf> {
+    let path = env::var_os("PTYX_DART_SDK").or_else(|| env::var_os("DART_SDK"))?;
+    let path = PathBuf::from(path);
+    Some(normalize_dart_sdk(path.clone()).unwrap_or_else(|| invalid_dart_sdk(&path)))
+}
+
 fn normalize_dart_sdk(path: PathBuf) -> Option<PathBuf> {
     let candidates = [
         path.clone(),
@@ -88,4 +91,28 @@ fn which(name: &str) -> Option<PathBuf> {
 
 fn is_executable(path: &Path) -> bool {
     path.is_file()
+}
+
+fn require_file(path: &Path, label: &str) {
+    if !path.is_file() {
+        fail(format!("{label} not found at {}", path.display()));
+    }
+}
+
+fn invalid_dart_sdk(path: &Path) -> ! {
+    fail(format!(
+        "Dart SDK at {} does not contain include/dart_api_dl.h",
+        path.display()
+    ));
+}
+
+fn missing_dart_sdk() -> ! {
+    fail(
+        "Dart SDK include/dart_api_dl.h was not found. Set PTYX_DART_SDK or DART_SDK to a Dart SDK root, or make dart available on PATH.",
+    );
+}
+
+fn fail(message: impl AsRef<str>) -> ! {
+    eprintln!("error: {}", message.as_ref());
+    std::process::exit(1);
 }
