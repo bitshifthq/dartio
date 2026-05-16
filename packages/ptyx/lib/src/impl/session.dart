@@ -18,7 +18,7 @@ bool? _termModeFlag(int fields, int fieldBit, int value) {
 }
 
 @internal
-final class NativePtySession implements PtySession {
+final class NativeSession implements PtySession {
   final int _handle;
   final ReceivePort _eventPort;
   final ReceivePort _outputPort;
@@ -33,7 +33,7 @@ final class NativePtySession implements PtySession {
   var _outputCancelled = false;
   var _closed = false;
 
-  factory NativePtySession.spawn(PtySpawnOptions options) {
+  factory NativeSession.spawn(PtySpawnOptions options) {
     ensureDartInitialized();
 
     final outputPort = ReceivePort();
@@ -45,7 +45,7 @@ final class NativePtySession implements PtySession {
         eventPort: eventPort.sendPort.nativePort,
         outputPort: outputPort.sendPort.nativePort,
       );
-      return NativePtySession._(sessionHandle, outputPort, eventPort);
+      return NativeSession._(sessionHandle, outputPort, eventPort);
     } catch (_) {
       outputPort.close();
       eventPort.close();
@@ -53,7 +53,7 @@ final class NativePtySession implements PtySession {
     }
   }
 
-  NativePtySession._(this._handle, this._outputPort, this._eventPort)
+  NativeSession._(this._handle, this._outputPort, this._eventPort)
     : _outputController = StreamController<Uint8List>() {
     _outputController.onListen = _flushAcks;
     _outputController.onResume = _flushAcks;

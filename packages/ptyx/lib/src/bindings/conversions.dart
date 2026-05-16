@@ -4,20 +4,6 @@ import '../api/api.dart';
 import '../ffi/ptyx.g.dart' as native;
 
 @internal
-PtyTermMode ptyTermModeFromNative(native.term_mode value) {
-  final fields = value.valid_fields;
-  return PtyTermMode(
-    canonical: fields & native.PTYX_TERM_MODE_CANONICAL_VALID == 0
-        ? null
-        : value.canonical,
-    echo: fields & native.PTYX_TERM_MODE_ECHO_VALID == 0 ? null : value.echo,
-    signals: fields & native.PTYX_TERM_MODE_SIGNALS_VALID == 0
-        ? null
-        : value.signals,
-  );
-}
-
-@internal
 void setNativeSize(native.size target, PtySize source) {
   target.rows = source.rows;
   target.columns = source.columns;
@@ -34,7 +20,21 @@ PtySize sizeFromNative(native.size source) => PtySize(
 );
 
 @internal
-extension PtyEnvironmentModeNative on PtyEnvironmentMode {
+PtyTermMode termModeFromNative(native.term_mode value) {
+  final fields = value.valid_fields;
+  return PtyTermMode(
+    canonical: fields & native.PTYX_TERM_MODE_CANONICAL_VALID == 0
+        ? null
+        : value.canonical,
+    echo: fields & native.PTYX_TERM_MODE_ECHO_VALID == 0 ? null : value.echo,
+    signals: fields & native.PTYX_TERM_MODE_SIGNALS_VALID == 0
+        ? null
+        : value.signals,
+  );
+}
+
+@internal
+extension EnvironmentModeNative on PtyEnvironmentMode {
   int get nativeValue => switch (this) {
     .inherit => native.PTYX_ENV_INHERIT,
     .overlay => native.PTYX_ENV_OVERLAY,

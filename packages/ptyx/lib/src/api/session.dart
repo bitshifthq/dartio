@@ -32,9 +32,7 @@ abstract interface class PtySession {
   /// Starts a child process attached to a new pseudo terminal.
   ///
   /// Throws a [PtyException] if the process cannot be started.
-  factory PtySession.spawn(PtySpawnOptions options) {
-    return NativePtySession.spawn(options);
-  }
+  factory PtySession.spawn(PtySpawnOptions options) = NativeSession.spawn;
 
   /// Completes with the child process exit code when the child exits.
   ///

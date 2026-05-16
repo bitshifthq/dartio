@@ -6,7 +6,7 @@ import 'dart:typed_data';
 
 import 'package:meta/meta.dart';
 
-import '../impl/session.dart' show NativePtySession;
+import '../impl/session.dart' show NativeSession;
 
 part 'errors.dart';
 part 'options.dart';

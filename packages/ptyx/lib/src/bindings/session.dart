@@ -29,44 +29,13 @@ bool sessionKill(int sessionHandle, ProcessSignal signal) {
 }
 
 @internal
-int sessionSpawn({
-  required PtySpawnOptions options,
-  required int outputPort,
-  required int eventPort,
-}) {
-  return _withNativeSessionOptions(options, (nativeOptions, sessionOut) {
-    nativeOptions.ref.output_port = outputPort;
-    nativeOptions.ref.event_port = eventPort;
-
-    checkStatus(native.ptyx_spawn(nativeOptions, sessionOut));
-    return sessionOut.value.address;
-  });
-}
-
-@internal
-void sessionWrite(int sessionHandle, Uint8List data) {
-  if (data.isEmpty) return;
-  if (data.length >= _largeWriteThreshold) {
-    _sessionWriteOwned(sessionHandle, data);
-    return;
-  }
-  using((arena) {
-    final dataPtr = arena<Uint8>(data.length);
-    dataPtr.asTypedList(data.length).setAll(0, data);
-    checkStatus(
-      native.ptyx_write(.fromAddress(sessionHandle), dataPtr, data.length),
-    );
-  });
-}
-
-@internal
 PtyTermMode? sessionMode(int sessionHandle) {
   return using((arena) {
     final out = arena<native.term_mode>();
     final status = native.ptyx_get_term_mode(.fromAddress(sessionHandle), out);
     if (isUnsupportedStatus(status)) return null;
     checkStatus(status);
-    return ptyTermModeFromNative(out.ref);
+    return termModeFromNative(out.ref);
   });
 }
 
@@ -102,6 +71,21 @@ PtySize sessionSize(int sessionHandle) {
 }
 
 @internal
+int sessionSpawn({
+  required PtySpawnOptions options,
+  required int outputPort,
+  required int eventPort,
+}) {
+  return _withNativeSessionOptions(options, (nativeOptions, sessionOut) {
+    nativeOptions.ref.output_port = outputPort;
+    nativeOptions.ref.event_port = eventPort;
+
+    checkStatus(native.ptyx_spawn(nativeOptions, sessionOut));
+    return sessionOut.value.address;
+  });
+}
+
+@internal
 String? sessionTtyName(int sessionHandle) {
   return using((arena) {
     final len = arena<Size>();
@@ -121,6 +105,22 @@ String? sessionTtyName(int sessionHandle) {
     status = native.ptyx_get_tty_name(.fromAddress(sessionHandle), buffer, len);
     checkStatus(status);
     return buffer.cast<Utf8>().toDartString(length: len.value);
+  });
+}
+
+@internal
+void sessionWrite(int sessionHandle, Uint8List data) {
+  if (data.isEmpty) return;
+  if (data.length >= _largeWriteThreshold) {
+    _sessionWriteOwned(sessionHandle, data);
+    return;
+  }
+  using((arena) {
+    final dataPtr = arena<Uint8>(data.length);
+    dataPtr.asTypedList(data.length).setAll(0, data);
+    checkStatus(
+      native.ptyx_write(.fromAddress(sessionHandle), dataPtr, data.length),
+    );
   });
 }
 
