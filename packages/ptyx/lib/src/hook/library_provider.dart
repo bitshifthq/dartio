@@ -5,9 +5,28 @@ import 'package:crypto/crypto.dart';
 import 'package:hooks/hooks.dart';
 import 'package:meta/meta.dart';
 
+import 'android_ndk.dart';
 import 'asset_hashes.dart';
 import 'cargo_target.dart';
 import 'dart_sdk.dart';
+
+@visibleForTesting
+@internal
+Map<String, String> androidToolchainEnvironment(
+  BuildInput input, {
+  Map<String, String>? environment,
+}) {
+  if (input.config.code.targetOS != .android) return const {};
+
+  final cargoTarget = input.cargoTargetTriple();
+  if (cargoTarget == null) return const {};
+
+  return androidCargoToolchainEnvironment(
+    cargoTarget: cargoTarget,
+    architecture: input.config.code.targetArchitecture,
+    environment: environment,
+  );
+}
 
 @visibleForTesting
 @internal
@@ -91,6 +110,7 @@ final class CompileFromSource extends LibraryProvider {
 
     final env = Map<String, String>.of(Platform.environment)
       ..['PTYX_DART_SDK'] = dartSdk.path;
+    env.addAll(androidToolchainEnvironment(input, environment: env));
 
     final result = Process.runSync('cargo', args, environment: env);
     if (result.exitCode != 0) {

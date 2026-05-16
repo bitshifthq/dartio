@@ -4,7 +4,7 @@
 //! are enabled, each posted byte is counted as in flight until the receiver
 //! reports that it has drained or discarded the chunk.
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
@@ -32,7 +32,7 @@ pub(crate) struct OutputConfig {
 pub(crate) struct OutputBuffer {
     config: OutputConfig,
     inflight: Arc<(Mutex<u64>, Condvar)>,
-    external_bytes: Arc<AtomicU64>,
+    external_bytes: Arc<AtomicUsize>,
     batch: Vec<u8>,
     first_pending_at: Option<Instant>,
 }
@@ -41,7 +41,7 @@ impl OutputBuffer {
     pub(crate) fn new(
         config: OutputConfig,
         inflight: Arc<(Mutex<u64>, Condvar)>,
-        external_bytes: Arc<AtomicU64>,
+        external_bytes: Arc<AtomicUsize>,
     ) -> Self {
         Self {
             config,
@@ -201,7 +201,11 @@ impl OutputBuffer {
     }
 }
 
-fn reserve_external_bytes(bytes: &AtomicU64, max: u64, len: u64) -> bool {
+fn reserve_external_bytes(bytes: &AtomicUsize, max: u64, len: u64) -> bool {
+    let Ok(len) = usize::try_from(len) else {
+        return false;
+    };
+    let max = usize::try_from(max).unwrap_or(usize::MAX);
     if len == 0 || len > max {
         return false;
     }
@@ -233,7 +237,7 @@ mod tests {
     #[test]
     fn flush_rolls_back_reserved_inflight_bytes_when_post_fails() {
         let inflight = Arc::new((Mutex::new(0), Condvar::new()));
-        let external_bytes = Arc::new(AtomicU64::new(0));
+        let external_bytes = Arc::new(AtomicUsize::new(0));
         let stop = AtomicBool::new(false);
         let mut output = OutputBuffer::new(config(true), Arc::clone(&inflight), external_bytes);
 

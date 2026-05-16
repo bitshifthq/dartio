@@ -6,7 +6,7 @@
 
 use std::ffi::CString;
 use std::os::raw::{c_char, c_void};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use crate::abi::{
@@ -40,14 +40,14 @@ pub(crate) fn post_output_copied(port: i64, data: *const u8, len: isize) -> bool
 #[cfg(ptyx_dart_dl)]
 struct ExternalOutputPeer {
     bytes: Vec<u8>,
-    outstanding: Arc<AtomicU64>,
+    outstanding: Arc<AtomicUsize>,
 }
 
 #[cfg(ptyx_dart_dl)]
 impl Drop for ExternalOutputPeer {
     fn drop(&mut self) {
         self.outstanding
-            .fetch_sub(self.bytes.len() as u64, Ordering::AcqRel);
+            .fetch_sub(self.bytes.len(), Ordering::AcqRel);
     }
 }
 
@@ -62,7 +62,11 @@ extern "C" fn external_output_finalizer(_isolate_data: *mut c_void, peer: *mut c
 }
 
 #[cfg(ptyx_dart_dl)]
-pub(crate) fn post_output_external(port: i64, bytes: Vec<u8>, outstanding: Arc<AtomicU64>) -> bool {
+pub(crate) fn post_output_external(
+    port: i64,
+    bytes: Vec<u8>,
+    outstanding: Arc<AtomicUsize>,
+) -> bool {
     let len = bytes.len();
     let mut peer = Box::new(ExternalOutputPeer { bytes, outstanding });
     let data = peer.bytes.as_mut_ptr();
@@ -86,9 +90,9 @@ pub(crate) fn post_output_external(port: i64, bytes: Vec<u8>, outstanding: Arc<A
 pub(crate) fn post_output_external(
     _port: i64,
     bytes: Vec<u8>,
-    outstanding: Arc<AtomicU64>,
+    outstanding: Arc<AtomicUsize>,
 ) -> bool {
-    outstanding.fetch_sub(bytes.len() as u64, Ordering::AcqRel);
+    outstanding.fetch_sub(bytes.len(), Ordering::AcqRel);
     false
 }
 

@@ -5,7 +5,7 @@
 //! provided by the PTY backend.
 
 use std::io::{ErrorKind, Read};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
 use crate::abi::{PTYX_STATUS_ERROR, PTYX_STATUS_IO_FAILED};
@@ -19,7 +19,7 @@ pub(crate) fn run(
     inner: Arc<SessionInner>,
     stop: Arc<AtomicBool>,
     inflight: Arc<(Mutex<u64>, Condvar)>,
-    external_bytes: Arc<AtomicU64>,
+    external_bytes: Arc<AtomicUsize>,
     config: OutputConfig,
 ) {
     let mut output = OutputBuffer::new(config, inflight, external_bytes);

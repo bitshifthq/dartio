@@ -6,6 +6,7 @@ import 'package:ptyx/src/hook/library_provider.dart'
         CompileFromSource,
         DownloadPrebuilt,
         LibraryProvider,
+        androidToolchainEnvironment,
         cargoBuildDirectory,
         libraryExtension;
 import 'package:test/test.dart';
@@ -42,23 +43,26 @@ void main() {
     }
 
     group('resolve', () {
-      test('returns the requested provider', () {
-        final providers = [
-          LibraryProvider.resolve(createBuildInput()),
-          LibraryProvider.resolve(
-            createBuildInput(userDefines: {'source': 'compile'}),
-          ),
-          LibraryProvider.resolve(
-            createBuildInput(userDefines: {'source': 'prebuilt'}),
-          ),
-        ];
-        final providerTypes = (
-          auto: providers[0] is AutoProvider,
-          compile: providers[1] is CompileFromSource,
-          prebuilt: providers[2] is DownloadPrebuilt,
+      test('returns AutoProvider by default', () {
+        final provider = LibraryProvider.resolve(createBuildInput());
+
+        expect(provider, isA<AutoProvider>());
+      });
+
+      test('returns CompileFromSource for compile source', () {
+        final provider = LibraryProvider.resolve(
+          createBuildInput(userDefines: {'source': 'compile'}),
         );
 
-        expect(providerTypes, (auto: true, compile: true, prebuilt: true));
+        expect(provider, isA<CompileFromSource>());
+      });
+
+      test('returns DownloadPrebuilt for prebuilt source', () {
+        final provider = LibraryProvider.resolve(
+          createBuildInput(userDefines: {'source': 'prebuilt'}),
+        );
+
+        expect(provider, isA<DownloadPrebuilt>());
       });
 
       test('throws ArgumentError for unknown source values', () {
@@ -92,6 +96,14 @@ void main() {
           directory.uri.pathSegments,
           containsAllInOrder(['shared', 'cargo', 'aarch64-macos']),
         );
+      });
+    });
+
+    group('androidToolchainEnvironment', () {
+      test('returns empty environment for non-Android targets', () {
+        final environment = androidToolchainEnvironment(createBuildInput());
+
+        expect(environment, isEmpty);
       });
     });
   });

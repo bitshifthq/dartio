@@ -5,7 +5,7 @@
 //! a shared stop flag so close can interrupt backpressure waits and polling.
 
 use std::os::raw::c_void;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -306,7 +306,7 @@ fn start_runtime(session: &ptyx_session, options: ptyx_session_options_t) -> Res
 
     let stop = Arc::new(AtomicBool::new(false));
     let inflight = Arc::new((Mutex::new(0_u64), Condvar::new()));
-    let external_bytes = Arc::new(AtomicU64::new(0));
+    let external_bytes = Arc::new(AtomicUsize::new(0));
     let config = RuntimeConfig::from_options(options);
 
     let inner = Arc::clone(&session.inner);
