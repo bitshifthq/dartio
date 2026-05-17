@@ -8,6 +8,7 @@ use crate::config::{EnvironmentMode, SpawnConfig};
 use crate::error::{PtyxError, PtyxErrorKind};
 use portable_pty::{Child, ChildKiller, ExitStatus};
 use std::ffi::{CStr, CString, OsString};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 
 const MONITOR_PID: u8 = 1;
@@ -47,8 +48,8 @@ pub(crate) fn spawn(
     unsafe {
         libc::close(events[1]);
     }
-    let events = Fd(events[0]);
-    let message = match read_message(events.0, PtyxErrorKind::SpawnFailed) {
+    let events = Fd(unsafe { OwnedFd::from_raw_fd(events[0]) });
+    let message = match read_message(events.raw(), PtyxErrorKind::SpawnFailed) {
         Ok(message) => message,
         Err(error) => {
             reap_pid(monitor_pid);
@@ -185,13 +186,11 @@ struct MonitorMessage {
 }
 
 #[derive(Debug)]
-struct Fd(libc::c_int);
+struct Fd(OwnedFd);
 
-impl Drop for Fd {
-    fn drop(&mut self) {
-        unsafe {
-            libc::close(self.0);
-        }
+impl Fd {
+    fn raw(&self) -> RawFd {
+        self.0.as_raw_fd()
     }
 }
 
@@ -209,7 +208,7 @@ impl Child for SupervisedChild {
             return Ok(Some(status.clone()));
         }
         let mut pollfd = libc::pollfd {
-            fd: self.events.0,
+            fd: self.events.raw(),
             events: libc::POLLIN | libc::POLLHUP,
             revents: 0,
         };
@@ -249,7 +248,7 @@ impl ChildKiller for SupervisedChild {
 impl SupervisedChild {
     fn read_exit_status(&mut self) -> std::io::Result<ExitStatus> {
         loop {
-            let message = read_message(self.events.0, PtyxErrorKind::WaitFailed)
+            let message = read_message(self.events.raw(), PtyxErrorKind::WaitFailed)
                 .map_err(|error| std::io::Error::other(error.message))?;
             if message.tag == MONITOR_EXIT {
                 let status = ExitStatus::with_exit_code(message.value as u32);
@@ -302,7 +301,7 @@ fn reap_pid(pid: libc::pid_t) {
     }
 }
 
-fn read_message(fd: libc::c_int, kind: PtyxErrorKind) -> Result<MonitorMessage, PtyxError> {
+fn read_message(fd: RawFd, kind: PtyxErrorKind) -> Result<MonitorMessage, PtyxError> {
     let mut buffer = [0_u8; 8];
     read_exact_fd(fd, &mut buffer).map_err(|error| PtyxError::io(kind, error))?;
     Ok(MonitorMessage {
@@ -311,7 +310,7 @@ fn read_message(fd: libc::c_int, kind: PtyxErrorKind) -> Result<MonitorMessage, 
     })
 }
 
-fn read_exact_fd(fd: libc::c_int, buffer: &mut [u8]) -> std::io::Result<()> {
+fn read_exact_fd(fd: RawFd, buffer: &mut [u8]) -> std::io::Result<()> {
     let mut offset = 0;
     while offset < buffer.len() {
         let result = unsafe {

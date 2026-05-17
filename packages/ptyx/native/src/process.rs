@@ -14,6 +14,8 @@ use portable_pty::{Child, SlavePty};
 use std::ffi::CStr;
 #[cfg(not(target_os = "linux"))]
 use std::ffi::OsString;
+#[cfg(target_os = "macos")]
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::sync::{Condvar, Mutex};
 use std::thread;
 
@@ -66,7 +68,7 @@ impl WaitState {
 
 #[cfg(target_os = "macos")]
 pub(crate) struct ExitWatcher {
-    kqueue: libc::c_int,
+    kqueue: OwnedFd,
 }
 
 #[cfg(target_os = "macos")]
@@ -81,6 +83,7 @@ impl ExitWatcher {
                 std::io::Error::last_os_error(),
             ));
         }
+        let kqueue = unsafe { OwnedFd::from_raw_fd(kqueue) };
 
         let event = libc::kevent {
             ident: pid as libc::uintptr_t,
@@ -91,12 +94,18 @@ impl ExitWatcher {
             udata: std::ptr::null_mut(),
         };
         // `event` is a fully initialized registration for this child PID.
-        let result =
-            unsafe { libc::kevent(kqueue, &event, 1, std::ptr::null_mut(), 0, std::ptr::null()) };
+        let result = unsafe {
+            libc::kevent(
+                kqueue.as_raw_fd(),
+                &event,
+                1,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null(),
+            )
+        };
         if result < 0 {
             let error = std::io::Error::last_os_error();
-            // Registration failed, so close the kqueue before returning.
-            unsafe { libc::close(kqueue) };
             return Err(PtyxError::io(PtyxErrorKind::NativeError, error));
         }
 
@@ -108,7 +117,7 @@ impl ExitWatcher {
         let mut event: libc::kevent = unsafe { std::mem::zeroed() };
         let result = unsafe {
             libc::kevent(
-                self.kqueue,
+                self.kqueue.as_raw_fd(),
                 std::ptr::null(),
                 0,
                 &mut event,
@@ -123,14 +132,6 @@ impl ExitWatcher {
             ));
         }
         Ok(exit_code_from_wait_status(event.data as libc::c_int))
-    }
-}
-
-#[cfg(target_os = "macos")]
-impl Drop for ExitWatcher {
-    fn drop(&mut self) {
-        // The kqueue is owned by this watcher.
-        unsafe { libc::close(self.kqueue) };
     }
 }
 

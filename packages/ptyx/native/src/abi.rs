@@ -666,18 +666,18 @@ pub(crate) fn fill_string(
         ));
     }
     let bytes = value.to_bytes();
-    // Callers pass a valid in/out length pointer. The required length is
-    // reported even when the destination buffer is too small.
+    let required_len = bytes.len() + 1;
+    // The required length includes the trailing NUL so callers can reuse the
+    // reported size as the next call's capacity.
     let capacity = unsafe { *inout_len };
-    unsafe { *inout_len = bytes.len() };
-    if buffer.is_null() || capacity <= bytes.len() {
+    unsafe { *inout_len = required_len };
+    if buffer.is_null() || capacity < required_len {
         return Err(PtyxError::new(
             PtyxErrorKind::BufferTooSmall,
             "buffer is too small",
         ));
     }
     unsafe {
-        // The capacity check above leaves room for the trailing NUL byte.
         ptr::copy_nonoverlapping(bytes.as_ptr(), buffer.cast::<u8>(), bytes.len());
         *buffer.add(bytes.len()) = 0;
     }
@@ -832,6 +832,31 @@ mod tests {
             .unwrap();
 
         assert_eq!(error.kind, PtyxErrorKind::InvalidArgument);
+    }
+
+    #[test]
+    fn fill_string_reports_required_length_with_terminator() {
+        let value = CString::new("tty").unwrap();
+        let mut length = 0;
+
+        let error = fill_string(value.as_c_str(), ptr::null_mut(), &mut length)
+            .err()
+            .unwrap();
+
+        assert_eq!(error.kind, PtyxErrorKind::BufferTooSmall);
+        assert_eq!(length, 4);
+    }
+
+    #[test]
+    fn fill_string_writes_nul_terminated_text() {
+        let value = CString::new("tty").unwrap();
+        let mut length = 4;
+        let mut buffer = [0 as c_char; 4];
+
+        fill_string(value.as_c_str(), buffer.as_mut_ptr(), &mut length).unwrap();
+
+        assert_eq!(length, 4);
+        assert_eq!(unsafe { CStr::from_ptr(buffer.as_ptr()) }, value.as_c_str());
     }
 
     #[test]

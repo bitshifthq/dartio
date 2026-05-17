@@ -99,12 +99,10 @@ String? sessionTtyName(int sessionHandle) {
       checkStatus(status);
     }
 
-    final buffer = arena<Char>(len.value + 1);
-    final capacity = len.value + 1;
-    len.value = capacity;
+    final buffer = arena<Char>(len.value);
     status = native.ptyx_get_tty_name(.fromAddress(sessionHandle), buffer, len);
     checkStatus(status);
-    return buffer.cast<Utf8>().toDartString(length: len.value);
+    return buffer.cast<Utf8>().toDartString(length: len.value - 1);
   });
 }
 
