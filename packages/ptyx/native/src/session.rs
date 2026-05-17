@@ -5,18 +5,20 @@
 
 #[cfg(not(unix))]
 use portable_pty::ChildKiller;
-use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
-use std::ffi::{CStr, CString, OsString};
+use portable_pty::{native_pty_system, Child, MasterPty, PtySize};
+use std::ffi::{CStr, CString};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
 
-use crate::config::{EnvironmentMode, SpawnConfig};
+use crate::config::SpawnConfig;
 use crate::error::{PtyxError, PtyxErrorKind};
 use crate::runtime::SessionRuntime;
 
 pub(crate) struct Session {
     pub(crate) inner: Arc<SessionInner>,
     pub(crate) runtime: Mutex<Option<SessionRuntime>>,
+    pub(crate) child_waiter: Mutex<Option<JoinHandle<()>>>,
 }
 
 /// Shared process and PTY handles used by runtime threads.
@@ -32,7 +34,7 @@ pub(crate) struct SessionInner {
     pub(crate) killer: Mutex<Box<dyn ChildKiller + Send + Sync>>,
     #[cfg(target_os = "macos")]
     pub(crate) exit_watcher: Option<crate::process::ExitWatcher>,
-    pub(crate) wait_cache: Mutex<Option<i32>>,
+    pub(crate) wait_state: crate::process::WaitState,
     pub(crate) read_busy: AtomicBool,
     pub(crate) write_busy: AtomicBool,
     pub(crate) closed: AtomicBool,
@@ -66,60 +68,11 @@ impl Drop for BusyGuard<'_> {
     }
 }
 
-impl SpawnConfig {
-    fn command(&self) -> Result<CommandBuilder, PtyxError> {
-        let mut command = CommandBuilder::new(&self.executable);
-        command.args(self.argv.iter().cloned());
-        if !self.cwd.is_empty() {
-            command.cwd(&self.cwd);
-        }
-        apply_env(&mut command, self.env_mode, &self.env_items)?;
-        Ok(command)
-    }
-}
-
-fn apply_env(
-    command: &mut CommandBuilder,
-    mode: EnvironmentMode,
-    items: &[OsString],
-) -> Result<(), PtyxError> {
-    match mode {
-        EnvironmentMode::Inherit => return Ok(()),
-        EnvironmentMode::Overlay => {}
-        EnvironmentMode::Replace | EnvironmentMode::Clear => command.env_clear(),
-    }
-    if mode == EnvironmentMode::Clear {
-        return Ok(());
-    }
-    for item in items {
-        let text = item.to_string_lossy();
-        let Some((key, value)) = text.split_once('=') else {
-            return Err(PtyxError::new(
-                PtyxErrorKind::InvalidArgument,
-                "environment entry must be KEY=VALUE",
-            ));
-        };
-        if key.is_empty() {
-            return Err(PtyxError::new(
-                PtyxErrorKind::InvalidArgument,
-                "environment key must not be empty",
-            ));
-        }
-        if text.contains('\0') {
-            return Err(PtyxError::new(
-                PtyxErrorKind::InvalidArgument,
-                "environment key and value must not contain NUL",
-            ));
-        }
-        command.env(key, value);
-    }
-    Ok(())
-}
-
 pub(crate) fn close(session: &Session) {
     session.inner.closed.store(true, Ordering::SeqCst);
     crate::process::kill(session.inner.as_ref(), crate::process::force_kill_signal()).ok();
     crate::runtime::close_runtime(session).ok();
+    crate::process::join_exit_waiter(session).ok();
 }
 
 pub(crate) fn resize(session: &Session, size: PtySize) -> Result<(), PtyxError> {
@@ -170,22 +123,10 @@ pub(crate) fn kill(session: &Session, signal: i32) -> bool {
 }
 
 pub(crate) fn spawn(config: SpawnConfig) -> Result<Box<Session>, PtyxError> {
-    crate::process::ensure_child_exit_status_is_waitable();
     let pty_system = native_pty_system();
     let pair = pty_system
         .openpty(config.size)
         .map_err(|e| PtyxError::io(PtyxErrorKind::SpawnFailed, e))?;
-    let cmd = config.command()?;
-
-    let child = pair
-        .slave
-        .spawn_command(cmd)
-        .map_err(|e| PtyxError::io(PtyxErrorKind::SpawnFailed, e))?;
-    let child_pid = child.process_id();
-    #[cfg(target_os = "macos")]
-    let exit_watcher = child_pid.and_then(|pid| crate::process::ExitWatcher::new(pid).ok());
-    #[cfg(not(unix))]
-    let killer = child.clone_killer();
     let reader = pair
         .master
         .try_clone_reader()
@@ -203,6 +144,13 @@ pub(crate) fn spawn(config: SpawnConfig) -> Result<Box<Session>, PtyxError> {
     #[cfg(not(unix))]
     let tty_name = None;
 
+    let child = crate::process::spawn_child(&config, pair.slave.as_ref(), tty_name.as_deref())?;
+    let child_pid = child.process_id();
+    #[cfg(target_os = "macos")]
+    let exit_watcher = child_pid.and_then(|pid| crate::process::ExitWatcher::new(pid).ok());
+    #[cfg(not(unix))]
+    let killer = child.clone_killer();
+
     let inner = SessionInner {
         master: Mutex::new(pair.master),
         reader: Mutex::new(reader),
@@ -212,7 +160,7 @@ pub(crate) fn spawn(config: SpawnConfig) -> Result<Box<Session>, PtyxError> {
         killer: Mutex::new(killer),
         #[cfg(target_os = "macos")]
         exit_watcher,
-        wait_cache: Mutex::new(None),
+        wait_state: crate::process::WaitState::new(),
         read_busy: AtomicBool::new(false),
         write_busy: AtomicBool::new(false),
         closed: AtomicBool::new(false),
@@ -220,48 +168,26 @@ pub(crate) fn spawn(config: SpawnConfig) -> Result<Box<Session>, PtyxError> {
         tty_name,
     };
 
-    Ok(Box::new(Session {
+    let session = Box::new(Session {
         inner: Arc::new(inner),
         runtime: Mutex::new(None),
-    }))
+        child_waiter: Mutex::new(None),
+    });
+    if let Err(error) = crate::process::start_exit_waiter(&session) {
+        close(&session);
+        return Err(error);
+    }
+    Ok(session)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::EnvironmentMode;
+    use std::ffi::OsString;
     use std::io::Read;
     use std::thread;
     use std::time::Duration;
-
-    #[test]
-    fn environment_entries_reject_missing_separator() {
-        let mut command = CommandBuilder::new("/usr/bin/env");
-        let items = [OsString::from("INVALID")];
-
-        let error = apply_env(&mut command, EnvironmentMode::Overlay, &items).unwrap_err();
-
-        assert_eq!(error.kind, PtyxErrorKind::InvalidArgument);
-    }
-
-    #[test]
-    fn environment_entries_reject_empty_key() {
-        let mut command = CommandBuilder::new("/usr/bin/env");
-        let items = [OsString::from("=value")];
-
-        let error = apply_env(&mut command, EnvironmentMode::Overlay, &items).unwrap_err();
-
-        assert_eq!(error.kind, PtyxErrorKind::InvalidArgument);
-    }
-
-    #[test]
-    fn environment_entries_reject_nul_value() {
-        let mut command = CommandBuilder::new("/usr/bin/env");
-        let items = [OsString::from("INVALID=bad\0value")];
-
-        let error = apply_env(&mut command, EnvironmentMode::Overlay, &items).unwrap_err();
-
-        assert_eq!(error.kind, PtyxErrorKind::InvalidArgument);
-    }
 
     #[cfg(unix)]
     #[test]

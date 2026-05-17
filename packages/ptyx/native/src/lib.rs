@@ -13,6 +13,8 @@ mod message;
 mod output;
 mod owned_buffer;
 mod process;
+#[cfg(target_os = "linux")]
+mod process_linux;
 mod reader;
 mod runtime;
 mod session;
