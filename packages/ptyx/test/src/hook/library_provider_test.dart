@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:code_assets/code_assets.dart' show Architecture, OS;
 import 'package:hooks/hooks.dart' show BuildInput;
 import 'package:ptyx/src/hook/library_provider.dart'
@@ -18,11 +20,14 @@ void main() {
       Architecture architecture = .arm64,
       Map<String, String> userDefines = const {},
     }) {
+      final tmp = Directory.systemTemp.createTempSync('ptyx_hook_test_');
+      addTearDown(() => tmp.deleteSync(recursive: true));
+
       return BuildInput(<String, Object?>{
         'package_name': 'ptyx',
         'package_root': '.',
-        'out_dir': 'out',
-        'out_dir_shared': 'shared',
+        'out_dir': '${tmp.path}/out',
+        'out_dir_shared': '${tmp.path}/shared',
         'user_defines': <String, Object?>{
           'workspace_pubspec': <String, Object?>{
             'base_path': '.',
