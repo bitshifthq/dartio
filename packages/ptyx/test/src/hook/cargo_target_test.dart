@@ -7,7 +7,7 @@ import 'package:ptyx/src/hook/cargo_target.dart'
 import 'package:test/test.dart';
 
 void main() {
-  group('cargoTarget', () {
+  group('cargo target', () {
     BuildInput createBuildInput({
       OS os = .macOS,
       Architecture architecture = .arm64,
@@ -52,6 +52,29 @@ void main() {
           'aarch64-linux-android',
         ]);
       });
+
+      test('throws ArgumentError for unsupported targets', () {
+        expect(
+          () => cargoTarget(.iOS, .arm64),
+          throwsA(
+            isA<ArgumentError>().having(
+              (error) => error.message,
+              'message',
+              contains('Unsupported OS'),
+            ),
+          ),
+        );
+        expect(
+          () => cargoTarget(.android, .ia32),
+          throwsA(
+            isA<ArgumentError>().having(
+              (error) => error.message,
+              'message',
+              contains('Unsupported Android architecture'),
+            ),
+          ),
+        );
+      });
     });
 
     group('artifactTarget', () {
@@ -69,6 +92,29 @@ void main() {
           'x86_64-windows',
           'aarch64-linux-android',
         ]);
+      });
+
+      test('throws ArgumentError for unsupported targets', () {
+        expect(
+          () => artifactTarget(.iOS, .arm64),
+          throwsA(
+            isA<ArgumentError>().having(
+              (error) => error.message,
+              'message',
+              contains('Unsupported OS'),
+            ),
+          ),
+        );
+        expect(
+          () => artifactTarget(.android, .ia32),
+          throwsA(
+            isA<ArgumentError>().having(
+              (error) => error.message,
+              'message',
+              contains('Unsupported Android architecture'),
+            ),
+          ),
+        );
       });
     });
 

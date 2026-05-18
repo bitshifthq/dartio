@@ -48,26 +48,22 @@ void main() {
     }
 
     group('resolve', () {
-      test('returns AutoProvider by default', () {
-        final provider = LibraryProvider.resolve(createBuildInput());
+      test('maps source modes to providers', () {
+        final providers = [
+          LibraryProvider.resolve(createBuildInput()),
+          LibraryProvider.resolve(
+            createBuildInput(userDefines: {'source': 'compile'}),
+          ),
+          LibraryProvider.resolve(
+            createBuildInput(userDefines: {'source': 'prebuilt'}),
+          ),
+        ];
 
-        expect(provider, isA<AutoProvider>());
-      });
-
-      test('returns CompileFromSource for compile source', () {
-        final provider = LibraryProvider.resolve(
-          createBuildInput(userDefines: {'source': 'compile'}),
-        );
-
-        expect(provider, isA<CompileFromSource>());
-      });
-
-      test('returns DownloadPrebuilt for prebuilt source', () {
-        final provider = LibraryProvider.resolve(
-          createBuildInput(userDefines: {'source': 'prebuilt'}),
-        );
-
-        expect(provider, isA<DownloadPrebuilt>());
+        expect(providers, [
+          isA<AutoProvider>(),
+          isA<CompileFromSource>(),
+          isA<DownloadPrebuilt>(),
+        ]);
       });
 
       test('throws ArgumentError for unknown source values', () {
@@ -75,7 +71,13 @@ void main() {
 
         expect(
           () => LibraryProvider.resolve(input),
-          throwsA(isA<ArgumentError>()),
+          throwsA(
+            isA<ArgumentError>().having(
+              (error) => error.message,
+              'message',
+              contains('Invalid source: magic'),
+            ),
+          ),
         );
       });
     });

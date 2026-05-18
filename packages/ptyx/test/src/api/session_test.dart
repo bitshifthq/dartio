@@ -301,21 +301,21 @@ void main() {
       }
 
       test('applies each environment mode', () async {
-        final overlay = await environmentText(
-          environment: {'PTYX_OVERLAY_TEST': 'overlay'},
-        );
-        final inherit = await environmentText(
-          environment: {'PTYX_INHERIT_IGNORED_TEST': 'ignored'},
-          environmentMode: PtyEnvironmentMode.inherit,
-        );
-        final replace = await environmentText(
-          environment: {'PTYX_REPLACE_TEST': 'replace'},
-          environmentMode: PtyEnvironmentMode.replace,
-        );
-        final clear = await environmentText(
-          environment: {'PTYX_CLEAR_IGNORED_TEST': 'ignored'},
-          environmentMode: PtyEnvironmentMode.clear,
-        );
+        final [overlay, inherit, replace, clear] = await Future.wait([
+          environmentText(environment: {'PTYX_OVERLAY_TEST': 'overlay'}),
+          environmentText(
+            environment: {'PTYX_INHERIT_IGNORED_TEST': 'ignored'},
+            environmentMode: PtyEnvironmentMode.inherit,
+          ),
+          environmentText(
+            environment: {'PTYX_REPLACE_TEST': 'replace'},
+            environmentMode: PtyEnvironmentMode.replace,
+          ),
+          environmentText(
+            environment: {'PTYX_CLEAR_IGNORED_TEST': 'ignored'},
+            environmentMode: PtyEnvironmentMode.clear,
+          ),
+        ]);
 
         final modes = (
           overlay: overlay.contains('PTYX_OVERLAY_TEST=overlay'),
