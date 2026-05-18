@@ -7,7 +7,9 @@
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(unix)]
+use std::time::Instant;
 
 use crate::config::{RuntimeConfig, SessionOptions};
 use crate::error::{PtyxError, PtyxErrorKind};
@@ -20,6 +22,7 @@ use crate::term_mode::{term_mode_snapshot, TermMode};
 
 use crate::writer::WriteQueue;
 
+#[cfg(unix)]
 const INTERRUPTIBLE_SLEEP_STEP: Duration = Duration::from_millis(10);
 
 pub(crate) struct SessionRuntime {
@@ -282,6 +285,7 @@ fn mode_loop(inner: Arc<SessionInner>, stop: Arc<AtomicBool>, interval: Duration
     }
 }
 
+#[cfg(unix)]
 fn sleep_interruptibly(stop: &AtomicBool, duration: Duration) {
     let deadline = Instant::now() + duration;
     while !stop.load(Ordering::SeqCst) {

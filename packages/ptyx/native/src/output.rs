@@ -13,6 +13,7 @@ use crate::message::{
     post_error, post_output_closed, post_output_copied, post_output_external, ErrorSource,
 };
 
+#[cfg(unix)]
 const IDLE_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const BACKPRESSURE_WAIT_INTERVAL: Duration = Duration::from_millis(10);
 
@@ -126,6 +127,7 @@ impl OutputBuffer {
         Ok(())
     }
 
+    #[cfg(unix)]
     pub(crate) fn poll_timeout(&self) -> Option<Duration> {
         Some(
             self.first_pending_at

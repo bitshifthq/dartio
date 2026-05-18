@@ -70,11 +70,13 @@ pub(crate) const PTYX_MESSAGE_CLOSED: i64 = 2;
 
 pub(crate) const PTYX_EVENT_EXIT: i64 = 1;
 pub(crate) const PTYX_EVENT_ERROR: i64 = 2;
+#[cfg(unix)]
 pub(crate) const PTYX_EVENT_TERM_MODE: i64 = 3;
 
 pub(crate) const PTYX_ERROR_SOURCE_OUTPUT: i64 = 1;
 pub(crate) const PTYX_ERROR_SOURCE_WRITE: i64 = 2;
 pub(crate) const PTYX_ERROR_SOURCE_WAIT: i64 = 3;
+#[cfg(unix)]
 pub(crate) const PTYX_ERROR_SOURCE_MODE: i64 = 4;
 
 pub(crate) const PTYX_SESSION_OUTPUT_EXTERNAL_TYPED_DATA: u32 = 1 << 0;

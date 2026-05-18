@@ -183,10 +183,15 @@ pub(crate) fn spawn(config: SpawnConfig) -> Result<Box<Session>, PtyxError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use crate::config::EnvironmentMode;
+    #[cfg(unix)]
     use std::ffi::OsString;
+    #[cfg(unix)]
     use std::io::Read;
+    #[cfg(unix)]
     use std::thread;
+    #[cfg(unix)]
     use std::time::Duration;
 
     #[cfg(unix)]
@@ -289,6 +294,7 @@ mod tests {
         close(&session);
     }
 
+    #[cfg(unix)]
     fn wait_for_exit(session: &Session) -> i32 {
         crate::process::wait_exit(session.inner.as_ref()).unwrap()
     }

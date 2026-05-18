@@ -9,13 +9,15 @@ use std::os::raw::{c_char, c_void};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
+#[cfg(unix)]
+use crate::abi::{PTYX_ERROR_SOURCE_MODE, PTYX_EVENT_TERM_MODE};
 use crate::abi::{
-    PTYX_ERROR_SOURCE_MODE, PTYX_ERROR_SOURCE_OUTPUT, PTYX_ERROR_SOURCE_WAIT,
-    PTYX_ERROR_SOURCE_WRITE, PTYX_EVENT_ERROR, PTYX_EVENT_EXIT, PTYX_EVENT_TERM_MODE,
-    PTYX_MESSAGE_CLOSED, PTYX_MESSAGE_OUTPUT,
+    PTYX_ERROR_SOURCE_OUTPUT, PTYX_ERROR_SOURCE_WAIT, PTYX_ERROR_SOURCE_WRITE, PTYX_EVENT_ERROR,
+    PTYX_EVENT_EXIT, PTYX_MESSAGE_CLOSED, PTYX_MESSAGE_OUTPUT,
 };
 use crate::dart_api::{post_array, DartValue};
 use crate::error::PtyxError;
+#[cfg(unix)]
 use crate::term_mode::TermMode;
 
 #[derive(Clone, Copy)]
@@ -23,6 +25,7 @@ pub(crate) enum ErrorSource {
     Output,
     Write,
     Wait,
+    #[cfg(unix)]
     Mode,
 }
 
@@ -113,6 +116,7 @@ fn error_source_value(source: ErrorSource) -> i64 {
         ErrorSource::Output => PTYX_ERROR_SOURCE_OUTPUT,
         ErrorSource::Write => PTYX_ERROR_SOURCE_WRITE,
         ErrorSource::Wait => PTYX_ERROR_SOURCE_WAIT,
+        #[cfg(unix)]
         ErrorSource::Mode => PTYX_ERROR_SOURCE_MODE,
     }
 }
@@ -133,6 +137,7 @@ fn post_error_message(port: i64, source: i64, status: i64, message: *const c_cha
     )
 }
 
+#[cfg(unix)]
 pub(crate) fn post_term_mode(port: i64, mode: TermMode) -> bool {
     let mode = crate::abi::ptyx_term_mode_t::from(mode);
     post_array(
