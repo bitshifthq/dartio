@@ -23,7 +23,7 @@ void main() {
         'user_defines': <String, Object?>{},
         'config': <String, Object?>{
           'build_code_assets': true,
-          'build_asset_types': <String>[],
+          'build_asset_types': <String>['code_assets/code'],
           'extensions': <String, Object?>{
             'code_assets': <String, Object?>{
               'target_os': os.name,
