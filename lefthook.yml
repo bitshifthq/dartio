@@ -1,0 +1,11 @@
+pre-commit:
+  parallel: true
+  commands:
+    dart-format:
+      glob: "*.dart"
+      run: dart format --set-exit-if-changed --output=none {staged_files}
+    dart-analyze:
+      glob: "*.dart"
+      run: dart analyze --fatal-infos --fatal-warnings
+    staged-diff:
+      run: git diff --cached --check
