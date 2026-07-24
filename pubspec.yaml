@@ -1,0 +1,13 @@
+name: dartio_workspace
+publish_to: none
+
+environment:
+  sdk: ^3.11.0
+
+workspace:
+  - packages/ptyx
+
+hooks:
+  user_defines:
+    ptyx:
+      source: auto
