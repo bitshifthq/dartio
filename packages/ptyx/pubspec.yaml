@@ -1,7 +1,8 @@
 name: ptyx
 description: High-throughput local pseudo-terminal sessions for Dart.
 version: 0.0.1
-repository: https://github.com/elias8/libghostty/tree/main/packages/ptyx
+repository: https://github.com/bitshifthq/dartio/tree/main/packages/ptyx
+issue_tracker: https://github.com/bitshifthq/dartio/issues
 resolution: workspace
 
 platforms:

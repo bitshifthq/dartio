@@ -140,7 +140,7 @@ final class CompileFromSource extends LibraryProvider {
 
 @internal
 final class DownloadPrebuilt extends LibraryProvider {
-  static const _repoUrl = 'https://github.com/elias8/libghostty';
+  static const _repoUrl = 'https://github.com/bitshifthq/dartio';
   static const _defaultBaseUrl = '$_repoUrl/releases/download';
 
   final BuildInput input;

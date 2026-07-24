@@ -1,5 +1,6 @@
 name: dartio_workspace
 publish_to: none
+repository: https://github.com/bitshifthq/dartio
 
 environment:
   sdk: ^3.11.0
