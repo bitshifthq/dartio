@@ -1,0 +1,232 @@
+name: checks
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  changes:
+    name: changes
+    runs-on: ubuntu-latest
+    outputs:
+      ptyx: ${{ steps.filter.outputs.ptyx }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dorny/paths-filter@7b450fff21473bca461d4b92ce414b9d0420d706 # v4.0.2
+        id: filter
+        with:
+          filters: |
+            ptyx:
+              - "packages/ptyx/**"
+              - "analysis_options.yaml"
+              - "all_lint_rules.yaml"
+              - "pubspec.yaml"
+              - "lefthook.yml"
+              - ".github/workflows/pr-check.yml"
+              - ".github/workflows/checks.yml"
+              - ".github/workflows/build.yml"
+              - ".github/workflows/release-ptyx.yml"
+
+  dart-quality:
+    name: dart-quality
+    needs: [changes]
+    if: needs.changes.outputs.ptyx == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dart-lang/setup-dart@65eb853c7ba17dde3be364c3d2858773e7144260 # v1.7.2
+        with:
+          sdk: 3.11.0
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.pub-cache
+          key: pub-linux-${{ hashFiles('**/pubspec.yaml') }}
+          restore-keys: pub-linux-
+      - run: dart pub get
+      - run: dart format --set-exit-if-changed --output=none packages/ptyx
+      - run: dart analyze --fatal-infos --fatal-warnings packages/ptyx
+      - name: publish dry run
+        working-directory: packages/ptyx
+        run: dart pub publish --dry-run
+
+  dart-tests:
+    name: dart-tests-${{ matrix.os }}
+    needs: [changes, dart-quality]
+    if: needs.changes.outputs.ptyx == 'true'
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: linux-x64
+            runner: ubuntu-latest
+          - os: macos-arm64
+            runner: macos-15
+          - os: windows-x64
+            runner: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-tags: false
+      - uses: dart-lang/setup-dart@65eb853c7ba17dde3be364c3d2858773e7144260 # v1.7.2
+        with:
+          sdk: 3.11.0
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.pub-cache
+            ~/.cargo/git
+            ~/.cargo/registry
+            packages/ptyx/native/target
+          key: ptyx-tests-${{ runner.os }}-${{ hashFiles('packages/ptyx/native/Cargo.lock', '**/pubspec.yaml') }}
+          restore-keys: ptyx-tests-${{ runner.os }}-
+      - name: install Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+      - name: configure Dart SDK
+        run: |
+          SDK="$(dirname "$(dirname "$(command -v dart)")")"
+          if command -v cygpath >/dev/null 2>&1; then
+            SDK="$(cygpath -w "$SDK")"
+          fi
+          printf "DART_SDK=%s\n" "$SDK" >> "$GITHUB_ENV"
+          printf "PTYX_DART_SDK=%s\n" "$SDK" >> "$GITHUB_ENV"
+      - run: dart pub get
+      - name: run Dart tests
+        working-directory: packages/ptyx
+        run: dart test
+
+  rust:
+    name: rust-${{ matrix.os }}
+    needs: [changes, dart-quality]
+    if: needs.changes.outputs.ptyx == 'true'
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: linux-x64
+            runner: ubuntu-latest
+          - os: macos-arm64
+            runner: macos-15
+          - os: windows-x64
+            runner: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dart-lang/setup-dart@65eb853c7ba17dde3be364c3d2858773e7144260 # v1.7.2
+        with:
+          sdk: 3.11.0
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/git
+            ~/.cargo/registry
+            packages/ptyx/native/target
+          key: ptyx-rust-${{ runner.os }}-${{ hashFiles('packages/ptyx/native/Cargo.lock') }}
+          restore-keys: ptyx-rust-${{ runner.os }}-
+      - name: install Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup component add rustfmt
+      - name: configure Dart SDK
+        run: |
+          SDK="$(dirname "$(dirname "$(command -v dart)")")"
+          if command -v cygpath >/dev/null 2>&1; then
+            SDK="$(cygpath -w "$SDK")"
+          fi
+          printf "DART_SDK=%s\n" "$SDK" >> "$GITHUB_ENV"
+          printf "PTYX_DART_SDK=%s\n" "$SDK" >> "$GITHUB_ENV"
+      - run: cargo fmt --manifest-path packages/ptyx/native/Cargo.toml -- --check
+      - run: cargo test --manifest-path packages/ptyx/native/Cargo.toml
+      - run: cargo doc --manifest-path packages/ptyx/native/Cargo.toml --no-deps
+
+  clippy:
+    name: clippy
+    needs: [changes, dart-quality]
+    if: needs.changes.outputs.ptyx == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dart-lang/setup-dart@65eb853c7ba17dde3be364c3d2858773e7144260 # v1.7.2
+        with:
+          sdk: 3.11.0
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/git
+            ~/.cargo/registry
+            packages/ptyx/native/target
+          key: ptyx-clippy-${{ hashFiles('packages/ptyx/native/Cargo.lock') }}
+          restore-keys: ptyx-clippy-
+      - name: install Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup component add clippy
+      - name: configure Dart SDK
+        run: |
+          SDK="$(dirname "$(dirname "$(command -v dart)")")"
+          printf "DART_SDK=%s\n" "$SDK" >> "$GITHUB_ENV"
+          printf "PTYX_DART_SDK=%s\n" "$SDK" >> "$GITHUB_ENV"
+      - run: cargo clippy --manifest-path packages/ptyx/native/Cargo.toml --all-targets -- -D warnings
+
+  checks:
+    name: checks
+    if: always()
+    needs:
+      - changes
+      - dart-quality
+      - dart-tests
+      - rust
+      - clippy
+    runs-on: ubuntu-latest
+    steps:
+      - name: verify required checks
+        env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          PTYX_CHANGED: ${{ needs.changes.outputs.ptyx }}
+          DART_QUALITY_RESULT: ${{ needs.dart-quality.result }}
+          DART_TESTS_RESULT: ${{ needs.dart-tests.result }}
+          RUST_RESULT: ${{ needs.rust.result }}
+          CLIPPY_RESULT: ${{ needs.clippy.result }}
+        run: |
+          if [[ "$CHANGES_RESULT" != "success" ]]; then
+            echo "Change detection did not succeed."
+            exit 1
+          fi
+
+          if [[ "$PTYX_CHANGED" == "false" ]]; then
+            echo "No PTYX-affecting files changed; required checks pass."
+            exit 0
+          fi
+
+          if [[ "$PTYX_CHANGED" != "true" ]]; then
+            echo "Change detection did not report a PTYX result."
+            exit 1
+          fi
+
+          for result in \
+            "$DART_QUALITY_RESULT" \
+            "$DART_TESTS_RESULT" \
+            "$RUST_RESULT" \
+            "$CLIPPY_RESULT"
+          do
+            if [[ "$result" != "success" ]]; then
+              echo "A required PTYX check did not succeed: $result"
+              exit 1
+            fi
+          done

@@ -1,0 +1,79 @@
+name: release-ptyx
+run-name: release ${{ github.ref_name }}
+
+on:
+  push:
+    tags: ["ptyx-v[0-9]+.[0-9]+.[0-9]+"]
+
+concurrency:
+  group: release-ptyx
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: validate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: check tag matches package version
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#ptyx-v}"
+          PUBSPEC_VERSION="$(awk '/^version:/ { print $2 }' packages/ptyx/pubspec.yaml)"
+          ASSET_TAG="$(sed -n "s/const releaseTag = '\([^']*\)';/\1/p" packages/ptyx/lib/src/hook/asset_hashes.dart)"
+          if [[ "$GITHUB_REF_NAME" != "ptyx-v$PUBSPEC_VERSION" ]]; then
+            echo "::error::Package version $PUBSPEC_VERSION does not match tag $GITHUB_REF_NAME."
+            exit 1
+          fi
+          if [[ "$GITHUB_REF_NAME" != "$ASSET_TAG" ]]; then
+            echo "::error::Asset release tag $ASSET_TAG does not match $GITHUB_REF_NAME."
+            exit 1
+          fi
+          if [[ "$TAG_VERSION" != "$PUBSPEC_VERSION" ]]; then
+            exit 1
+          fi
+
+  github-release:
+    name: github-release
+    needs: [validate]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: extract release notes
+        run: |
+          VERSION="${GITHUB_REF_NAME#ptyx-v}"
+          .github/scripts/extract-changelog.sh \
+            packages/ptyx/CHANGELOG.md \
+            "$VERSION" > "$RUNNER_TEMP/release-notes.md"
+      - name: create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --title "ptyx v${GITHUB_REF_NAME#ptyx-v}" \
+            --notes-file "$RUNNER_TEMP/release-notes.md"
+
+  publish:
+    name: publish
+    needs: [github-release]
+    runs-on: ubuntu-latest
+    environment: pub.dev
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dart-lang/setup-dart@65eb853c7ba17dde3be364c3d2858773e7144260 # v1.7.2
+        with:
+          sdk: 3.11.0
+      - name: install dependencies
+        run: dart pub get
+      - name: publish dry run
+        working-directory: packages/ptyx
+        run: dart pub publish --dry-run
+      - name: publish to pub.dev
+        working-directory: packages/ptyx
+        run: dart pub publish --force

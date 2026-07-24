@@ -1,0 +1,146 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "packages/ptyx/**"
+      - "pubspec.yaml"
+      - ".github/workflows/build.yml"
+      - ".github/workflows/checks.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-native-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  checks:
+    uses: ./.github/workflows/checks.yml
+    permissions:
+      contents: read
+      pull-requests: read
+
+  build-native:
+    name: build-${{ matrix.target }}
+    needs: [checks]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-macos
+            runner: macos-15
+            rust_target: aarch64-apple-darwin
+          - target: x86_64-macos
+            runner: macos-15
+            rust_target: x86_64-apple-darwin
+          - target: aarch64-linux-gnu
+            runner: ubuntu-latest
+            rust_target: aarch64-unknown-linux-gnu
+            apt: true
+            apt_packages: gcc-aarch64-linux-gnu
+            linker: aarch64-linux-gnu-gcc
+            cargo_linker_env: CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER
+            cc_env: CC_aarch64_unknown_linux_gnu
+          - target: x86_64-linux-gnu
+            runner: ubuntu-latest
+            rust_target: x86_64-unknown-linux-gnu
+          - target: x86_64-windows
+            runner: windows-latest
+            rust_target: x86_64-pc-windows-msvc
+          - target: aarch64-linux-android
+            runner: ubuntu-latest
+            rust_target: aarch64-linux-android
+            android: true
+            android_linker: aarch64-linux-android21-clang
+            cargo_linker_env: CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER
+            cc_env: CC_aarch64_linux_android
+            ar_env: AR_aarch64_linux_android
+          - target: x86_64-linux-android
+            runner: ubuntu-latest
+            rust_target: x86_64-linux-android
+            android: true
+            android_linker: x86_64-linux-android21-clang
+            cargo_linker_env: CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER
+            cc_env: CC_x86_64_linux_android
+            ar_env: AR_x86_64_linux_android
+          - target: arm-linux-androideabi
+            runner: ubuntu-latest
+            rust_target: arm-linux-androideabi
+            android: true
+            android_linker: armv7a-linux-androideabi21-clang
+            cargo_linker_env: CARGO_TARGET_ARM_LINUX_ANDROIDEABI_LINKER
+            cc_env: CC_arm_linux_androideabi
+            ar_env: AR_arm_linux_androideabi
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-tags: false
+      - uses: dart-lang/setup-dart@65eb853c7ba17dde3be364c3d2858773e7144260 # v1.7.2
+        with:
+          sdk: 3.11.0
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/git
+            ~/.cargo/registry
+            target/ptyx
+          key: build-ptyx-${{ matrix.target }}-${{ hashFiles('packages/ptyx/native/Cargo.lock') }}
+          restore-keys: build-ptyx-${{ matrix.target }}-
+      - name: install system packages
+        if: matrix.apt == true
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ${{ matrix.apt_packages }}
+      - name: install Rust target
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add ${{ matrix.rust_target }}
+      - name: configure Dart SDK
+        run: |
+          SDK="$(dirname "$(dirname "$(command -v dart)")")"
+          if command -v cygpath >/dev/null 2>&1; then
+            SDK="$(cygpath -w "$SDK")"
+          fi
+          printf "DART_SDK=%s\n" "$SDK" >> "$GITHUB_ENV"
+          printf "PTYX_DART_SDK=%s\n" "$SDK" >> "$GITHUB_ENV"
+      - name: configure target linker
+        if: matrix.linker != ''
+        run: |
+          LINKER="$(command -v ${{ matrix.linker }})"
+          printf "${{ matrix.cargo_linker_env }}=%s\n" "$LINKER" >> "$GITHUB_ENV"
+          printf "${{ matrix.cc_env }}=%s\n" "$LINKER" >> "$GITHUB_ENV"
+      - name: configure Android linker
+        if: matrix.android == true
+        run: |
+          NDK="${ANDROID_NDK_HOME:-${ANDROID_NDK_ROOT:-}}"
+          if [[ -z "$NDK" ]]; then
+            echo "Android NDK was not found."
+            exit 1
+          fi
+          TOOLCHAIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          LINKER="$TOOLCHAIN/${{ matrix.android_linker }}"
+          ARCHIVER="$TOOLCHAIN/llvm-ar"
+          if [[ ! -x "$LINKER" || ! -x "$ARCHIVER" ]]; then
+            echo "Android toolchain was not found in $TOOLCHAIN."
+            exit 1
+          fi
+          printf "${{ matrix.cargo_linker_env }}=%s\n" "$LINKER" >> "$GITHUB_ENV"
+          printf "${{ matrix.cc_env }}=%s\n" "$LINKER" >> "$GITHUB_ENV"
+          printf "${{ matrix.ar_env }}=%s\n" "$ARCHIVER" >> "$GITHUB_ENV"
+      - name: compile
+        run: |
+          cargo build \
+            --manifest-path packages/ptyx/native/Cargo.toml \
+            --release \
+            --target ${{ matrix.rust_target }} \
+            --target-dir target/ptyx/${{ matrix.target }}
