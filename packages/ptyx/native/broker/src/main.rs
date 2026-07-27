@@ -500,7 +500,10 @@ fn launch_broker_at(path: &CStr) -> io::Result<Client> {
 }
 
 fn launch_broker() -> io::Result<Client> {
-    let executable = CString::new(std::env::current_exe()?.as_os_str().as_encoded_bytes()).unwrap();
+    let executable = std::env::var_os("PTYX_BROKER_BINARY")
+        .map(std::path::PathBuf::from)
+        .unwrap_or(std::env::current_exe()?);
+    let executable = CString::new(executable.as_os_str().as_encoded_bytes()).unwrap();
     launch_broker_at(&executable)
 }
 

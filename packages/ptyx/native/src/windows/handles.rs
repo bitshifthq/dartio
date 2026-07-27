@@ -5,16 +5,20 @@ use std::pin::Pin;
 use std::ptr::{null, null_mut};
 use std::sync::Arc;
 
-use windows_sys::Win32::Foundation::{CloseHandle, LocalFree, HANDLE, INVALID_HANDLE_VALUE};
+use windows_sys::Win32::Foundation::{
+    CloseHandle, GetLastError, LocalFree, ERROR_IO_PENDING, HANDLE, INVALID_HANDLE_VALUE,
+    WAIT_OBJECT_0,
+};
 use windows_sys::Win32::Security::Authorization::{
     ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
 };
 use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
 use windows_sys::Win32::System::Console::{ClosePseudoConsole, HPCON};
 use windows_sys::Win32::System::Threading::{
-    DeleteProcThreadAttributeList, InitializeProcThreadAttributeList, RegisterWaitForSingleObject,
-    UnregisterWaitEx, UpdateProcThreadAttribute, INFINITE, LPPROC_THREAD_ATTRIBUTE_LIST,
-    PROC_THREAD_ATTRIBUTE_JOB_LIST, PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, WT_EXECUTEONLYONCE,
+    CreateEventW, DeleteProcThreadAttributeList, InitializeProcThreadAttributeList,
+    RegisterWaitForSingleObject, UnregisterWaitEx, UpdateProcThreadAttribute, WaitForSingleObject,
+    INFINITE, LPPROC_THREAD_ATTRIBUTE_LIST, PROC_THREAD_ATTRIBUTE_JOB_LIST,
+    PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, WT_EXECUTEONLYONCE,
 };
 use windows_sys::Win32::System::IO::{PostQueuedCompletionStatus, OVERLAPPED};
 
@@ -99,10 +103,17 @@ impl OwnedProcessWait {
 
 impl Drop for OwnedProcessWait {
     fn drop(&mut self) {
-        // INVALID_HANDLE_VALUE makes unregister wait for a running callback.
-        // If unregister itself fails, retaining a tiny context allocation is
-        // safer than freeing storage a foreign callback might still read.
-        if unsafe { UnregisterWaitEx(self.wait, INVALID_HANDLE_VALUE) } != 0 {
+        let completion = OwnedHandle::new(unsafe { CreateEventW(null(), 1, 0, null()) });
+        let unregistered = completion.as_ref().is_ok_and(|completion| {
+            let result = unsafe { UnregisterWaitEx(self.wait, completion.raw()) };
+            let pending = result == 0 && unsafe { GetLastError() } == ERROR_IO_PENDING;
+            (result != 0 || pending)
+                && unsafe { WaitForSingleObject(completion.raw(), INFINITE) } == WAIT_OBJECT_0
+        });
+        // A signaled completion event proves no callback can still access the
+        // context. If the event could not be created, retain the synchronous
+        // fallback used by the API for the same guarantee.
+        if unregistered || unsafe { UnregisterWaitEx(self.wait, INVALID_HANDLE_VALUE) } != 0 {
             unsafe {
                 drop(Box::from_raw(self.context));
             }
