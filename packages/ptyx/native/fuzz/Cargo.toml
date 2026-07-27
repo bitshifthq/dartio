@@ -1,0 +1,19 @@
+[package]
+name = "ptyx-native-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libc = "0.2"
+libfuzzer-sys = "0.4"
+
+[[bin]]
+name = "spawn_protocol"
+path = "fuzz_targets/spawn_protocol.rs"
+test = false
+doc = false
+bench = false

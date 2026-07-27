@@ -5,4 +5,7 @@ coverage/
 pubspec.lock
 native/target/
 native/broker/target/
+native/fuzz/artifacts/
+native/fuzz/corpus/
+native/fuzz/target/
 benchmark/candidates/rust/target/

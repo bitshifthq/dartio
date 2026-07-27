@@ -1539,6 +1539,11 @@ fn decode_spawn(payload: &[u8]) -> io::Result<SpawnRequest> {
     })
 }
 
+#[doc(hidden)]
+pub fn fuzz_spawn_payload(payload: &[u8]) {
+    let _ = decode_spawn(payload);
+}
+
 fn decode_spawn_v2(inject: bool, payload: &[u8]) -> io::Result<SpawnRequest> {
     if payload.len() < 36 {
         return Err(io::Error::new(io::ErrorKind::InvalidData, "short v2 spawn"));
