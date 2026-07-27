@@ -28,6 +28,7 @@ jobs:
               - ".github/workflows/pr-check.yml"
               - ".github/workflows/checks.yml"
               - ".github/workflows/build.yml"
+              - ".github/workflows/ptyx-extended.yml"
               - ".github/workflows/release-ptyx.yml"
 
   dart-quality:
@@ -177,8 +178,39 @@ jobs:
       - if: runner.os != 'Windows'
         run: cargo fmt --manifest-path packages/ptyx/native/broker/Cargo.toml -- --check
       - run: cargo test --manifest-path packages/ptyx/native/Cargo.toml
+      - run: cargo build --manifest-path packages/ptyx/native/Cargo.toml
+      - name: run C ABI harness
+        if: runner.os != 'Windows'
+        run: |
+          cc packages/ptyx/native/tests/abi_harness.c \
+            -std=c11 -Wall -Wextra -Werror \
+            -Ipackages/ptyx/include \
+            -Lpackages/ptyx/native/target/debug \
+            -lptyx \
+            -o "$RUNNER_TEMP/ptyx-abi-harness"
+          if [[ "$RUNNER_OS" == "macOS" ]]; then
+            DYLD_LIBRARY_PATH="$GITHUB_WORKSPACE/packages/ptyx/native/target/debug" \
+              "$RUNNER_TEMP/ptyx-abi-harness"
+          else
+            LD_LIBRARY_PATH="$GITHUB_WORKSPACE/packages/ptyx/native/target/debug" \
+              "$RUNNER_TEMP/ptyx-abi-harness"
+          fi
+      - name: run C ABI harness
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          cl /nologo /std:c11 /W4 /WX `
+            /Ipackages/ptyx/include `
+            packages/ptyx/native/tests/abi_harness.c `
+            /Fe:$env:RUNNER_TEMP/ptyx-abi-harness.exe `
+            /link /LIBPATH:packages/ptyx/native/target/debug ptyx.dll.lib
+          $env:PATH = "$env:GITHUB_WORKSPACE/packages/ptyx/native/target/debug;$env:PATH"
+          & "$env:RUNNER_TEMP/ptyx-abi-harness.exe"
       - if: runner.os != 'Windows'
         run: cargo test --manifest-path packages/ptyx/native/broker/Cargo.toml
+      - name: run Unix broker ownership harness
+        if: runner.os != 'Windows'
+        run: cargo run --manifest-path packages/ptyx/native/broker/Cargo.toml
       - run: cargo clippy --manifest-path packages/ptyx/native/Cargo.toml --all-targets -- -D warnings
       - if: runner.os != 'Windows'
         run: cargo clippy --manifest-path packages/ptyx/native/broker/Cargo.toml --all-targets -- -D warnings

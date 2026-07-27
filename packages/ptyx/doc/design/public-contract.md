@@ -44,13 +44,13 @@ remains.
 
 ## Input
 
-The session exposes a dedicated input object with two write paths:
+The session exposes bounded input operations directly:
 
 ```dart
-if (!session.input.tryWrite(bytes)) {
-  await session.input.write(bytes);
+if (!session.tryWrite(bytes)) {
+  await session.write(bytes);
 }
-await session.input.flush();
+await session.flush();
 ```
 
 `tryWrite` performs bounded work. It returns `true` only when the complete byte
@@ -102,24 +102,26 @@ block the child on PTY backpressure.
 
 ## Exit
 
-`exit` completes once with a typed direct-child status or with
-`PtyExitException` if status observation fails. Unix signal termination and a
-normal numeric exit are distinct status values. Windows exposes the native
-process exit code without fabricating a Unix signal.
+`exitStatus` completes once with a typed direct-child status or with
+`PtyExitException` if status observation fails. `exitCode` is the compatible
+numeric view. Unix signal termination and a normal numeric exit are distinct
+status values. Windows exposes the full unsigned 32-bit native process exit
+code as a Dart integer without fabricating a Unix signal.
 
 Exit can complete before trailing output. Callers that require complete output
 await stream completion as well.
 
 ## Signals and terminal job ownership
 
-The capability object lists supported signal or termination operations.
-Requesting an unavailable capability throws `PtyUnsupportedException`.
+`capabilities.signals` states whether Unix signal semantics are available.
+Windows does not advertise that capability; `kill` instead terminates the
+owned ConPTY job using Windows process semantics.
 
-A signal operation returns `delivered` or `alreadyExited`. A native delivery
-failure throws `PtySignalException`; it is not converted to `alreadyExited`.
-Unix terminal signals target the current foreground process group when the OS
-provides that model. Forced cleanup uses the retained terminal-job identity
-and never a PID that may have been reused.
+`kill` returns `true` when a live child or job accepted termination and
+`false` when the direct child has already exited. A native delivery failure
+throws `PtySignalException`; it is not converted to `false`. Unix signals
+target the owned process group. Forced cleanup uses the broker's retained
+job identity and never signals a PID cached by Dart.
 
 The reported exit status remains the direct child's status even when cleanup
 owns a larger process group or Windows job.
@@ -131,10 +133,10 @@ means the native PTY accepted the new size. Unix sends the platform terminal
 window-change notification. A closed session, unavailable capability, and
 failed native resize remain distinct results.
 
-Capabilities state whether process identity, terminal name, terminal mode,
-foreground-group signaling, and enforceable descendant cleanup are available.
-Optional metadata is interpreted only with the corresponding capability, so a
-missing value is not ambiguous.
+Capabilities state whether Unix signals, Unix process groups, terminal modes,
+ConPTY, and a terminal name are available. `pid` is a direct-child identifier
+when the platform returns one. A missing terminal name or mode is interpreted
+with its corresponding capability, so it is not ambiguous.
 
 An on-demand mode query is a snapshot. Nullable fields mean that the platform
 did not report that field. Mode changes are a broadcast observation stream
@@ -161,9 +163,11 @@ Close is an explicit shutdown request, so output not already delivered may be
 drained and discarded during its cleanup phase. Normal child exit without
 close retains trailing output.
 
-Cleanup proceeds after individual failures. If complete promised cleanup
-cannot be established, the shared future completes with `PtyCloseException`
-after every safe best-effort action.
+Cleanup proceeds after individual failures. If cleanup itself cannot be
+established, the shared future completes with `PtyCloseException` after every
+safe action. If cleanup uncertainty is a consequence of an earlier typed
+infrastructure failure, close preserves that root failure instead of replacing
+it with a less specific cleanup exception.
 
 ## Isolate ownership
 

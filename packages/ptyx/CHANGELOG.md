@@ -2,13 +2,21 @@
 
 ## 0.0.1
 
-- Added asynchronous native PTY session creation with a staged publication
-  barrier.
+- Replaced synchronous construction with asynchronous native PTY session
+  creation and a staged publication barrier.
+- Replaced unbounded synchronous input with bounded `tryWrite`, asynchronous
+  `write`, capacity waiting, `flush`, and `inputDone`.
 - Added bounded, lossless input and output with capacity waits, flush, explicit
   output discard, and typed terminal input failure.
+- Added typed `exitStatus` while retaining `exitCode`, including complete
+  unsigned 32-bit Windows process exit codes.
 - Added environment modes, working directories, resize, signaling, metadata,
-  mode observation, native capabilities, and configurable graceful close.
+  mode observation, explicit native capabilities, and configurable graceful
+  close.
+- Added stable typed operational errors with operation, category, optional
+  native status, and safe context.
 - Added shared native reactors, a hardened Unix spawn/reaping broker, and
   generation-checked session ownership.
-- Added generated ABI bindings, lifecycle documentation, runtime contract
-  tests, and a reproducible production scorecard.
+- Added ABI version 3 generated bindings, native finalization for isolate loss,
+  lifecycle and security documentation, ABI/runtime/fault contract tests, a
+  partial diagnostic scorecard, and an extended fuzz/soak workflow.

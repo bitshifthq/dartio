@@ -8,6 +8,16 @@ terminal sessions.
 The package does not emulate a terminal, decode text, parse shell commands, or
 provide SSH. Arguments are passed directly to the executable.
 
+## Installation
+
+```sh
+dart pub add ptyx
+```
+
+Source builds require Dart 3.11 or newer, a stable Rust toolchain, and a C11
+compiler. See [building from source](doc/building.md) for target-specific
+requirements.
+
 ## Quick start
 
 ```dart
@@ -27,14 +37,14 @@ Future<void> main() async {
     ),
   );
 
-  final outputDone = session.output
-      .map((chunk) => String.fromCharCodes(chunk))
-      .forEach(stdout.write);
-
-  final exitCode = await session.exitCode;
-  await outputDone;
-  await session.close();
-  stdout.writeln('exit: $exitCode');
+  try {
+    final outputDone = session.output.forEach(stdout.add);
+    final exitCode = await session.exitCode;
+    await outputDone;
+    stdout.writeln('exit: $exitCode');
+  } finally {
+    await session.close();
+  }
 }
 ```
 
@@ -53,6 +63,18 @@ await session.write(Uint8List.fromList('status\n'.codeUnits));
 await session.flush();
 ```
 
+For an interactive owner, listen to output before writing and keep bytes
+unmodified:
+
+```dart
+final outputDone = session.output.forEach(stdout.add);
+final line = stdin.readLineSync();
+if (line != null) {
+  await session.write(Uint8List.fromList('$line\n'.codeUnits));
+  await session.flush();
+}
+```
+
 An output-heavy child can block normally when `output` has no listener or its
 subscription is paused. Listen before awaiting `exitCode` when output matters.
 If it does not matter, call `discardOutput()`; canceling an output subscription
@@ -60,6 +82,12 @@ has the same drain-and-discard effect.
 
 `inputDone` completes normally after deliberate shutdown and with a
 `PtyInputException` if already accepted input cannot be written.
+
+Resize is synchronous bounded metadata work:
+
+```dart
+session.resize(const PtySize(rows: 40, columns: 120));
+```
 
 ## Lifecycle
 
@@ -98,25 +126,39 @@ system:
   `kill` terminates the owned job using Windows process semantics.
 - ConPTY resize uses cell dimensions. Pixel dimensions remain cached metadata.
 
-The supported production matrix is Linux, macOS, and Windows on x64 and arm64.
-Platform support is qualified by native end-to-end CI, not by cross-compilation
-alone. Android is not advertised until device or representative-emulator
+The implementation targets Linux, macOS, and Windows on x64 and arm64.
+Production qualification is granted per target only after native end-to-end
+CI on that exact OS and architecture; compilation alone is not qualification.
+See the maintained [platform matrix](doc/platforms.md) for current evidence and
+gaps. Android is not advertised until device or representative-emulator
 qualification is retained.
 
 ## Errors
 
-All package errors derive from `PtyException`:
+Operational and validated-input errors derive from `PtyException`:
 
+- `PtyInvalidArgumentException` means a value is outside the native contract.
 - `PtyClosedException` means the operation requires a live session.
 - `PtyUnsupportedException` means the native capability does not exist.
 - `PtyInputException` reports terminal input failure or an impossible capacity
-  request.
+  transition after bytes were accepted.
 - `PtyInfrastructureException` reports controller or Unix broker loss.
 
 Output read failures are delivered on `output`; input failures use `inputDone`;
 spawn, resize, metadata, exit observation, and close report through their own
 operation.
 
+## Security
+
+Children run with the same operating-system privileges as the Dart process.
+`ptyx` is not a sandbox. No shell is inserted, but callers must still treat
+the selected executable, arguments, environment, and child output according
+to their own trust boundary. Input bytes and environment values are not
+included in package diagnostics. See the full [security model](doc/security.md).
+
 See the [lifecycle model](doc/design/lifecycle.md), the
+[capability matrix](doc/capability-matrix.md), the
 [selected architecture](doc/architecture/selected-architecture.md), and
-[BENCHMARKS.md](BENCHMARKS.md) for the reproducible scorecard.
+[BENCHMARKS.md](BENCHMARKS.md) for the benchmark protocol. The current
+scorecard is diagnostic and does not yet satisfy every production acceptance
+workload listed there.

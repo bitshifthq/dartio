@@ -73,8 +73,10 @@ equivalent language comparison.
 
 ### Unix spawn and reap broker
 
-The controller launches one single-threaded broker with `posix_spawn`. The
-broker, rather than the Dart host, is the parent of every PTY child.
+The controller launches one single-threaded broker. macOS uses
+`posix_spawn`; Linux uses an audited raw `fork`/`exec` launch to preserve the
+pre-created control socket. The broker, rather than the Dart host, is the
+parent of every PTY child.
 
 - The broker resets its signal mask and dispositions, including `SIGCHLD`,
   before it accepts requests.
@@ -88,11 +90,12 @@ broker, rather than the Dart host, is the parent of every PTY child.
   nonblocking protocol carries generation IDs, spawn results, signal
   acknowledgements, exit status, and cleanup state.
 - The handshake identifies protocol version, target architecture, helper
-  build identity, and controller ABI. Constants are generated from one
-  authoritative protocol definition for the controller and helper.
-- Requests and responses are framed incrementally. A partial or malicious
-  frame cannot block all sessions, allocate from an attacker-controlled
-  length, or desynchronize the channel.
+  build identity, and controller ABI. Controller and helper protocol constants
+  are checked together by protocol tests; consolidating them into generated
+  definitions remains build-system work.
+- Requests and responses use fixed, bounded frames with validated payload
+  lengths. Close, release, abort, and signal acknowledgements are completed by
+  the broker-controller thread and do not block the PTY readiness reactor.
 - Controller EOF makes the broker terminate and reap all jobs. Broker EOF
   makes the controller close PTY masters and report cleanup uncertainty; it
   does not guess that a cached numeric process group is still the owned job.
@@ -108,21 +111,18 @@ falling back to in-process `fork`.
 
 ### Linux ownership details
 
-The Linux broker opens PTYs with `posix_openpt(O_RDWR | O_NOCTTY |
-O_CLOEXEC)`, applies `grantpt` and `unlockpt`, resolves the slave with
-`ptsname_r`, and opens it with `O_CLOEXEC`. The single-threaded child branch
-performs `setsid`, `TIOCSCTTY`, foreground-process-group setup, `dup3`, closure
-of the broker's known descriptors, signal reset, and `execve`. No descriptor
-table scan or allocation occurs after `fork`.
+The Linux broker opens the PTY pair with `openpty`, sets close-on-exec before
+fork, and retains the master in the broker until descriptor transfer succeeds.
+The single-threaded child branch performs `setsid`, `TIOCSCTTY`,
+foreground-process-group setup, `dup2`, closure of known descriptors, signal
+reset, and `execve`.
 
-The controller observes only PTY masters and the broker channel through
+The controller observes only PTY masters and its wake descriptor through
 `epoll`; it never waits for or signals a PTY child. The broker blocks
 `SIGCHLD`, consumes it through `signalfd`, and drains exact `waitpid` results.
-Where `pidfd_open` is available, the live job also holds a pidfd and uses it
-for exit readiness and signalling. The `signalfd` plus broker-owned
-`waitpid` fallback remains safe on older kernels because no other thread or
-host runtime can reap those children. A generation-tagged live-job entry is
-removed before its numeric PID can be reused.
+This remains safe because no other thread or host runtime is a parent of those
+children. A generation-tagged live-job entry is removed before its numeric PID
+can be reused.
 
 Controller loss closes the broker channel, terminates each owned process
 group, reaps every child, and exits. Broker loss makes the controller drop
@@ -153,13 +153,12 @@ Windows does not use the Unix broker.
   semantics. Required entries such as `SystemRoot` are preserved.
 - Cancellation retains every `OVERLAPPED` allocation until its terminal IOCP
   completion. A legitimate process exit code of 259 remains exit code 259.
-- The production support floor is Windows build 26100, where closing a
-  pseudoconsole no longer has the older blocking-close behavior. Earlier
-  builds are rejected at runtime until a bounded ownership proof exists.
-- The floor is checked with a manifest-independent native version query before
-  any ConPTY resource is acquired. Windows client and Server SKUs are
-  qualified separately; an unqualified SKU receives a typed unsupported
-  platform error.
+- The runtime floor is Windows 10 version 1809, build 17763, where ConPTY was
+  introduced. Blocking `ClosePseudoConsole` behavior on older implementations
+  is isolated on a bounded closer pool with admission limited to 128 live or
+  quarantined sessions.
+- Windows client and Server SKUs are qualified separately. Compilation alone
+  is not runtime qualification.
 
 ## Failure and close ordering
 
@@ -210,9 +209,12 @@ The decisive results are:
   queues, copied typed-data delivery, one-message output credit, no
   per-session I/O workers, race-free capacity waits, concurrent close,
   pause/cancel/no-listener bounds, and typed cleanup after a real broker kill;
-- five post-warmup 128 MiB output runs reached 89.847 to 90.968 MiB/s, five
-  32 MiB input runs reached 5.485 to 5.540 MiB/s, and 400 one-byte round
-  trips produced p50/p95/p99 of 134/193/288 microseconds;
+- the pre-correction Candidate B prototype recorded five post-warmup 128 MiB
+  output runs at 89.847 to 90.968 MiB/s, five 32 MiB input runs at 5.485 to
+  5.540 MiB/s, and 400 one-byte round trips at p50/p95/p99 of 134/193/288
+  microseconds. Correctness fixes were verified on a later artifact, so these
+  numbers remain directional selection evidence rather than a cleared
+  production performance gate;
 - 1/4/16-session fairness runs showed progress for every session. The
   saturated 16-session noisy throughput spread was approximately five
   percent; its 64.2 ms quiet p99 remains a production regression target;
@@ -226,12 +228,11 @@ The decisive results are:
   required ownership model, while also identifying runtime qualification and
   pre-build-26100 close behavior as unresolved gates.
 
-Independent correctness, performance, and platform re-reviews passed this
-architecture for implementation. The correctness re-review rebuilt the
-corrected vertical slice, matched its retained hashes, and reran 15 native and
-11 Dart tests plus strict static checks. The review pass is scoped to
-selection; all implementation and platform qualification requirements in
-this document remain mandatory.
+Independent correctness and platform re-reviews passed this architecture for
+implementation. The corrected vertical slice passed its correctness checks,
+but it was not the exact artifact used for the retained performance samples.
+The review is scoped to selection; production benchmarks, competitor
+comparisons, soak, sanitizers, and target qualification remain release gates.
 
 Selection does not claim that the corrective prototypes are production code.
 Their remaining findings are requirements on the implementation above.

@@ -10,8 +10,16 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  qualification:
+    name: qualification
+    uses: ./.github/workflows/build.yml
+    permissions:
+      contents: read
+      pull-requests: read
+
   validate:
     name: validate
+    needs: [qualification]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -36,7 +44,7 @@ jobs:
 
   github-release:
     name: github-release
-    needs: [validate]
+    needs: [validate, publish-check]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -56,9 +64,26 @@ jobs:
             --title "ptyx v${GITHUB_REF_NAME#ptyx-v}" \
             --notes-file "$RUNNER_TEMP/release-notes.md"
 
+  publish-check:
+    name: publish-check
+    needs: [validate]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dart-lang/setup-dart@65eb853c7ba17dde3be364c3d2858773e7144260 # v1.7.2
+        with:
+          sdk: 3.11.0
+      - name: install dependencies
+        run: dart pub get
+      - name: publish dry run
+        working-directory: packages/ptyx
+        run: dart pub publish --dry-run
+
   publish:
     name: publish
-    needs: [github-release]
+    needs: [github-release, publish-check]
     runs-on: ubuntu-latest
     environment: pub.dev
     permissions:
@@ -71,9 +96,6 @@ jobs:
           sdk: 3.11.0
       - name: install dependencies
         run: dart pub get
-      - name: publish dry run
-        working-directory: packages/ptyx
-        run: dart pub publish --dry-run
       - name: publish to pub.dev
         working-directory: packages/ptyx
         run: dart pub publish --force
