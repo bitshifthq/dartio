@@ -93,6 +93,7 @@ Future<void> main(List<String> arguments) async {
         );
         await stdout.flush();
       case 'size':
+        if (Platform.isWindows) _enableWindowInput();
         final initialSize = _terminalSize();
         await _writeSize(initialSize);
         await input.readApplication(maxBytes: 1);
@@ -222,6 +223,35 @@ Future<(int, int)> _waitForTerminalSizeChange((int, int) initial) async {
     current = _terminalSize();
   }
   return current;
+}
+
+void _enableWindowInput() {
+  final kernel32 = DynamicLibrary.open('kernel32.dll');
+  final getStdHandle = kernel32
+      .lookupFunction<
+        Pointer<Void> Function(Uint32),
+        Pointer<Void> Function(int)
+      >('GetStdHandle');
+  final getConsoleMode = kernel32
+      .lookupFunction<
+        Int32 Function(Pointer<Void>, Pointer<Uint32>),
+        int Function(Pointer<Void>, Pointer<Uint32>)
+      >('GetConsoleMode');
+  final setConsoleMode = kernel32
+      .lookupFunction<
+        Int32 Function(Pointer<Void>, Uint32),
+        int Function(Pointer<Void>, int)
+      >('SetConsoleMode');
+  final mode = calloc<Uint32>();
+  try {
+    final handle = getStdHandle(_stdInputHandle);
+    if (getConsoleMode(handle, mode) == 0 ||
+        setConsoleMode(handle, mode.value | _enableWindowInputMode) == 0) {
+      throw StateError('enabling Windows terminal resize events failed');
+    }
+  } finally {
+    calloc.free(mode);
+  }
 }
 
 (int, int) _terminalSize() {
@@ -357,7 +387,9 @@ final class _FixtureInput {
   }
 }
 
+const _stdInputHandle = 0xfffffff6;
 const _stdOutputHandle = 0xfffffff5;
+const _enableWindowInputMode = 0x0008;
 
 final class _Coord extends Struct {
   @Int16()

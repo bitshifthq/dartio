@@ -2,6 +2,9 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
 
+/// Maximum logical payload carried by one acknowledged fixture page.
+const fixturePagePayloadBytes = 48 * 16;
+
 /// Encodes the acknowledgement for a fully observed ConPTY fixture page.
 Uint8List fixturePageAcknowledgement(int sequence) =>
     Uint8List.fromList([0, ...ascii.encode(sequence.toRadixString(36)), 10]);

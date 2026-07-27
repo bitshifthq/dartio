@@ -542,7 +542,9 @@ while ($received -lt {bytes}) {
 
 Future<Map<String, Object?>> _bidirectionalThroughput(int byteCount) async {
   final (:session, :bytes) = await _readySession('echo-count', ['$byteCount']);
-  final chunk = Uint8List(64 * 1024);
+  final chunk = Uint8List(
+    Platform.isWindows ? fixturePagePayloadBytes : 64 * 1024,
+  );
   var sent = 0;
   var received = 0;
   final stopwatch = Stopwatch()..start();

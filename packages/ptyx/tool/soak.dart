@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math';
 import 'dart:typed_data';
 
 import 'package:crypto/crypto.dart';
@@ -72,7 +73,7 @@ Future<void> main(List<String> arguments) async {
       longSession.resize(
         PtySize(rows: 24 + cycles % 8, columns: 80 + cycles % 16),
       );
-      await longSession.write(interactive).timeout(_operationTimeout);
+      await _writeFixtureInput(longSession, interactive);
       await longSession.flush().timeout(_operationTimeout);
       for (var index = 0; index < interactive.length; index++) {
         if (!await longOutput.moveNext().timeout(_operationTimeout)) {
@@ -205,7 +206,7 @@ Future<int> _runCycle(int cycle) async {
         }
       }
     });
-    await session.write(input).timeout(_operationTimeout);
+    await _writeFixtureInput(session, input);
     await Future.wait([
       session.flush().timeout(_operationTimeout),
       outputDone.timeout(_operationTimeout),
@@ -218,6 +219,16 @@ Future<int> _runCycle(int cycle) async {
   } finally {
     await iterator.cancel();
     await session.close().timeout(_operationTimeout);
+  }
+}
+
+Future<void> _writeFixtureInput(PtySession session, Uint8List bytes) async {
+  final chunkSize = Platform.isWindows ? fixturePagePayloadBytes : bytes.length;
+  for (var offset = 0; offset < bytes.length; offset += chunkSize) {
+    final end = min(offset + chunkSize, bytes.length);
+    await session
+        .write(Uint8List.sublistView(bytes, offset, end))
+        .timeout(_operationTimeout);
   }
 }
 

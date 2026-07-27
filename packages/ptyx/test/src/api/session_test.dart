@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math';
 import 'dart:typed_data';
 
 import 'package:ptyx/ptyx.dart';
@@ -457,6 +458,7 @@ void main() {
         final echoed = Completer<int>();
         final readyBytes = <int>[];
         var received = 0;
+        var outputProgress = Completer<void>();
         late final StreamSubscription<Uint8List> subscription;
         subscription = fixtureOutput(session).listen((chunk) {
           if (!ready.isCompleted) {
@@ -469,6 +471,7 @@ void main() {
             return;
           }
           received += chunk.length;
+          if (!outputProgress.isCompleted) outputProgress.complete();
           if (received >= data.length && !echoed.isCompleted) {
             echoed.complete(received);
           }
@@ -476,7 +479,22 @@ void main() {
         addTearDown(subscription.cancel);
 
         await ready.future.timeout(shortTimeout);
-        await session.write(data);
+        for (
+          var offset = 0;
+          offset < data.length;
+          offset += fixturePagePayloadBytes
+        ) {
+          final end = min(offset + fixturePagePayloadBytes, data.length);
+          await session.write(Uint8List.sublistView(data, offset, end));
+          while (received < end) {
+            if (outputProgress.isCompleted) {
+              outputProgress = Completer<void>();
+            }
+            if (received < end) {
+              await outputProgress.future.timeout(shortTimeout);
+            }
+          }
+        }
         final echoedBytes = await echoed.future.timeout(
           const Duration(minutes: 1),
         );

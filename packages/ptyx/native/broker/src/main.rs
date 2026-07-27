@@ -1348,23 +1348,11 @@ fn close_inherited_descriptors(retain_through: RawFd) -> io::Result<()> {
     }
     #[cfg(target_os = "macos")]
     {
-        // This process has already execed and is still single-threaded, so a
-        // filesystem snapshot is safe here. Avoid scanning to getdtablesize:
-        // hosted macOS processes can have a very large descriptor ceiling.
-        let descriptors = std::fs::read_dir("/dev/fd")?
-            .map(|entry| {
-                entry?
-                    .file_name()
-                    .to_string_lossy()
-                    .parse::<RawFd>()
-                    .map_err(io::Error::other)
-            })
-            .collect::<io::Result<Vec<_>>>()?;
-        for fd in descriptors.into_iter().filter(|fd| *fd > retain_through) {
-            unsafe {
-                libc::close(fd);
-            }
-        }
+        // POSIX_SPAWN_CLOEXEC_DEFAULT makes fd 3 the only inherited
+        // descriptor because the launch actions explicitly duplicate it.
+        // Avoid a redundant /dev/fd filesystem walk before the broker can
+        // publish its handshake.
+        debug_assert_eq!(retain_through, CONTROL_FD);
     }
     Ok(())
 }
