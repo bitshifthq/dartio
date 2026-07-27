@@ -1230,8 +1230,7 @@ Future<String?> _commandOutput(
   try {
     final result = await Process.run(executable, arguments);
     if (result.exitCode != 0) return null;
-    final output = '${result.stdout}'.trim();
-    return output.isEmpty ? null : output;
+    return '${result.stdout}'.trim();
   } on ProcessException {
     return null;
   }
