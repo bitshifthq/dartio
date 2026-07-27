@@ -141,8 +141,11 @@ mod tests {
         let mut live = Vec::new();
         let mut retired = Vec::new();
         let mut state = 0xd1b5_4a32_8f07_c6e9_u64;
+        let operations = option_env!("PTYX_MODEL_ITERATIONS")
+            .map(|value| value.parse::<u64>().expect("valid model iteration count"))
+            .unwrap_or(20_000);
 
-        for value in 1..=20_000_u64 {
+        for value in 1..=operations {
             state ^= state << 13;
             state ^= state >> 7;
             state ^= state << 17;

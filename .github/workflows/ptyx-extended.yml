@@ -114,6 +114,7 @@ jobs:
         env:
           PTYX_BROKER_BINARY: /bin/true
           PTYX_SKIP_DART_BRIDGE: "1"
+          PTYX_MODEL_ITERATIONS: "512"
         run: |
           cargo +nightly-2026-07-20 miri test \
             --manifest-path packages/ptyx/native/Cargo.toml \
