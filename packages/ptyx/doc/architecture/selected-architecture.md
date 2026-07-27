@@ -65,14 +65,17 @@ equivalent language comparison.
 - Reactor, notifier, broker-channel, or IOCP-owner death atomically fails every
   affected sub-resource with a typed infrastructure error and starts cleanup;
   no synchronous request waits on a dead owner.
-- macOS uses one `poll` reactor for PTY masters and controller wakeups. Linux
+- macOS uses one `kqueue` reactor for PTY masters and controller wakeups. Linux
   uses `epoll`. The broker channel has its own bounded controller because it
   owns a framed request/response transaction. Windows uses IOCP for
   overlapped controller pipe ends.
 - Work is scheduled with command, byte, and syscall quanta. A busy session
   cannot drain the complete command queue or monopolize the readiness batch.
-- Input and output use chunk queues with explicit byte accounting. Filter
-  changes occur only on state transitions.
+- Input and output use chunk queues with explicit byte accounting. Unix reads
+  into uninitialized scratch storage, treats only the successful `read`
+  prefix as initialized, and copies that exact prefix into its owned queue;
+  it never zero-fills unread capacity. Filter changes occur only on state
+  transitions.
 - Child exit, PTY EOF, close, and terminal write failure resolve every
   accepted input sequence and every capacity or flush waiter with completion
   or typed failure. Once input fails, later writes cannot be accepted.

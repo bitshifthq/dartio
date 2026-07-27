@@ -4,10 +4,12 @@ Benchmarks measure the public Dart API and retain direct-native candidate
 evidence separately. Correctness gates run first; a fast result with loss,
 unbounded memory, starvation, or incomplete cleanup is invalid.
 
-`benchmark/scorecard.dart` is currently a diagnostic subset of the acceptance
-protocol below. Its JSON explicitly records `acceptance_result: false` and the
-missing workloads. It must not be described as a production pass until every
-required metric and equivalent comparison is implemented.
+`benchmark/scorecard.dart` implements the public-boundary correctness,
+throughput, latency, saturation, fairness, observation, cleanup, and resource
+workloads below. Its JSON still records `acceptance_result: false` and the
+remaining evidence gaps. It must not be described as a production pass until
+the retained multi-gigabyte run, equivalent comparisons, and allocation/copy
+instrumentation are complete.
 
 ## Reproduction
 
@@ -18,6 +20,23 @@ cargo build --manifest-path native/broker/Cargo.toml --release
 PTYX_BROKER_BINARY="$PWD/native/broker/target/release/ptyx-broker" \
   cargo build --manifest-path native/Cargo.toml --release
 dart run benchmark/scorecard.dart all
+dart run benchmark/scorecard.dart integrity --integrity-bytes=2147483648
+```
+
+The base-compatible harness uses the same shell children and timer boundaries
+with both the retained API and the current API:
+
+```sh
+dart run benchmark/base_scorecard.dart --bytes=33554432 --repetitions=5
+```
+
+Direct-native candidate runs can be retained with an exact dynamic-library
+hash:
+
+```sh
+dart run benchmark/candidates/scorecard.dart direct-rust \
+  benchmark/candidates/rust/target/release/libptyx_candidate_rust.dylib \
+  --bytes=33554432 --repetitions=5 --output=benchmark/results/direct.json
 ```
 
 For a repeated integrity and cleanup run, pass the duration in seconds:
@@ -27,8 +46,11 @@ dart run tool/soak.dart 86400
 ```
 
 The soak checks every byte on every spawn/write/flush/exit/close cycle and
-reports verified bytes, cycle count, and process RSS. Multi-day completion is
-retained only when the command actually runs for that duration.
+reports verified bytes, cycle count, process RSS, descriptors or handles, and
+thread count. The scheduled hosted job runs for five hours and forty-five
+minutes because a GitHub-hosted job cannot provide a multi-day execution
+window. Multi-day completion is retained only from a local or suitably
+self-hosted command that actually runs for the recorded duration.
 
 The standalone ABI smoke harness verifies the ABI version and every
 authoritative header symbol in a built artifact:

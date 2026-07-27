@@ -205,7 +205,9 @@ jobs:
         if: runner.os == 'Windows'
         shell: cmd
         run: |
-          call "%ProgramFiles%\Microsoft Visual Studio\2022\Enterprise\Common7\Tools\VsDevCmd.bat" -arch=%RUNNER_ARCH%
+          set "PTYX_VS_TARGET=x64"
+          if /I "%RUNNER_ARCH%"=="ARM64" set "PTYX_VS_TARGET=arm64"
+          call "%ProgramFiles%\Microsoft Visual Studio\2022\Enterprise\Common7\Tools\VsDevCmd.bat" -host_arch=x64 -arch=%PTYX_VS_TARGET%
           cl /nologo /std:c11 /W4 /WX ^
             /Ipackages/ptyx/include ^
             packages/ptyx/native/tests/abi_harness.c ^

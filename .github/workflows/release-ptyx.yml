@@ -13,6 +13,9 @@ jobs:
   qualification:
     name: qualification
     uses: ./.github/workflows/build.yml
+    with:
+      extended: true
+      soak_seconds: "300"
     permissions:
       contents: read
       pull-requests: read

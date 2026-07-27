@@ -7,6 +7,8 @@ import 'package:ptyx/ptyx.dart';
 
 const _size = PtySize(rows: 24, columns: 80);
 const _operationTimeout = Duration(seconds: 30);
+const _ready = [82, 69, 65, 68, 89];
+const _maximumReadinessPrelude = 64 * 1024;
 
 Future<void> main(List<String> arguments) async {
   final duration = arguments.isEmpty
@@ -120,12 +122,22 @@ Future<PtySession> _spawnFixture(String operation, int byteCount) async {
 }
 
 Future<void> _expectReady(StreamIterator<int> iterator) async {
-  for (final expected in ascii.encode('READY')) {
-    if (!await iterator.moveNext().timeout(_operationTimeout) ||
-        iterator.current != expected) {
-      throw StateError('fixture readiness bytes were corrupted');
+  var matched = 0;
+  for (var consumed = 0; consumed < _maximumReadinessPrelude; consumed++) {
+    if (!await iterator.moveNext().timeout(_operationTimeout)) {
+      throw StateError('fixture exited before its readiness marker');
+    }
+    final byte = iterator.current;
+    if (byte == _ready[matched]) {
+      matched++;
+      if (matched == _ready.length) {
+        return;
+      }
+    } else {
+      matched = byte == _ready.first ? 1 : 0;
     }
   }
+  throw StateError('fixture readiness prelude exceeded its bound');
 }
 
 Future<int?> _resourceCount() async {

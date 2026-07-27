@@ -19,5 +19,6 @@
   generation-checked session ownership.
 - Added ABI version 4 generated bindings, Dart finalization and native
   quiet-port liveness probing for isolate loss, lifecycle and security
-  documentation, ABI/runtime/fault contract tests, a partial diagnostic
-  scorecard, and an extended fuzz/soak workflow.
+  documentation, ABI/runtime/fault contract tests, a correctness-gated
+  diagnostic scorecard, reproducible comparison harnesses, and an extended
+  fuzz/scorecard/soak workflow.

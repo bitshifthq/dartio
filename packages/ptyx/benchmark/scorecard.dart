@@ -20,6 +20,12 @@ Future<void> main(List<String> arguments) async {
       .singleOrNull;
   final repetitions = _integerOption(arguments, 'repetitions', 5);
   final warmups = _integerOption(arguments, 'warmups', 1);
+  final integrityBytes = _integerOption(
+    arguments,
+    'integrity-bytes',
+    2 * 1024 * 1024 * 1024,
+  );
+  final benchmarkBytes = _integerOption(arguments, 'bytes', 32 * 1024 * 1024);
   final allowDirty = arguments.contains('--allow-dirty');
   if (repetitions <= 0 || warmups < 0) {
     throw ArgumentError('repetitions must be positive and warmups nonnegative');
@@ -42,13 +48,9 @@ Future<void> main(List<String> arguments) async {
     'suite': 'ptyx-diagnostic-scorecard',
     'acceptance_result': false,
     'missing_acceptance_workloads': const [
-      'complete process-tree CPU and memory',
-      'descriptor and handle return',
-      'active noisy-neighbor fairness',
-      'resize and mode overhead',
-      'forced close and descendant cleanup timing',
-      'multi-gigabyte exact integrity',
+      'retained multi-gigabyte exact-integrity run',
       'base, direct-native, and competitor comparisons',
+      'allocation and copy instrumentation',
     ],
     'boundary':
         'Dart public API through native PTY and child; release native asset',
@@ -83,7 +85,15 @@ Future<void> main(List<String> arguments) async {
       repetitions: repetitions,
       warmups: warmups,
       metric: 'mib_per_second',
-      run: () => _outputThroughput(32 * 1024 * 1024),
+      run: () => _outputThroughput(benchmarkBytes),
+    );
+  }
+  if (selected == null || selected == 'all' || selected == 'transport_output') {
+    results['transport_output'] = await _repeated(
+      repetitions: repetitions,
+      warmups: warmups,
+      metric: 'mib_per_second',
+      run: () => _transportOutput(benchmarkBytes),
     );
   }
   if (selected == null || selected == 'all' || selected == 'input') {
@@ -91,7 +101,15 @@ Future<void> main(List<String> arguments) async {
       repetitions: repetitions,
       warmups: warmups,
       metric: 'mib_per_second',
-      run: () => _inputThroughput(32 * 1024 * 1024),
+      run: () => _inputThroughput(benchmarkBytes),
+    );
+  }
+  if (selected == null || selected == 'all' || selected == 'transport_input') {
+    results['transport_input'] = await _repeated(
+      repetitions: repetitions,
+      warmups: warmups,
+      metric: 'mib_per_second',
+      run: () => _transportInput(benchmarkBytes),
     );
   }
   if (selected == null || selected == 'all' || selected == 'bidirectional') {
@@ -118,11 +136,26 @@ Future<void> main(List<String> arguments) async {
       run: () => _discardOutput(32 * 1024 * 1024),
     );
   }
+  if (selected == null || selected == 'all' || selected == 'no_listener') {
+    results['no_listener'] = await _noListener(8 * 1024 * 1024);
+  }
+  if (selected == null || selected == 'all' || selected == 'saturation') {
+    results['saturation'] = await _inputSaturation(1024 * 1024, 250);
+  }
   if (selected == null || selected == 'all' || selected == 'fairness') {
     results['fairness'] = await _fairness(16, 100);
   }
+  if (selected == null || selected == 'all' || selected == 'active_output') {
+    results['active_output'] = await _activeOutputFairness(16, 8 * 1024 * 1024);
+  }
   if (selected == null || selected == 'all' || selected == 'spawn_close') {
     results['spawn_close'] = await _spawnClose(50);
+  }
+  if (selected == null || selected == 'all' || selected == 'observation') {
+    results['observation'] = await _observationOverhead(1000);
+  }
+  if (selected == null || selected == 'all' || selected == 'forced_close') {
+    results['forced_close'] = await _forcedClose();
   }
   if (selected == null || selected == 'all' || selected.startsWith('idle')) {
     for (final count in const [1, 10, 100]) {
@@ -133,6 +166,14 @@ Future<void> main(List<String> arguments) async {
         results['idle_$count'] = await _idleSessions(count);
       }
     }
+  }
+  if (selected == 'integrity') {
+    results['integrity'] = {
+      'byte_count': integrityBytes,
+      'output': await _outputThroughput(integrityBytes),
+      'input': await _inputThroughput(integrityBytes),
+      'bidirectional': await _bidirectionalThroughput(integrityBytes),
+    };
   }
   results['rss_after_bytes'] = ProcessInfo.currentRss;
 
@@ -295,6 +336,73 @@ Future<Map<String, Object?>> _outputThroughput(int byteCount) async {
   }
 }
 
+Future<Map<String, Object?>> _transportOutput(int byteCount) async {
+  final windowsScript =
+      r'''
+[Console]::Write("READY")
+$null = [Console]::In.Read()
+$out = [Console]::OpenStandardOutput()
+$chunk = [byte[]]::new(65536)
+$remaining = {bytes}
+while ($remaining -gt 0) {
+  $count = [Math]::Min($chunk.Length, $remaining)
+  $out.Write($chunk, 0, $count)
+  $remaining -= $count
+}
+'''
+          .replaceFirst('{bytes}', '$byteCount');
+  final posixScript =
+      '''
+stty raw -echo
+printf READY
+dd bs=1 count=1 of=/dev/null 2>/dev/null
+head -c $byteCount /dev/zero
+''';
+  final session = await PtySession.spawn(
+    PtySpawnOptions(
+      executable: Platform.isWindows
+          ? r'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe'
+          : '/bin/sh',
+      arguments: Platform.isWindows
+          ? ['-NoProfile', '-NonInteractive', '-Command', windowsScript]
+          : ['-c', posixScript],
+      initialSize: _size,
+    ),
+  );
+  final bytes = _ChunkReader(session.output);
+  try {
+    for (final expected in ascii.encode('READY')) {
+      if (await bytes.readByte().timeout(_timeout) != expected) {
+        throw StateError('transport child did not emit READY');
+      }
+    }
+    await session.write(Uint8List.fromList(const [1]));
+    final stopwatch = Stopwatch()..start();
+    var received = 0;
+    while (received < byteCount) {
+      final chunk = await bytes.readChunk().timeout(_timeout);
+      if (chunk == null) {
+        throw StateError('transport output reached EOF at $received');
+      }
+      if (chunk.any((byte) => byte != 0)) {
+        throw StateError('transport output mismatch at $received');
+      }
+      received += chunk.length;
+    }
+    stopwatch.stop();
+    return {
+      'bytes': received,
+      'elapsed_us': stopwatch.elapsedMicroseconds,
+      'mib_per_second':
+          received / (1024 * 1024) / (stopwatch.elapsedMicroseconds / 1e6),
+      'exit_code': await session.exitCode.timeout(_timeout),
+    };
+  } finally {
+    await bytes.cancel();
+    await session.close();
+  }
+}
+
 Future<Map<String, Object?>> _inputThroughput(int byteCount) async {
   final (:session, :bytes) = await _readySession('input-verify', [
     '$byteCount',
@@ -336,6 +444,71 @@ Future<Map<String, Object?>> _inputThroughput(int byteCount) async {
       'mib_per_second':
           byteCount / (1024 * 1024) / (stopwatch.elapsedMicroseconds / 1e6),
       'exit_code': exitCode,
+    };
+  } finally {
+    await bytes.cancel();
+    await session.close();
+  }
+}
+
+Future<Map<String, Object?>> _transportInput(int byteCount) async {
+  final windowsScript =
+      r'''
+[Console]::Write("READY")
+$input = [Console]::OpenStandardInput()
+$buffer = [byte[]]::new(65536)
+$received = 0
+while ($received -lt {bytes}) {
+  $count = $input.Read(
+    $buffer,
+    0,
+    [Math]::Min($buffer.Length, {bytes} - $received)
+  )
+  if ($count -eq 0) { break }
+  $received += $count
+}
+[Console]::WriteLine($received)
+'''
+          .replaceAll('{bytes}', '$byteCount');
+  final session = await PtySession.spawn(
+    PtySpawnOptions(
+      executable: Platform.isWindows
+          ? r'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe'
+          : '/bin/sh',
+      arguments: Platform.isWindows
+          ? ['-NoProfile', '-NonInteractive', '-Command', windowsScript]
+          : ['-c', 'stty raw -echo; printf READY; head -c $byteCount | wc -c'],
+      initialSize: _size,
+    ),
+  );
+  final bytes = _ChunkReader(session.output);
+  final chunk = Uint8List(64 * 1024)..fillRange(0, 64 * 1024, 120);
+  try {
+    for (final expected in ascii.encode('READY')) {
+      if (await bytes.readByte().timeout(_timeout) != expected) {
+        throw StateError('transport child did not emit READY');
+      }
+    }
+    final stopwatch = Stopwatch()..start();
+    var sent = 0;
+    while (sent < byteCount) {
+      final count = min(chunk.length, byteCount - sent);
+      await session.write(
+        count == chunk.length ? chunk : chunk.sublist(0, count),
+      );
+      sent += count;
+    }
+    final report = await _readLine(bytes);
+    stopwatch.stop();
+    if (report.trim() != '$byteCount') {
+      throw StateError('transport input mismatch: $report');
+    }
+    return {
+      'bytes': sent,
+      'elapsed_us': stopwatch.elapsedMicroseconds,
+      'mib_per_second':
+          sent / (1024 * 1024) / (stopwatch.elapsedMicroseconds / 1e6),
+      'exit_code': await session.exitCode.timeout(_timeout),
     };
   } finally {
     await bytes.cancel();
@@ -461,6 +634,82 @@ Future<Map<String, Object?>> _discardOutput(int byteCount) async {
   }
 }
 
+Future<Map<String, Object?>> _noListener(int byteCount) async {
+  final (:session, :bytes) = await _readySession('output', ['$byteCount']);
+  final before = await _resourceSnapshot();
+  try {
+    await session.write(Uint8List.fromList(const [1]));
+    await session.flush();
+    await Future<void>.delayed(const Duration(milliseconds: 250));
+    final bounded = await _resourceSnapshot();
+    final stopwatch = Stopwatch()..start();
+    await bytes.cancel();
+    session.discardOutput();
+    final exitCode = await session.exitCode.timeout(_timeout);
+    stopwatch.stop();
+    return {
+      'generated_bytes': byteCount,
+      'unobserved_ms': 250,
+      'resource_before': before,
+      'resource_at_bound': bounded,
+      'discard_to_exit_us': stopwatch.elapsedMicroseconds,
+      'exit_code': exitCode,
+    };
+  } finally {
+    await session.close();
+  }
+}
+
+Future<Map<String, Object?>> _inputSaturation(
+  int capacity,
+  int childDelayMs,
+) async {
+  final session = await PtySession.spawn(
+    PtySpawnOptions(
+      executable: Platform.resolvedExecutable,
+      arguments: [
+        Platform.script.resolve('fixture.dart').toFilePath(),
+        'delayed-input-verify',
+        '$capacity',
+        '$childDelayMs',
+      ],
+      initialSize: _size,
+      maxBufferedInput: capacity,
+    ),
+  );
+  final bytes = _ChunkReader(session.output);
+  try {
+    for (final expected in ascii.encode('READY')) {
+      if (await bytes.readByte().timeout(_timeout) != expected) {
+        throw StateError('saturation child did not emit READY');
+      }
+    }
+    final payload = Uint8List(capacity);
+    _fillPattern(payload, 0, payload.length);
+    if (!session.tryWrite(payload)) {
+      throw StateError('initial saturation write was rejected');
+    }
+    final stopwatch = Stopwatch()..start();
+    await session.waitForInputCapacity(capacity).timeout(_timeout);
+    stopwatch.stop();
+    await session.flush().timeout(_timeout);
+    final report = await _readLine(bytes);
+    if (report != 'OK $capacity') {
+      throw StateError('saturation integrity failure: $report');
+    }
+    return {
+      'capacity_bytes': capacity,
+      'child_delay_ms': childDelayMs,
+      'capacity_recovery_us': stopwatch.elapsedMicroseconds,
+      'report': report,
+      'exit_code': await session.exitCode.timeout(_timeout),
+    };
+  } finally {
+    await bytes.cancel();
+    await session.close();
+  }
+}
+
 Future<Map<String, Object?>> _fairness(
   int sessionCount,
   int repetitions,
@@ -511,7 +760,84 @@ Future<Map<String, Object?>> _fairness(
   }
 }
 
+Future<Map<String, Object?>> _activeOutputFairness(
+  int sessionCount,
+  int byteCount,
+) async {
+  final pairs = <({PtySession session, _ChunkReader bytes})>[];
+  try {
+    for (var index = 0; index < sessionCount; index++) {
+      pairs.add(await _readySession('output', ['$byteCount']));
+    }
+    final resourcesBefore = await _resourceSnapshot();
+    for (final pair in pairs) {
+      await pair.session.write(Uint8List.fromList(const [1]));
+    }
+    await Future.wait(pairs.map((pair) => pair.session.flush()));
+    final elapsed = List<int>.filled(sessionCount, 0);
+    final transfers = [
+      for (var sessionIndex = 0; sessionIndex < sessionCount; sessionIndex++)
+        Future<void>(() async {
+          final stopwatch = Stopwatch()..start();
+          var received = 0;
+          while (received < byteCount) {
+            final chunk = await pairs[sessionIndex].bytes.readChunk().timeout(
+              _timeout,
+            );
+            if (chunk == null) {
+              throw StateError(
+                'active session $sessionIndex reached EOF at $received',
+              );
+            }
+            for (var index = 0; index < chunk.length; index++) {
+              if (chunk[index] != _pattern(received + index)) {
+                throw StateError(
+                  'active session $sessionIndex mismatch at '
+                  '${received + index}',
+                );
+              }
+            }
+            received += chunk.length;
+          }
+          stopwatch.stop();
+          elapsed[sessionIndex] = stopwatch.elapsedMicroseconds;
+          await pairs[sessionIndex].session.exitCode.timeout(_timeout);
+        }),
+    ];
+    await Future<void>.delayed(const Duration(milliseconds: 10));
+    final resourcesBusy = await _resourceSnapshot();
+    await Future.wait(transfers);
+    final throughputs = [
+      for (final micros in elapsed) byteCount / (1024 * 1024) / (micros / 1e6),
+    ];
+    final sortedThroughputs = [...throughputs]..sort();
+    return {
+      'sessions': sessionCount,
+      'bytes_per_session': byteCount,
+      'aggregate_mib_per_second': throughputs.reduce((a, b) => a + b),
+      'slowest_to_fastest_ratio':
+          sortedThroughputs.first / sortedThroughputs.last,
+      'resource_busy': resourcesBusy,
+      'resource_before': resourcesBefore,
+      'per_session': [
+        for (var index = 0; index < sessionCount; index++)
+          {
+            'session': index,
+            'elapsed_us': elapsed[index],
+            'mib_per_second': throughputs[index],
+          },
+      ],
+    };
+  } finally {
+    for (final pair in pairs.reversed) {
+      await pair.bytes.cancel();
+      await pair.session.close();
+    }
+  }
+}
+
 Future<Map<String, Object?>> _spawnClose(int repetitions) async {
+  final resourceBefore = await _resourceSnapshot();
   final samples = <int>[];
   for (var i = 0; i < repetitions; i++) {
     final stopwatch = Stopwatch()..start();
@@ -522,14 +848,125 @@ Future<Map<String, Object?>> _spawnClose(int repetitions) async {
     stopwatch.stop();
     samples.add(stopwatch.elapsedMicroseconds);
   }
-  return _distribution(samples);
+  await Future<void>.delayed(const Duration(milliseconds: 250));
+  return {
+    ..._distribution(samples),
+    'resource_before': resourceBefore,
+    'resource_after': await _resourceSnapshot(),
+  };
+}
+
+Future<Map<String, Object?>> _observationOverhead(int repetitions) async {
+  final (:session, :bytes) = await _readySession('ready-cat');
+  try {
+    final resize = Stopwatch()..start();
+    for (var index = 0; index < repetitions; index++) {
+      session.resize(
+        PtySize(rows: 24 + (index & 1), columns: 80 + (index & 1)),
+      );
+    }
+    resize.stop();
+    final mode = Stopwatch()..start();
+    var modeSamples = 0;
+    if (session.capabilities.terminalModes) {
+      for (var index = 0; index < repetitions; index++) {
+        if (session.mode != null) modeSamples++;
+      }
+    }
+    mode.stop();
+    return {
+      'repetitions': repetitions,
+      'resize_total_us': resize.elapsedMicroseconds,
+      'resize_mean_us': resize.elapsedMicroseconds / repetitions,
+      'mode_samples': modeSamples,
+      'mode_total_us': mode.elapsedMicroseconds,
+      'mode_mean_us': modeSamples == 0
+          ? null
+          : mode.elapsedMicroseconds / modeSamples,
+    };
+  } finally {
+    await bytes.cancel();
+    await session.close();
+  }
+}
+
+Future<Map<String, Object?>> _forcedClose() async {
+  const windowsScript = r'''
+$child = Start-Process `
+  powershell.exe `
+  -PassThru `
+  -ArgumentList "-NoProfile -NonInteractive -Command Start-Sleep -Seconds 30"
+[Console]::WriteLine($child.Id)
+while ($true) { Start-Sleep -Seconds 1 }
+''';
+  const posixScript = r'''
+(trap "" HUP TERM; sleep 30) & child=$!
+printf "%s\n" "$child"
+trap "" HUP TERM
+while :; do sleep 1; done
+''';
+  final command = Platform.isWindows
+      ? (
+          executable:
+              r'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe',
+          arguments: const [
+            '-NoProfile',
+            '-NonInteractive',
+            '-Command',
+            windowsScript,
+          ],
+        )
+      : (executable: '/bin/sh', arguments: const ['-c', posixScript]);
+  final session = await PtySession.spawn(
+    PtySpawnOptions(
+      executable: command.executable,
+      arguments: command.arguments,
+      initialSize: _size,
+      gracefulCloseTimeout: Duration.zero,
+    ),
+  );
+  final lines = StreamIterator(
+    session.output
+        .map<List<int>>((chunk) => chunk)
+        .transform(utf8.decoder)
+        .transform(const LineSplitter()),
+  );
+  try {
+    if (!await lines.moveNext().timeout(_timeout)) {
+      throw StateError('forced-close child did not report a descendant');
+    }
+    final descendant = int.parse(lines.current.trim());
+    final resourcesBefore = await _resourceSnapshot();
+    final stopwatch = Stopwatch()..start();
+    await session.close().timeout(_timeout);
+    while (await _processExists(descendant) &&
+        stopwatch.elapsed < const Duration(seconds: 10)) {
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+    }
+    stopwatch.stop();
+    final descendantReclaimed = !await _processExists(descendant);
+    if (!descendantReclaimed) {
+      throw StateError('forced close retained descendant $descendant');
+    }
+    return {
+      'descendant_pid': descendant,
+      'close_and_descendant_reclaim_us': stopwatch.elapsedMicroseconds,
+      'descendant_reclaimed': descendantReclaimed,
+      'exit_code': await session.exitCode.timeout(_timeout),
+      'resource_before': resourcesBefore,
+      'resource_after': await _resourceSnapshot(),
+    };
+  } finally {
+    await lines.cancel();
+    await session.close();
+  }
 }
 
 Future<Map<String, Object?>> _idleSessions(int count) async {
-  final rssBefore = ProcessInfo.currentRss;
-  final threadsBefore = await _threadCount();
+  final resourcesBefore = await _resourceSnapshot();
   final stopwatch = Stopwatch()..start();
   final sessions = <PtySession>[];
+  final result = <String, Object?>{};
   Object? failure;
   try {
     for (var i = 0; i < count; i++) {
@@ -541,20 +978,175 @@ Future<Map<String, Object?>> _idleSessions(int count) async {
       }
     }
     stopwatch.stop();
-    return {
+    await Future<void>.delayed(const Duration(milliseconds: 250));
+    result.addAll({
       'requested_sessions': count,
       'created_sessions': sessions.length,
       'failure': failure?.toString(),
       'spawn_elapsed_us': stopwatch.elapsedMicroseconds,
-      'rss_delta_bytes': ProcessInfo.currentRss - rssBefore,
-      'threads_before': threadsBefore,
-      'threads_after': failure == null ? await _threadCount() : null,
-    };
+      'resource_before': resourcesBefore,
+      'resource_idle': failure == null ? await _resourceSnapshot() : null,
+    });
+    return result;
   } finally {
     for (final session in sessions.reversed) {
       await session.close().timeout(_timeout);
     }
+    await Future<void>.delayed(const Duration(milliseconds: 250));
+    result['resource_after'] = await _resourceSnapshot();
   }
+}
+
+Future<String> _readLine(_ChunkReader bytes) async {
+  final result = StringBuffer();
+  while (true) {
+    final value = await bytes.readByte().timeout(_timeout);
+    if (value == null) {
+      throw StateError('child reached EOF before reporting a line');
+    }
+    if (value == 10 || value == 13) {
+      if (result.isNotEmpty) return result.toString();
+    } else {
+      result.writeCharCode(value);
+    }
+  }
+}
+
+Future<Map<String, Object?>> _resourceSnapshot() async {
+  if (Platform.isWindows) {
+    final result = await Process.run(
+      r'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe',
+      [
+        '-NoProfile',
+        '-NonInteractive',
+        '-Command',
+        r'''
+$all = Get-CimInstance Win32_Process
+$ids = [System.Collections.Generic.HashSet[uint32]]::new()
+[void]$ids.Add($PID)
+do {
+  $before = $ids.Count
+  foreach ($process in $all) {
+    if ($ids.Contains([uint32]$process.ParentProcessId)) {
+      [void]$ids.Add([uint32]$process.ProcessId)
+    }
+  }
+} while ($ids.Count -ne $before)
+$processes = Get-Process -Id @($ids) -ErrorAction SilentlyContinue
+$cpu = ($processes | Measure-Object CPU -Sum).Sum
+$rss = ($processes | Measure-Object WorkingSet64 -Sum).Sum
+$handles = ($processes | Measure-Object HandleCount -Sum).Sum
+"$([int64]($cpu * 1000000))|$([int64]$rss)|$([int64]$handles)|$($ids.Count)"
+''',
+      ],
+    );
+    if (result.exitCode != 0) {
+      throw StateError('Windows resource query failed: ${result.stderr}');
+    }
+    final fields = '${result.stdout}'.trim().split('|').map(int.parse).toList();
+    return {
+      'tree_cpu_us': fields[0],
+      'tree_rss_bytes': fields[1],
+      'tree_handles': fields[2],
+      'tree_processes': fields[3],
+      'dart_threads': await _threadCount(),
+    };
+  }
+  final result = await Process.run('ps', const [
+    '-axo',
+    'pid=,ppid=,rss=,time=',
+  ]);
+  if (result.exitCode != 0) {
+    throw StateError('ps resource query failed: ${result.stderr}');
+  }
+  final entries = <int, ({int parent, int rssKiB, int cpuUs})>{};
+  for (final line in const LineSplitter().convert('${result.stdout}')) {
+    final fields = line.trim().split(RegExp(r'\s+'));
+    if (fields.length != 4) continue;
+    final process = int.tryParse(fields[0]);
+    final parent = int.tryParse(fields[1]);
+    final rss = int.tryParse(fields[2]);
+    if (process == null || parent == null || rss == null) continue;
+    entries[process] = (
+      parent: parent,
+      rssKiB: rss,
+      cpuUs: _parseCpuMicros(fields[3]),
+    );
+  }
+  final tree = <int>{pid};
+  var changed = true;
+  while (changed) {
+    changed = false;
+    for (final entry in entries.entries) {
+      if (tree.contains(entry.value.parent) && tree.add(entry.key)) {
+        changed = true;
+      }
+    }
+  }
+  final treeEntries = tree
+      .map((process) => entries[process])
+      .whereType<({int parent, int rssKiB, int cpuUs})>();
+  final descriptors = Platform.isLinux
+      ? await Directory('/proc/$pid/fd').list(followLinks: false).length
+      : await _macDescriptorCount();
+  return {
+    'tree_cpu_us': treeEntries.fold<int>(
+      0,
+      (total, entry) => total + entry.cpuUs,
+    ),
+    'tree_rss_bytes': treeEntries.fold<int>(
+      0,
+      (total, entry) => total + entry.rssKiB * 1024,
+    ),
+    'tree_descriptors': descriptors,
+    'tree_processes': tree.length,
+    'dart_threads': await _threadCount(),
+  };
+}
+
+Future<int> _macDescriptorCount() async {
+  final result = await Process.run('/usr/sbin/lsof', [
+    '-a',
+    '-p',
+    '$pid',
+    '-Fn',
+  ]);
+  if (result.exitCode != 0) {
+    throw StateError('lsof descriptor query failed: ${result.stderr}');
+  }
+  return const LineSplitter()
+      .convert('${result.stdout}')
+      .where((line) => line.startsWith('f'))
+      .length;
+}
+
+int _parseCpuMicros(String value) {
+  final dayParts = value.split('-');
+  final days = dayParts.length == 2 ? int.parse(dayParts[0]) : 0;
+  final clock = dayParts.last.split(':').map(double.parse).toList();
+  var seconds = 0.0;
+  for (final part in clock) {
+    seconds = seconds * 60 + part;
+  }
+  return ((days * 86400 + seconds) * 1e6).round();
+}
+
+Future<bool> _processExists(int process) async {
+  if (Platform.isWindows) {
+    final script =
+        '''
+if (Get-Process -Id $process -ErrorAction SilentlyContinue) {
+  exit 0
+} else {
+  exit 1
+}''';
+    final result = await Process.run(
+      r'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe',
+      ['-NoProfile', '-NonInteractive', '-Command', script],
+    );
+    return result.exitCode == 0;
+  }
+  return (await Process.run('/bin/kill', ['-0', '$process'])).exitCode == 0;
 }
 
 Future<int> _threadCount() async {

@@ -26,6 +26,15 @@ Future<void> main(List<String> arguments) async {
       final result = await _readPattern(int.parse(arguments[1]), echo: false);
       stdout.writeln(result);
       await stdout.flush();
+    case 'delayed-input-verify':
+      _writeReady();
+      await stdout.flush();
+      await Future<void>.delayed(
+        Duration(milliseconds: int.parse(arguments[2])),
+      );
+      final result = await _readPattern(int.parse(arguments[1]), echo: false);
+      stdout.writeln(result);
+      await stdout.flush();
     case 'echo-count':
       _writeReady();
       final result = await _readPattern(int.parse(arguments[1]), echo: true);

@@ -4,42 +4,91 @@ import 'dart:io';
 import 'dart:math';
 import 'dart:typed_data';
 
+import 'package:crypto/crypto.dart';
 import 'package:ffi/ffi.dart';
 
-const _byteCount = 32 * 1024 * 1024;
+const _defaultByteCount = 32 * 1024 * 1024;
+const _defaultRepetitions = 5;
 const _bufferSize = 64 * 1024;
 
 void main(List<String> arguments) {
-  if (arguments.length != 2) {
+  final positional = arguments
+      .where((value) => !value.startsWith('--'))
+      .toList();
+  if (positional.length != 2) {
     stderr.writeln(
-      'usage: dart run scorecard.dart <candidate-name> <dynamic-library>',
+      'usage: dart run scorecard.dart <candidate-name> <dynamic-library> '
+      '[--bytes=N] [--repetitions=N] [--output=PATH]',
     );
     exitCode = 64;
     return;
   }
+  final byteCount = _integerOption(arguments, '--bytes=', _defaultByteCount);
+  final repetitions = _integerOption(
+    arguments,
+    '--repetitions=',
+    _defaultRepetitions,
+  );
+  final output = _stringOption(arguments, '--output=');
+  if (byteCount <= 0 || repetitions <= 0) {
+    throw ArgumentError('byte and repetition counts must be positive');
+  }
 
-  final candidate = _Candidate.open(arguments[1]);
+  final candidate = _Candidate.open(positional[1]);
   if (candidate.abi() != 1) {
     throw StateError('unsupported candidate ABI ${candidate.abi()}');
   }
   final result = <String, Object?>{
-    'schema': 1,
-    'candidate': arguments[0],
-    'library': arguments[1],
+    'schema': 2,
+    'candidate': positional[0],
+    'library': positional[1],
+    'library_sha256': sha256
+        .convert(File(positional[1]).readAsBytesSync())
+        .toString(),
+    'revision': _git(['rev-parse', 'HEAD']),
+    'tree_dirty': _git(['status', '--porcelain']).isNotEmpty,
+    'command': arguments,
+    'byte_count': byteCount,
+    'repetitions': repetitions,
     'boundary':
         'Dart FFI, copied buffers, candidate registry, direct PTY, child',
     'pid': pid,
     'rss_before_bytes': ProcessInfo.currentRss,
-    'interactive': _repeat(5, () => _interactive(candidate, 400)),
-    'output': _repeat(5, () => _output(candidate, _byteCount)),
-    'input': _repeat(5, () => _input(candidate, _byteCount)),
+    'interactive': _repeat(repetitions, () => _interactive(candidate, 400)),
+    'output': _repeat(repetitions, () => _output(candidate, byteCount)),
+    'input': _repeat(repetitions, () => _input(candidate, byteCount)),
     'spawn_close': _spawnClose(candidate, 50),
     'idle_100': _idle(candidate, 100),
     'stale_handle_rejected': _staleHandle(candidate),
     'rss_after_bytes': ProcessInfo.currentRss,
   };
 
-  stdout.writeln(const JsonEncoder.withIndent('  ').convert(result));
+  final encoded = const JsonEncoder.withIndent('  ').convert(result);
+  stdout.writeln(encoded);
+  if (output != null) {
+    File(output).writeAsStringSync('$encoded\n', flush: true);
+  }
+}
+
+int _integerOption(List<String> arguments, String prefix, int fallback) {
+  final value = _stringOption(arguments, prefix);
+  return value == null ? fallback : int.parse(value);
+}
+
+String? _stringOption(List<String> arguments, String prefix) {
+  final values = arguments.where((value) => value.startsWith(prefix)).toList();
+  if (values.length > 1) {
+    throw ArgumentError('option $prefix was repeated');
+  }
+  return values.singleOrNull?.substring(prefix.length);
+}
+
+String _git(List<String> arguments) {
+  final result = Process.runSync('git', arguments);
+  if (result.exitCode != 0) {
+    throw StateError('git ${arguments.join(' ')} failed: ${result.stderr}');
+  }
+  return '${result.stdout}'.trim();
 }
 
 List<T> _repeat<T>(int count, T Function() run) {

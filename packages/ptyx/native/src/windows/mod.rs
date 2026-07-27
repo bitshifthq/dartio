@@ -330,7 +330,7 @@ fn quarantine_pseudoconsole(pseudoconsole: OwnedPseudoConsole, permit: Option<Cl
 
 enum Command {
     Add {
-        session: Session,
+        session: Box<Session>,
         reply: Sender<io::Result<u64>>,
     },
     Activate {
@@ -729,7 +729,10 @@ impl IntegratedRuntime {
             input_capacity,
             output_capacity,
         );
-        self.request_result(|reply| Command::Add { session, reply })?
+        self.request_result(|reply| Command::Add {
+            session: Box::new(session),
+            reply,
+        })?
     }
 
     pub(crate) fn activate(&self, handle: u64) -> bool {
@@ -988,7 +991,7 @@ fn process_commands(
         };
         match command {
             Command::Add { session, reply } => {
-                let handle = sessions.insert(session);
+                let handle = sessions.insert(*session);
                 let result = associate_session(
                     &iocp_sender.0,
                     handle,

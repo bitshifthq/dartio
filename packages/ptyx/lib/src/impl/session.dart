@@ -17,6 +17,7 @@ final _sessionFinalizer = Finalizer<int>(
 final _sessionRegistryFinalizer = Finalizer<_SessionRegistryToken>(
   (token) => token.runtime._removeSession(token.handle),
 );
+const _terminalDrainTimeout = Duration(seconds: 15);
 
 int? _lastNativeCode() {
   final code = controllerLastErrorCode();
@@ -619,7 +620,7 @@ final class NativeSession implements PtySession {
       await Future.wait<Object?>([
         _exit.future,
         _outputDone.future,
-      ]).timeout(const Duration(seconds: 5));
+      ]).timeout(_terminalDrainTimeout);
     } on Object catch (error, stackTrace) {
       recordFailure(error, stackTrace);
       controllerClose(_handle);

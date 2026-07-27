@@ -3,7 +3,6 @@ use crate::broker_client::{BrokerClient, BrokerOwner, BrokerSession, BrokerSpawn
 use std::collections::{HashMap, VecDeque};
 use std::ffi::CString;
 use std::io;
-#[cfg(target_os = "linux")]
 use std::mem::MaybeUninit;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 #[cfg(target_os = "macos")]
@@ -1167,7 +1166,7 @@ fn read_ready(
         let maximum = (session.output_capacity - session.output_total())
             .min(64 * 1024)
             .min(BYTE_QUANTUM - bytes);
-        let mut buffer = [0_u8; 64 * 1024];
+        let mut buffer = MaybeUninit::<[u8; 64 * 1024]>::uninit();
         let result = unsafe {
             libc::read(
                 session.master.as_raw_fd(),
@@ -1189,7 +1188,10 @@ fn read_ready(
             }
             session.output_bytes += amount;
             session.output.push_back(QueuedOutput {
-                bytes: buffer[..amount].to_vec(),
+                // `read` initialized exactly this prefix.
+                bytes: unsafe {
+                    std::slice::from_raw_parts(buffer.as_ptr().cast(), amount).to_vec()
+                },
                 offset: 0,
             });
             continue;

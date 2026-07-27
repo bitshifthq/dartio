@@ -73,11 +73,29 @@ jobs:
           SOAK_SECONDS: ${{ inputs.soak_seconds || '1800' }}
         run: dart run tool/soak.dart "$SOAK_SECONDS"
 
-  multi-day-soak:
-    name: multi-day-soak-linux-x64
-    if: github.event_name == 'schedule'
-    runs-on: ubuntu-latest
-    timeout-minutes: 1500
+  scorecard:
+    name: scorecard-${{ matrix.os }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: linux-x64
+            runner: ubuntu-latest
+          - os: linux-arm64
+            runner: ubuntu-24.04-arm
+          - os: macos-x64
+            runner: macos-15-intel
+          - os: macos-arm64
+            runner: macos-15
+          - os: windows-x64
+            runner: windows-2022
+          - os: windows-arm64
+            runner: windows-11-arm
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dart-lang/setup-dart@65eb853c7ba17dde3be364c3d2858773e7144260 # v1.7.2
@@ -85,9 +103,36 @@ jobs:
           sdk: 3.11.0
       - run: rustup toolchain install stable --profile minimal
       - run: dart pub get
-      - name: retain a 24-hour long-lived and repeated-cycle session result
+      - name: run correctness-gated diagnostic scorecard
         working-directory: packages/ptyx
-        run: dart run tool/soak.dart 86400 | tee soak-linux-x64.json
+        run: >-
+          dart run benchmark/scorecard.dart all
+          --warmups=0
+          --repetitions=1
+          --bytes=8388608
+          --output=scorecard-${{ matrix.os }}.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ptyx-scorecard-${{ matrix.os }}-${{ github.sha }}
+          path: packages/ptyx/scorecard-${{ matrix.os }}.json
+          if-no-files-found: error
+          retention-days: 90
+
+  hosted-long-soak:
+    name: hosted-six-hour-soak-linux-x64
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dart-lang/setup-dart@65eb853c7ba17dde3be364c3d2858773e7144260 # v1.7.2
+        with:
+          sdk: 3.11.0
+      - run: rustup toolchain install stable --profile minimal
+      - run: dart pub get
+      - name: retain a five-hour, forty-five-minute hosted soak result
+        working-directory: packages/ptyx
+        run: dart run tool/soak.dart 20700 | tee soak-linux-x64.json
       - uses: actions/upload-artifact@v4
         with:
           name: ptyx-soak-linux-x64-${{ github.sha }}
