@@ -851,6 +851,7 @@ final class _ControllerRuntime {
   SendPort? _supervisor;
   Future<SendPort>? _supervisorStart;
   var _pendingSpawns = 0;
+  var _idleReleaseScheduled = false;
 
   int get outputPort => _output.sendPort.nativePort;
   int get eventPort => _events.sendPort.nativePort;
@@ -960,11 +961,22 @@ final class _ControllerRuntime {
       const PtyClosedException('session is no longer reachable'),
     );
     if (_sessions.isEmpty) {
-      _output.keepIsolateAlive = false;
-      _events.keepIsolateAlive = false;
+      _scheduleIdleRelease();
     }
     _forgetSupervisedHandle(handle);
     _stopSupervisorIfIdle();
+  }
+
+  void _scheduleIdleRelease() {
+    if (_idleReleaseScheduled) return;
+    _idleReleaseScheduled = true;
+    Timer.run(() {
+      _idleReleaseScheduled = false;
+      if (_sessions.isEmpty && _pendingSpawns == 0) {
+        _output.keepIsolateAlive = false;
+        _events.keepIsolateAlive = false;
+      }
+    });
   }
 
   Future<void> _wait(
