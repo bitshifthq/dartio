@@ -1090,6 +1090,7 @@ fn handle_process_exit(
         if unsafe { GetExitCodeProcess(session.process.raw(), &mut status) } != 0 {
             session.exit_status = Some(status as i32);
             fail_input_waiters(handle, session, notices, counters);
+            cancel_write(session);
         } else {
             session.cleanup_failed = true;
             send_notice(notices, Notice::BrokerLost(handle), counters);

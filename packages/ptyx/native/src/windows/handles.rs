@@ -110,13 +110,15 @@ impl Drop for OwnedProcessWait {
 }
 
 unsafe extern "system" fn post_process_exit(context: *mut c_void, _timed_out: bool) {
-    let context = &*context.cast::<ProcessWaitContext>();
-    PostQueuedCompletionStatus(
-        context.completion_port,
-        0,
-        context.completion_key,
-        null_mut(),
-    );
+    let context = unsafe { &*context.cast::<ProcessWaitContext>() };
+    unsafe {
+        PostQueuedCompletionStatus(
+            context.completion_port,
+            0,
+            context.completion_key,
+            null_mut(),
+        );
+    }
 }
 
 pub(crate) struct OwnedPseudoConsole(HPCON);
