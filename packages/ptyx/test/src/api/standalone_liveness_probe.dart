@@ -3,6 +3,8 @@ import 'dart:io';
 
 import 'package:ptyx/ptyx.dart';
 
+import '../../../benchmark/vt_payload.dart';
+
 Future<void> main() async {
   final session = await PtySession.spawn(
     PtySpawnOptions(
@@ -20,7 +22,10 @@ Future<void> main() async {
       initialSize: const PtySize(rows: 24, columns: 80),
     ),
   );
-  final output = session.output.expand((chunk) => chunk).toList();
+  final output =
+      (Platform.isWindows ? fixturePayload(session.output) : session.output)
+          .expand((chunk) => chunk)
+          .toList();
   final exitCode = await session.exitCode;
   final bytes = await output;
   await session.close();

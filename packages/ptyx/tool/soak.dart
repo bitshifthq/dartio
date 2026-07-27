@@ -6,6 +6,8 @@ import 'dart:typed_data';
 import 'package:crypto/crypto.dart';
 import 'package:ptyx/ptyx.dart';
 
+import '../benchmark/vt_payload.dart';
+
 const _size = PtySize(rows: 24, columns: 80);
 const _operationTimeout = Duration(seconds: 30);
 const _ready = [82, 69, 65, 68, 89];
@@ -43,7 +45,7 @@ Future<void> main(List<String> arguments) async {
   var longLivedBytes = 0;
   final longSession = await _spawnFixture('ready-cat', 0);
   final longOutput = StreamIterator(
-    longSession.output.expand((chunk) => chunk),
+    fixturePayload(longSession.output).expand((chunk) => chunk),
   );
   await _expectReady(longOutput);
   final deadline = DateTime.now().add(duration);
@@ -150,7 +152,9 @@ Future<void> main(List<String> arguments) async {
 
 Future<void> _warmLongLivedSession() async {
   final session = await _spawnFixture('ready-cat', 0);
-  final output = StreamIterator(session.output.expand((chunk) => chunk));
+  final output = StreamIterator(
+    fixturePayload(session.output).expand((chunk) => chunk),
+  );
   try {
     await _expectReady(output);
     await session.write(Uint8List.fromList(const [65]));
@@ -168,7 +172,9 @@ Future<void> _warmLongLivedSession() async {
 Future<int> _runCycle(int cycle) async {
   const byteCount = 64 * 1024;
   final session = await _spawnFixture('echo-count', byteCount);
-  final iterator = StreamIterator(session.output.expand((chunk) => chunk));
+  final iterator = StreamIterator(
+    fixturePayload(session.output).expand((chunk) => chunk),
+  );
   try {
     await _expectReady(iterator);
     final input = Uint8List(byteCount)

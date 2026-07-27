@@ -1,7 +1,10 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:test/test.dart';
+
+import '../../benchmark/vt_payload.dart';
 
 void main() {
   group('benchmark fixture', () {
@@ -35,6 +38,20 @@ void main() {
         process.kill();
         await process.exitCode.timeout(const Duration(seconds: 10));
       }
+    });
+
+    test('extracts fixture bytes across split VT sequences', () async {
+      final chunks = Stream.fromIterable([
+        Uint8List.fromList([0x1b, 0x5b, 0x32]),
+        Uint8List.fromList([0x4a, 82, 69, 65]),
+        Uint8List.fromList([68, 89, 0x1b, 0x5d, 0x30, 0x3b]),
+        Uint8List.fromList([0x74, 0x69, 0x74, 0x6c, 0x65, 0x07, 65]),
+      ]);
+
+      expect(await fixturePayload(chunks).expand((chunk) => chunk).toList(), [
+        ...'READY'.codeUnits,
+        65,
+      ]);
     });
   });
 }

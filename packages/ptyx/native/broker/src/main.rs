@@ -1174,11 +1174,22 @@ impl Broker {
             Some(SlotState::Running { pid }) => *pid,
             _ => return Ok(()),
         };
-        // NOTE_EXIT is authoritative: the process has exited even if waitid's
-        // nonblocking observation would briefly lag the kqueue notification.
-        // Wait for the status instead of racing a one-shot re-registration
-        // against the process disappearing.
-        let exit = await_exit(pid)?;
+        // NOTE_EXIT can precede waitid's observable status on macOS. Poll the
+        // status under a finite deadline instead of racing a one-shot
+        // re-registration against the process disappearing.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let exit = loop {
+            if let Some(exit) = observe_exit(pid)? {
+                break exit;
+            }
+            if Instant::now() >= deadline {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "waitid status lagged NOTE_EXIT",
+                ));
+            }
+            thread::sleep(Duration::from_millis(1));
+        };
         if let Some((index, generation)) = split_session(session) {
             let slot = &mut self.slots[index];
             if slot.generation == generation {
@@ -1906,7 +1917,6 @@ fn decode_wait_status(status: i32) -> i32 {
     }
 }
 
-#[cfg(target_os = "linux")]
 fn observe_exit(pid: libc::pid_t) -> io::Result<Option<ExitStatus>> {
     let mut information = MaybeUninit::<libc::siginfo_t>::zeroed();
     loop {

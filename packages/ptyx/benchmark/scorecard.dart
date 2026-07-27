@@ -7,6 +7,8 @@ import 'dart:typed_data';
 import 'package:crypto/crypto.dart';
 import 'package:ptyx/ptyx.dart';
 
+import 'vt_payload.dart';
+
 const _size = PtySize(rows: 24, columns: 80);
 const _timeout = Duration(seconds: 60);
 
@@ -276,14 +278,23 @@ Future<({PtySession session, _ChunkReader bytes})> _readySession(
 ]) async {
   final session = await _spawnFixture(operation, arguments);
   final bytes = _ChunkReader(session.output);
-  for (final expected in ascii.encode('READY')) {
-    if (await bytes.readByte().timeout(_timeout) != expected) {
-      await bytes.cancel();
-      await session.close();
-      throw StateError('child did not emit READY');
+  const marker = [82, 69, 65, 68, 89];
+  var matched = 0;
+  for (var consumed = 0; consumed < 64 * 1024; consumed++) {
+    final byte = await bytes.readByte().timeout(_timeout);
+    if (byte == null) break;
+    if (byte == marker[matched]) {
+      matched++;
+      if (matched == marker.length) {
+        return (session: session, bytes: bytes);
+      }
+    } else {
+      matched = byte == marker.first ? 1 : 0;
     }
   }
-  return (session: session, bytes: bytes);
+  await bytes.cancel();
+  await session.close();
+  throw StateError('child did not emit READY');
 }
 
 Future<Map<String, Object?>> _interactiveRoundTrips(int repetitions) async {
@@ -851,7 +862,7 @@ Future<Map<String, Object?>> _spawnClose(int repetitions) async {
   for (var i = 0; i < repetitions; i++) {
     final stopwatch = Stopwatch()..start();
     final session = await _spawnExit();
-    await session.output.drain<void>();
+    await fixturePayload(session.output).drain<void>();
     final exit = session.exitCode;
     await session.close().timeout(_timeout);
     await exit.timeout(_timeout);
@@ -936,7 +947,7 @@ while :; do sleep 1; done
     ),
   );
   final lines = StreamIterator(
-    session.output
+    fixturePayload(session.output)
         .map<List<int>>((chunk) => chunk)
         .transform(utf8.decoder)
         .transform(const LineSplitter()),
@@ -1332,7 +1343,8 @@ final class _ChunkReader {
   Uint8List? _current;
   var _offset = 0;
 
-  _ChunkReader(Stream<Uint8List> stream) : _chunks = StreamIterator(stream);
+  _ChunkReader(Stream<Uint8List> stream)
+    : _chunks = StreamIterator(fixturePayload(stream));
 
   Future<int?> readByte() async {
     while (_current == null || _offset == _current!.length) {

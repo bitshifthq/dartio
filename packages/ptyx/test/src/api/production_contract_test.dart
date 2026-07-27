@@ -6,8 +6,13 @@ import 'dart:typed_data';
 import 'package:ptyx/ptyx.dart';
 import 'package:test/test.dart';
 
+import '../../../benchmark/vt_payload.dart';
+
 void main() {
   const size = PtySize(rows: 24, columns: 80);
+
+  Stream<Uint8List> fixtureOutput(PtySession session) =>
+      Platform.isWindows ? fixturePayload(session.output) : session.output;
 
   PtySpawnOptions shell(String script, {int inputCapacity = 4096}) {
     final executable = Platform.isWindows
@@ -41,7 +46,9 @@ void main() {
     final session = await pending;
     addTearDown(session.close);
 
-    final output = await session.output.expand((chunk) => chunk).toList();
+    final output = await fixtureOutput(
+      session,
+    ).expand((chunk) => chunk).toList();
 
     expect(String.fromCharCodes(output), 'ready');
   });
@@ -109,7 +116,7 @@ void main() {
       ),
     );
     addTearDown(session.close);
-    await session.output.first;
+    await fixtureOutput(session).first;
     final inputDone = expectLater(
       session.inputDone,
       throwsA(isA<PtyInputException>()),
@@ -136,7 +143,7 @@ void main() {
           inputCapacity: capacity,
         ),
       );
-      await session.output.first;
+      await fixtureOutput(session).first;
       expect(session.tryWrite(Uint8List(capacity)), isTrue);
 
       Future<void> expectClosed(Future<void> future, String operation) =>
@@ -341,7 +348,9 @@ void main() {
         );
         try {
           return utf8
-              .decode(await session.output.expand((chunk) => chunk).toList())
+              .decode(
+                await fixtureOutput(session).expand((chunk) => chunk).toList(),
+              )
               .trim();
         } finally {
           await session.close();

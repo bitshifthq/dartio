@@ -6,6 +6,8 @@ import 'dart:typed_data';
 import 'package:ptyx/ptyx.dart';
 import 'package:test/test.dart';
 
+import '../../../benchmark/vt_payload.dart';
+
 void main() {
   group('PtySession', () {
     const defaultSize = PtySize(rows: 24, columns: 80);
@@ -21,6 +23,9 @@ void main() {
     String platformScript({required String posix, required String windows}) {
       return Platform.isWindows ? windows : posix;
     }
+
+    Stream<Uint8List> fixtureOutput(PtySession session) =>
+        Platform.isWindows ? fixturePayload(session.output) : session.output;
 
     ({String executable, List<String> arguments}) shell(String script) {
       if (Platform.isWindows) {
@@ -80,7 +85,7 @@ void main() {
 
       return shell(
         r'$out = [Console]::OpenStandardOutput(); '
-        r'$chunk = New-Object byte[] 8192; '
+        r'$chunk = [Text.Encoding]::ASCII.GetBytes(("x" * 8192)); '
         r'$remaining = '
         '$byteCount; '
         r'while ($remaining -gt 0) { '
@@ -101,7 +106,7 @@ void main() {
 
     StreamIterator<String> outputLines(PtySession session) {
       final lines = StreamIterator(
-        session.output
+        fixtureOutput(session)
             .map<List<int>>((chunk) => chunk)
             .transform(utf8.decoder)
             .transform(const LineSplitter())
@@ -126,7 +131,7 @@ void main() {
           ),
         );
 
-        final bytes = await session.output
+        final bytes = await fixtureOutput(session)
             .expand((chunk) => chunk)
             .take('hello-ptyx'.length)
             .toList()
@@ -149,10 +154,9 @@ void main() {
             ),
           );
 
-          final output = await session.output
-              .expand((chunk) => chunk)
-              .toList()
-              .timeout(shortTimeout);
+          final output = await fixtureOutput(
+            session,
+          ).expand((chunk) => chunk).toList().timeout(shortTimeout);
 
           expect(utf8.decode(output), 'bare');
         },
@@ -217,10 +221,9 @@ void main() {
           ),
         );
 
-        final bytes = await session.output
-            .expand((chunk) => chunk)
-            .toList()
-            .timeout(shortTimeout);
+        final bytes = await fixtureOutput(
+          session,
+        ).expand((chunk) => chunk).toList().timeout(shortTimeout);
 
         expect(utf8.decode(bytes), 'done');
       });
@@ -229,11 +232,9 @@ void main() {
         const byteCount = 2 * 1024 * 1024;
         final session = await spawnCommand(finiteOutputCommand(byteCount));
 
-        final received = await session.output
-            .expand((chunk) => chunk)
-            .take(byteCount)
-            .length
-            .timeout(longTimeout);
+        final received = await fixtureOutput(
+          session,
+        ).expand((chunk) => chunk).take(byteCount).length.timeout(longTimeout);
 
         expect(received, byteCount);
       });
@@ -243,7 +244,7 @@ void main() {
         final firstChunk = Completer<void>();
         final secondChunk = Completer<void>();
         late final StreamSubscription<Uint8List> subscription;
-        subscription = session.output.listen((_) {
+        subscription = fixtureOutput(session).listen((_) {
           if (!firstChunk.isCompleted) {
             firstChunk.complete();
             subscription.pause();
@@ -271,11 +272,9 @@ void main() {
 
         expect(exitBeforeListen, -1);
 
-        final received = await session.output
-            .expand((chunk) => chunk)
-            .take(byteCount)
-            .length
-            .timeout(longTimeout);
+        final received = await fixtureOutput(
+          session,
+        ).expand((chunk) => chunk).take(byteCount).length.timeout(longTimeout);
         final exitCode = await session.exitCode.timeout(shortTimeout);
 
         expect(
@@ -289,7 +288,7 @@ void main() {
         final session = await spawnCommand(finiteOutputCommand(byteCount));
         final firstChunk = Completer<void>();
         late final StreamSubscription<Uint8List> subscription;
-        subscription = session.output.listen((_) {
+        subscription = fixtureOutput(session).listen((_) {
           if (!firstChunk.isCompleted) firstChunk.complete();
           unawaited(subscription.cancel());
         });
@@ -309,7 +308,7 @@ void main() {
         session.discardOutput();
 
         await session.exitCode.timeout(longTimeout);
-        await session.output.drain<void>().timeout(longTimeout);
+        await fixtureOutput(session).drain<void>().timeout(longTimeout);
       });
     });
 
@@ -332,10 +331,9 @@ void main() {
           environmentMode: environmentMode,
         );
 
-        final bytes = await session.output
-            .expand((chunk) => chunk)
-            .toList()
-            .timeout(shortTimeout);
+        final bytes = await fixtureOutput(
+          session,
+        ).expand((chunk) => chunk).toList().timeout(shortTimeout);
         return utf8.decode(bytes);
       }
 
@@ -404,11 +402,9 @@ void main() {
         final session = await spawnScript(inputEcho);
 
         await session.write(Uint8List.fromList(utf8.encode('ping\n')));
-        final bytes = await session.output
-            .expand((chunk) => chunk)
-            .take(4)
-            .toList()
-            .timeout(shortTimeout);
+        final bytes = await fixtureOutput(
+          session,
+        ).expand((chunk) => chunk).take(4).toList().timeout(shortTimeout);
 
         expect(utf8.decode(bytes), 'ping');
       });
@@ -436,7 +432,7 @@ void main() {
         final readyBytes = <int>[];
         var received = 0;
         late final StreamSubscription<Uint8List> subscription;
-        subscription = session.output.listen((chunk) {
+        subscription = fixtureOutput(session).listen((chunk) {
           if (!ready.isCompleted) {
             readyBytes.addAll(chunk);
             if (utf8
@@ -554,7 +550,7 @@ void main() {
       test('terminates a running child', () async {
         final session = await spawnCommand(infiniteOutputCommand());
 
-        await session.output.first.timeout(shortTimeout);
+        await fixtureOutput(session).first.timeout(shortTimeout);
         final killed = session.kill();
         await session.exitCode.timeout(shortTimeout);
 
@@ -570,7 +566,7 @@ void main() {
           'trap "exit 42" INT; printf ready; while :; do sleep 1; done',
         );
 
-        await session.output.first.timeout(shortTimeout);
+        await fixtureOutput(session).first.timeout(shortTimeout);
         final killed = session.kill(ProcessSignal.sigint);
         final exitCode = await session.exitCode.timeout(shortTimeout);
 
@@ -585,7 +581,7 @@ void main() {
       test('completes while output is active', () async {
         final session = await spawnCommand(infiniteOutputCommand());
 
-        await session.output.first.timeout(shortTimeout);
+        await fixtureOutput(session).first.timeout(shortTimeout);
 
         await expectLater(session.close().timeout(shortTimeout), completes);
       });
@@ -609,7 +605,7 @@ void main() {
             gracefulCloseTimeout: Duration.zero,
           ),
         );
-        await session.output.first.timeout(shortTimeout);
+        await fixtureOutput(session).first.timeout(shortTimeout);
 
         await session.close().timeout(shortTimeout);
 
