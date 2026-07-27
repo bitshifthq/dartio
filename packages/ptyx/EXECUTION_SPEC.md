@@ -416,8 +416,9 @@ required by the project documentation rules.
 The Dart API must:
 
 - make spawn asynchronous;
-- keep bounded fast writes available without hiding partial acceptance;
-- expose awaitable capacity and input flush;
+- keep an allocation-conscious bounded fast path inside asynchronous writes
+  without hiding partial acceptance;
+- make input acceptance and input flush awaitable;
 - separate input failure, output failure, exit failure, and close failure;
 - expose capabilities instead of ambiguous `null` or fabricated equivalence;
 - make drain-and-discard explicit and easy;

@@ -678,7 +678,7 @@ Future<Map<String, Object?>> _inputSaturation(int capacity) async {
   _ChunkReader? bytes;
   try {
     final activeSession = session = await _spawnFixture('gated-input-verify', [
-      '$capacity',
+      '${capacity * 2}',
       gate.path,
     ], capacity);
     final activeBytes = bytes = _ChunkReader(activeSession.output);
@@ -690,19 +690,20 @@ Future<Map<String, Object?>> _inputSaturation(int capacity) async {
     final payload = Uint8List(capacity);
     _fillPattern(payload, 0, payload.length);
     final resourceBefore = await _resourceSnapshot();
-    if (!activeSession.tryWrite(payload)) {
-      throw StateError('initial saturation write was rejected');
-    }
+    await activeSession.write(payload);
     final resourceAtCapacity = await _resourceSnapshot();
+    final second = Uint8List(capacity);
+    _fillPattern(second, capacity, second.length);
     final stopwatch = Stopwatch()..start();
+    final capacityRecovery = activeSession.write(second);
     gate.createSync();
-    await activeSession.waitForInputCapacity(capacity).timeout(_timeout);
+    await capacityRecovery.timeout(_timeout);
     stopwatch.stop();
     final resourceAfterRecovery = await _resourceSnapshot();
     await activeSession.flush().timeout(_timeout);
-    final expectedReport = 'OK $capacity';
+    final expectedReport = 'OK ${capacity * 2}';
     final report = await _readReport(activeBytes, expectedReport);
-    if (report != 'OK $capacity') {
+    if (report != expectedReport) {
       throw StateError('saturation integrity failure: $report');
     }
     return {
@@ -1198,7 +1199,17 @@ if (Get-Process -Id $process -ErrorAction SilentlyContinue) {
     );
     return result.exitCode == 0;
   }
-  return (await Process.run('/bin/kill', ['-0', '$process'])).exitCode == 0;
+  if ((await Process.run('/bin/kill', ['-0', '$process'])).exitCode != 0) {
+    return false;
+  }
+  final state = await Process.run('/bin/ps', [
+    '-o',
+    'state=',
+    '-p',
+    '$process',
+  ]);
+  return state.exitCode == 0 &&
+      !(state.stdout as String).trimLeft().startsWith('Z');
 }
 
 Future<int> _threadCount() async {
@@ -1303,9 +1314,6 @@ int _pattern(int offset) => 32 + ((offset * 31 + 17) % 95);
 
 int _acceptPatternByte(int byte, int offset) {
   if (byte == _pattern(offset)) return 1;
-  if (Platform.isWindows && offset != 0 && byte == _pattern(offset - 1)) {
-    return 0;
-  }
   return -1;
 }
 

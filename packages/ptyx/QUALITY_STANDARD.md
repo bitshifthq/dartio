@@ -116,10 +116,10 @@ The public API must be:
 - fully documented, including errors and ordering.
 
 Potentially unbounded OS or lifecycle operations must be asynchronous. Process
-spawn, input-capacity waits, input flush, and session close belong in this
-category. A synchronous operation is acceptable only when it performs bounded
-work and cannot wait on a child, worker, descriptor, handle, queue, or external
-resource.
+spawn, input writes that may wait for capacity, input flush, and session close
+belong in this category. A synchronous operation is acceptable only when it
+performs bounded work and cannot wait on a child, worker, descriptor, handle,
+queue, or external resource.
 
 The default API must require no performance tuning. An advanced configuration
 surface may expose policy choices that callers need to enforce resource or
@@ -170,15 +170,15 @@ normal PTY backpressure.
 Each write must either be accepted in full into a bounded owned queue or be
 rejected in full. Partial acceptance must not be hidden.
 
-Accepted writes preserve call order. Native partial writes, interruptions, and
-temporary readiness failures must be handled internally without changing that
-order. Returning from the fast write operation means that `ptyx` accepted the
-bytes, not that the child consumed them.
+Accepted writes preserve invocation order. Native partial writes,
+interruptions, temporary readiness failures, and capacity waiting must be
+handled internally without changing that order. Completing the write operation
+means that `ptyx` accepted the bytes, not that the child consumed them.
 
 The API must provide:
 
-- a fast all-or-reject write operation;
-- an awaitable way to wait for input capacity;
+- one all-or-reject asynchronous write operation with an allocation-conscious
+  fast path when capacity is immediately available;
 - a flush operation that observes completion of all preceding accepted input;
 - a dedicated way to observe terminal write failure.
 

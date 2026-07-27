@@ -246,6 +246,24 @@ impl Session {
 
     fn pull(&mut self, maximum: usize) -> Vec<u8> {
         let amount = maximum.min(self.output_bytes);
+        if self
+            .output
+            .front()
+            .is_some_and(|front| front.offset == 0 && front.bytes.len() == amount)
+        {
+            let bytes = self
+                .output
+                .pop_front()
+                .expect("output byte count is exact")
+                .bytes;
+            self.output_bytes -= bytes.len();
+            self.output_outstanding += bytes.len();
+            if self.output.is_empty() {
+                self.output_deadline = None;
+            }
+            self.output_notified = false;
+            return bytes;
+        }
         let mut bytes = Vec::with_capacity(amount);
         while bytes.len() < amount {
             let front = self.output.front_mut().expect("output byte count is exact");

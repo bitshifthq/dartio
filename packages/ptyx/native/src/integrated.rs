@@ -189,6 +189,19 @@ impl Session {
 
     fn pull(&mut self, maximum: usize) -> Vec<u8> {
         let amount = maximum.min(self.output_bytes);
+        if self
+            .output
+            .front()
+            .is_some_and(|front| front.offset == 0 && front.bytes.len() == amount)
+        {
+            let bytes = self.output.pop_front().unwrap().bytes;
+            self.output_bytes -= bytes.len();
+            self.output_outstanding += bytes.len();
+            if self.output.is_empty() {
+                self.output_deadline = None;
+            }
+            return bytes;
+        }
         let mut bytes = Vec::with_capacity(amount);
         while bytes.len() < amount {
             let front = self.output.front_mut().unwrap();
@@ -1644,7 +1657,7 @@ fn submit(kqueue: RawFd, change: &libc::kevent) -> io::Result<()> {
 mod tests {
     use super::{
         fail_input_waiters, notify_waiters, Notice, QueuedOutput, RuntimeCounters, Session,
-        WaitResult,
+        WaitResult, OUTPUT_BATCH,
     };
     use crate::broker_client::BrokerSession;
     use std::collections::VecDeque;
@@ -1795,6 +1808,21 @@ mod tests {
         assert_eq!(actual, expected);
         assert_eq!(session.output_total(), 0);
         assert!(!session.credit(1));
+    }
+
+    #[test]
+    fn complete_output_chunk_transfers_ownership_without_copying() {
+        let mut session = session(4096);
+        let bytes = vec![0x5a; OUTPUT_BATCH];
+        let pointer = bytes.as_ptr();
+        session.output_bytes = bytes.len();
+        session.output.push_back(QueuedOutput { bytes, offset: 0 });
+
+        let pulled = session.pull(OUTPUT_BATCH);
+
+        assert_eq!(pulled.as_ptr(), pointer);
+        assert_eq!(session.output_bytes, 0);
+        assert_eq!(session.output_outstanding, OUTPUT_BATCH);
     }
 
     #[test]

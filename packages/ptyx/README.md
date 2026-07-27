@@ -53,11 +53,11 @@ terminal output. Chunk boundaries have no semantic meaning.
 
 ## Backpressure
 
-Input and output memory are bounded per session. `tryWrite` accepts a complete
-buffer, returns `false` only for temporary capacity pressure, and throws
-`PtyInputException` after permanent input failure. `write` waits for capacity,
-and `flush` completes after all earlier accepted bytes have reached the PTY
-master:
+Input and output memory are bounded per session. `write` accepts a complete
+buffer in invocation order and waits asynchronously when input capacity is
+temporarily exhausted. It throws `PtyInputException` after permanent input
+failure. `flush` completes after all earlier accepted bytes have reached the
+PTY master:
 
 ```dart
 await session.write(Uint8List.fromList('status\n'.codeUnits));

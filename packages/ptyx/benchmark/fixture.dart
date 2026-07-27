@@ -4,8 +4,7 @@ import 'dart:typed_data';
 
 const _ready = [82, 69, 65, 68, 89];
 const _outputFlushBytes = 1024 * 1024;
-const _conptyClear = [0x1b, 0x5b, 0x32, 0x4a, 0x1b, 0x5b, 0x48];
-const _conptyClearInterval = 512;
+const _conptyLineWidth = 64;
 
 Future<void> main(List<String> arguments) async {
   if (arguments.isEmpty) {
@@ -51,6 +50,16 @@ Future<void> main(List<String> arguments) async {
         _writePayload(chunk);
         await stdout.flush();
       }
+    case 'environment':
+      stdout.write(
+        '${Platform.environment[arguments[1]] ?? ''}|'
+        '${Platform.environment['PATH'] ?? ''}',
+      );
+      await stdout.flush();
+    case 'size':
+      await _writeSize();
+      await stdin.first;
+      await _writeSize();
     case 'idle':
       await stdin.drain<void>();
     default:
@@ -113,16 +122,23 @@ Future<String> _readPattern(int byteCount, {required bool echo}) async {
   return received == byteCount ? 'OK $received' : 'SHORT $received $byteCount';
 }
 
+Future<void> _writeSize() async {
+  stdout.writeln('${stdout.terminalLines} ${stdout.terminalColumns}');
+  await stdout.flush();
+}
+
 void _writePayload(List<int> bytes) {
   if (!Platform.isWindows) {
     stdout.add(bytes);
     return;
   }
-  for (var offset = 0; offset < bytes.length; offset += _conptyClearInterval) {
-    final end = offset + _conptyClearInterval < bytes.length
-        ? offset + _conptyClearInterval
+  // Keep ConPTY on one row. Scrolling can represent screen updates by
+  // repainting cells, which is unsuitable for byte-integrity fixtures.
+  for (var offset = 0; offset < bytes.length; offset += _conptyLineWidth) {
+    final end = offset + _conptyLineWidth < bytes.length
+        ? offset + _conptyLineWidth
         : bytes.length;
     stdout.add(bytes.sublist(offset, end));
-    stdout.add(_conptyClear);
+    stdout.add(const [13]);
   }
 }

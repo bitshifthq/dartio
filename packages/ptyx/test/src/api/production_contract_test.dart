@@ -34,6 +34,25 @@ void main() {
     return Platform.isWindows ? windows : posix;
   }
 
+  Future<void> expectBytes(
+    StreamIterator<int> bytes,
+    List<int> expected,
+  ) async {
+    for (final byte in expected) {
+      expect(await bytes.moveNext(), isTrue);
+      expect(bytes.current, byte);
+    }
+  }
+
+  Future<String> readLine(StreamIterator<int> bytes) async {
+    final line = <int>[];
+    while (await bytes.moveNext()) {
+      if (bytes.current == 10) break;
+      line.add(bytes.current);
+    }
+    return utf8.decode(line).trim();
+  }
+
   test('spawn is asynchronous and publishes a fully routed session', () async {
     final Future<PtySession> pending = PtySession.spawn(
       shell(
@@ -66,36 +85,56 @@ void main() {
   );
 
   test(
-    'input exposes all-or-reject, capacity, flush, and terminal state',
+    'write preserves invocation order while input is saturated',
     () async {
+      const capacity = 1024 * 1024;
+      final temporary = Directory.systemTemp.createTempSync(
+        'ptyx-write-order-',
+      );
+      addTearDown(() => temporary.deleteSync(recursive: true));
+      final gate = File('${temporary.path}/release');
+      final fixture = File('benchmark/fixture.dart').absolute.path;
       final session = await PtySession.spawn(
-        shell(
-          platformScript(
-            posix: 'sleep 0.1; cat >/dev/null',
-            windows:
-                'Start-Sleep -Milliseconds 100; '
-                r'$null = [Console]::In.ReadToEnd()',
-          ),
+        PtySpawnOptions(
+          executable: Platform.resolvedExecutable,
+          arguments: [
+            fixture,
+            'gated-input-verify',
+            '${capacity * 2 + 1}',
+            gate.path,
+          ],
+          initialSize: size,
+          maxBufferedOutput: 64 * 1024,
         ),
       );
       addTearDown(session.close);
-      final bytes = Uint8List(4096);
-
-      expect(
-        () => session.tryWrite(Uint8List(4097)),
-        throwsA(isA<PtyInvalidArgumentException>()),
+      final output = StreamIterator(
+        fixtureOutput(session).expand((chunk) => chunk),
       );
-      expect(session.tryWrite(bytes), isTrue);
-      await session.waitForInputCapacity(1);
-      expect(session.tryWrite(Uint8List(1)), isTrue);
-      await session.flush();
+      addTearDown(output.cancel);
+      await expectBytes(output, utf8.encode('READY'));
+      final first = Uint8List(capacity);
+      final second = Uint8List(capacity);
+      for (var index = 0; index < capacity; index++) {
+        first[index] = 32 + ((index * 31 + 17) % 95);
+        second[index] = 32 + (((capacity + index) * 31 + 17) % 95);
+      }
+      final last = Uint8List.fromList([32 + (((capacity * 2) * 31 + 17) % 95)]);
 
-      await session.close();
-      await expectLater(session.inputDone, completes);
+      await session.write(first);
+      final secondWrite = session.write(second);
+      final lastWrite = session.write(last);
+      gate.createSync();
+      await Future.wait([secondWrite, lastWrite]);
+      final report = await readLine(output);
+
+      expect(report, 'OK ${capacity * 2 + 1}');
     },
+    testOn: 'posix',
+    timeout: const Timeout(Duration(minutes: 2)),
   );
 
-  test('impossible capacity waits fail without hanging', () async {
+  test('oversized writes fail without waiting for capacity', () async {
     final session = await PtySession.spawn(
       shell(
         platformScript(posix: 'sleep 10', windows: 'Start-Sleep -Seconds 10'),
@@ -103,8 +142,8 @@ void main() {
     );
     addTearDown(session.close);
 
-    expect(
-      () => session.waitForInputCapacity(4097),
+    await expectLater(
+      session.write(Uint8List(4097)),
       throwsA(isA<PtyInvalidArgumentException>()),
     );
   });
@@ -126,13 +165,13 @@ void main() {
       throwsA(isA<PtyInputException>()),
     );
 
-    expect(session.tryWrite(Uint8List(capacity)), isTrue);
+    await session.write(Uint8List(capacity));
     expect(session.kill(ProcessSignal.sigkill), isTrue);
 
     await session.exitCode;
     await inputDone;
-    expect(
-      () => session.tryWrite(Uint8List(1)),
+    await expectLater(
+      session.write(Uint8List(1)),
       throwsA(isA<PtyInputException>()),
     );
   });
@@ -148,7 +187,7 @@ void main() {
         ),
       );
       await fixtureOutput(session).first;
-      expect(session.tryWrite(Uint8List(capacity)), isTrue);
+      await session.write(Uint8List(capacity));
 
       Future<void> expectClosed(Future<void> future, String operation) =>
           expectLater(
@@ -162,10 +201,6 @@ void main() {
             ),
           );
 
-      final capacityFailure = expectClosed(
-        session.waitForInputCapacity(capacity),
-        'waitForInputCapacity',
-      );
       final flushFailure = expectClosed(session.flush(), 'flush');
       final writeFailure = expectClosed(
         session.write(Uint8List(capacity)),
@@ -173,7 +208,7 @@ void main() {
       );
 
       await session.close();
-      await Future.wait([capacityFailure, flushFailure, writeFailure]);
+      await Future.wait([flushFailure, writeFailure]);
     },
     testOn: 'posix',
   );

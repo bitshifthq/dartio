@@ -160,25 +160,16 @@ abstract interface class PtySession {
   /// [PtyClosedException] after [close].
   void resize(PtySize size);
 
-  /// Attempts to accept [data] into the bounded input queue.
+  /// Accepts all of [data] in invocation order.
   ///
-  /// Returns `true` only when the complete buffer was accepted. Returns
-  /// `false` without accepting any bytes when capacity is unavailable.
+  /// The future waits without blocking the isolate when bounded native input
+  /// capacity is unavailable. Completion means the complete buffer was
+  /// accepted, not that the child consumed it. Keep [data] unchanged until the
+  /// future completes.
+  ///
   /// Throws [PtyInvalidArgumentException] when [data] is empty or larger than
   /// the configured input bound, [PtyInputException] after terminal input
   /// failure, and [PtyClosedException] after [close].
-  bool tryWrite(Uint8List data);
-
-  /// Waits until [byteCount] bytes can be accepted or input fails.
-  ///
-  /// Throws [PtyInvalidArgumentException] when [byteCount] is not positive or
-  /// exceeds the configured input bound, [PtyInputException] on terminal input
-  /// failure, and [PtyClosedException] after [close].
-  Future<void> waitForInputCapacity(int byteCount);
-
-  /// Accepts all of [data], waiting for bounded input capacity when necessary.
-  ///
-  /// Throws the same typed exceptions as [tryWrite].
   Future<void> write(Uint8List data);
 
   /// Waits until every write accepted before this call reaches the PTY master.

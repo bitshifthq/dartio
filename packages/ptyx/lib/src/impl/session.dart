@@ -206,8 +206,10 @@ final class NativeSession implements PtySession, Finalizable {
   var _lastSequence = 0;
   var _pendingCredit = 0;
   final Queue<Uint8List> _pendingOutput = Queue();
+  final Queue<_PendingWrite> _pendingWrites = Queue();
   var _paused = true;
   var _outputCancelled = false;
+  var _writing = false;
   var _infrastructureLost = false;
   Object? _terminalFailure;
   PtyInputException? _inputFailure;
@@ -331,28 +333,8 @@ final class NativeSession implements PtySession, Finalizable {
     }
   }
 
-  @override
-  bool tryWrite(Uint8List data) => _tryWrite(data, 'tryWrite');
-
   bool _tryWrite(Uint8List data, String operation) {
-    _checkOpen(operation);
-    final inputFailure = _inputFailure;
-    if (inputFailure != null) {
-      throw _inputError(operation, inputFailure);
-    }
-    if (data.isEmpty) {
-      throw PtyInvalidArgumentException(
-        'input data must not be empty',
-        operation: operation,
-      );
-    }
-    if (data.length > _inputCapacity) {
-      throw PtyInvalidArgumentException(
-        'input data exceeds this session input capacity',
-        operation: operation,
-        context: '${data.length} bytes exceeds $_inputCapacity bytes',
-      );
-    }
+    _validateWrite(data, operation);
     final sequence = using((arena) {
       final pointer = arena<Uint8>(data.length);
       pointer.asTypedList(data.length).setAll(0, data);
@@ -375,9 +357,26 @@ final class NativeSession implements PtySession, Finalizable {
     return true;
   }
 
-  @override
-  Future<void> waitForInputCapacity(int byteCount) =>
-      _waitForInputCapacity(byteCount, 'waitForInputCapacity');
+  void _validateWrite(Uint8List data, String operation) {
+    _checkOpen(operation);
+    final inputFailure = _inputFailure;
+    if (inputFailure != null) {
+      throw _inputError(operation, inputFailure);
+    }
+    if (data.isEmpty) {
+      throw PtyInvalidArgumentException(
+        'input data must not be empty',
+        operation: operation,
+      );
+    }
+    if (data.length > _inputCapacity) {
+      throw PtyInvalidArgumentException(
+        'input data exceeds this session input capacity',
+        operation: operation,
+        context: '${data.length} bytes exceeds $_inputCapacity bytes',
+      );
+    }
+  }
 
   Future<void> _waitForInputCapacity(int byteCount, String operation) {
     _checkOpen(operation);
@@ -400,10 +399,35 @@ final class NativeSession implements PtySession, Finalizable {
   }
 
   @override
-  Future<void> write(Uint8List data) async {
-    while (!_tryWrite(data, 'write')) {
-      await _waitForInputCapacity(data.length, 'write');
+  Future<void> write(Uint8List data) {
+    final completion = Completer<void>();
+    try {
+      _validateWrite(data, 'write');
+    } on Object catch (error, stackTrace) {
+      completion.completeError(error, stackTrace);
+      return completion.future;
     }
+    _pendingWrites.addLast(_PendingWrite(data, completion));
+    if (!_writing) {
+      _writing = true;
+      unawaited(_drainWrites());
+    }
+    return completion.future;
+  }
+
+  Future<void> _drainWrites() async {
+    while (_pendingWrites.isNotEmpty) {
+      final pending = _pendingWrites.removeFirst();
+      try {
+        while (!_tryWrite(pending.data, 'write')) {
+          await _waitForInputCapacity(pending.data.length, 'write');
+        }
+        pending.completion.complete();
+      } on Object catch (error, stackTrace) {
+        pending.completion.completeError(error, stackTrace);
+      }
+    }
+    _writing = false;
   }
 
   @override
@@ -617,6 +641,11 @@ final class NativeSession implements PtySession, Finalizable {
 
   void _fail(Object error) {
     _terminalFailure ??= error;
+    // A terminal infrastructure notice means native ownership has already
+    // moved to forced cleanup. Keeping either finalizer attached would invoke
+    // a stale native callback while the isolate itself is shutting down.
+    _sessionFinalizer.detach(this);
+    _sessionRegistryFinalizer.detach(this);
     _runtime._failWaiters(_handle, error);
     if (!_exit.isCompleted) {
       _exit.completeError(error);
@@ -784,6 +813,13 @@ final class _PendingWaiter {
 
   final int handle;
   final String operation;
+  final Completer<void> completion;
+}
+
+final class _PendingWrite {
+  const _PendingWrite(this.data, this.completion);
+
+  final Uint8List data;
   final Completer<void> completion;
 }
 

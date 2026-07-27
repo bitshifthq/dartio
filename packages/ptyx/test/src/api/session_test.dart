@@ -68,9 +68,40 @@ void main() {
       return spawnCommand(shell(script), initialSize: initialSize);
     }
 
+    Future<PtySession> spawnFixture(
+      String operation, {
+      List<String> arguments = const [],
+      PtySize initialSize = defaultSize,
+      Map<String, String> environment = const {},
+      PtyEnvironmentMode environmentMode = .overlay,
+    }) {
+      return spawnCommand(
+        (
+          executable: Platform.resolvedExecutable,
+          arguments: [
+            File('benchmark/fixture.dart').absolute.path,
+            operation,
+            ...arguments,
+          ],
+        ),
+        initialSize: initialSize,
+        environment: environment,
+        environmentMode: environmentMode,
+      );
+    }
+
     Future<bool> processExists(int pid) async {
-      final result = await Process.run('/bin/kill', ['-0', '$pid']);
-      return result.exitCode == 0;
+      if ((await Process.run('/bin/kill', ['-0', '$pid'])).exitCode != 0) {
+        return false;
+      }
+      final state = await Process.run('/bin/ps', [
+        '-o',
+        'state=',
+        '-p',
+        '$pid',
+      ]);
+      return state.exitCode == 0 &&
+          !(state.stdout as String).trimLeft().startsWith('Z');
     }
 
     ({String executable, List<String> arguments}) finiteOutputCommand(
@@ -314,26 +345,20 @@ void main() {
 
     group('environment', () {
       Future<String> environmentText({
+        required String probe,
         Map<String, String> environment = const {},
         PtyEnvironmentMode environmentMode = PtyEnvironmentMode.overlay,
       }) async {
-        final session = await spawnCommand(
-          shell(
-            platformScript(
-              posix: '/usr/bin/env',
-              windows:
-                  'Get-ChildItem Env: | ForEach-Object { '
-                  r'[Console]::WriteLine("$($_.Name)=$($_.Value)") '
-                  '}',
-            ),
-          ),
+        final session = await spawnFixture(
+          'environment',
+          arguments: [probe],
           environment: environment,
           environmentMode: environmentMode,
         );
 
         final bytes = await fixtureOutput(
           session,
-        ).expand((chunk) => chunk).toList().timeout(shortTimeout);
+        ).expand((chunk) => chunk).toList().timeout(longTimeout);
         return utf8.decode(bytes);
       }
 
@@ -341,31 +366,37 @@ void main() {
         'applies each environment mode',
         () async {
           final [overlay, inherit, replace, clear] = await Future.wait([
-            environmentText(environment: {'PTYX_OVERLAY_TEST': 'overlay'}),
             environmentText(
+              probe: 'PTYX_OVERLAY_TEST',
+              environment: {'PTYX_OVERLAY_TEST': 'overlay'},
+            ),
+            environmentText(
+              probe: 'PTYX_INHERIT_IGNORED_TEST',
               environment: {'PTYX_INHERIT_IGNORED_TEST': 'ignored'},
               environmentMode: PtyEnvironmentMode.inherit,
             ),
             environmentText(
+              probe: 'PTYX_REPLACE_TEST',
               environment: {'PTYX_REPLACE_TEST': 'replace'},
               environmentMode: PtyEnvironmentMode.replace,
             ),
             environmentText(
+              probe: 'PTYX_CLEAR_IGNORED_TEST',
               environment: {'PTYX_CLEAR_IGNORED_TEST': 'ignored'},
               environmentMode: PtyEnvironmentMode.clear,
             ),
           ]);
 
           final modes = (
-            overlay: overlay.contains('PTYX_OVERLAY_TEST=overlay'),
-            inherit: inherit.contains('PTYX_INHERIT_IGNORED_TEST=ignored'),
+            overlay: overlay.startsWith('overlay|'),
+            inherit: inherit.startsWith('ignored|'),
             replace: (
-              hasValue: replace.contains('PTYX_REPLACE_TEST=replace'),
-              hasPath: replace.contains('PATH='),
+              hasValue: replace.startsWith('replace|'),
+              hasPath: replace.split('|').last.isNotEmpty,
             ),
             clear: (
-              hasValue: clear.contains('PTYX_CLEAR_IGNORED_TEST=ignored'),
-              hasPath: clear.contains('PATH='),
+              hasValue: clear.startsWith('ignored|'),
+              hasPath: clear.split('|').last.isNotEmpty,
             ),
           );
 
@@ -415,21 +446,7 @@ void main() {
 
       test('echoes high-volume input', () async {
         const byteCount = 512 * 1024;
-        final session = await spawnScript(
-          platformScript(
-            posix: 'stty raw -echo; printf READY; cat',
-            windows:
-                r'$out = [Console]::OpenStandardOutput(); '
-                r'$ready = [Text.Encoding]::ASCII.GetBytes("READY"); '
-                r'$out.Write($ready, 0, $ready.Length); '
-                r'$input = [Console]::OpenStandardInput(); '
-                r'$buffer = New-Object byte[] 8192; '
-                r'while (($count = $input.Read($buffer, 0, '
-                r'$buffer.Length)) -gt 0) { '
-                r'$out.Write($buffer, 0, $count) '
-                '}',
-          ),
-        );
+        final session = await spawnFixture('ready-cat');
         final data = Uint8List(byteCount)..fillRange(0, byteCount, 120);
         final ready = Completer<void>();
         final echoed = Completer<int>();
@@ -455,9 +472,6 @@ void main() {
 
         await ready.future.timeout(shortTimeout);
         await session.write(data);
-        if (Platform.isWindows) {
-          await session.write(Uint8List.fromList(const [10]));
-        }
         final echoedBytes = await echoed.future.timeout(
           const Duration(minutes: 1),
         );
@@ -532,26 +546,15 @@ void main() {
 
     group('resize', () {
       test('reports updated cell size to the child', () async {
-        final session = await spawnScript(
-          platformScript(
-            posix: 'stty -echo; stty size; IFS= read -r _; stty size',
-            windows:
-                r'$size = $Host.UI.RawUI.WindowSize; '
-                r'[Console]::WriteLine("$($size.Height) $($size.Width)"); '
-                r'$null = [Console]::In.ReadLine(); '
-                r'$size = $Host.UI.RawUI.WindowSize; '
-                r'[Console]::WriteLine("$($size.Height) $($size.Width)")',
-          ),
+        final session = await spawnFixture(
+          'size',
           initialSize: const PtySize(rows: 18, columns: 70),
         );
         final lines = outputLines(session);
 
         await nextLine(lines);
         session.resize(const PtySize(rows: 42, columns: 120));
-        if (Platform.isWindows) {
-          await Future<void>.delayed(const Duration(milliseconds: 100));
-        }
-        await session.write(Uint8List.fromList(const [10]));
+        await session.write(Uint8List.fromList(const [1]));
         final line = await nextLine(lines);
 
         expect(line, '42 120');
@@ -597,6 +600,18 @@ void main() {
 
         await expectLater(session.close().timeout(shortTimeout), completes);
       });
+
+      test('does not wait for output held by an escaped descendant', () async {
+        final session = await spawnScript(
+          "setsid /bin/sh -c 'exec sleep 30' & printf '%s\\n' \"\$!\"",
+        );
+        final lines = outputLines(session);
+        final escapedPid = int.parse(await nextLine(lines));
+        addTearDown(() => Process.killPid(escapedPid, ProcessSignal.sigkill));
+        await session.exitCode.timeout(shortTimeout);
+
+        await expectLater(session.close().timeout(shortTimeout), completes);
+      }, testOn: 'linux');
 
       test('is idempotent', () async {
         final session = await spawnScript(inputEcho);

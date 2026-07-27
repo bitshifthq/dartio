@@ -41,15 +41,16 @@ operations may still reference.
 
 ## Input transitions
 
-`tryWrite` and awaiting `write` linearize when a complete byte count and
-sequence range are reserved. The writer releases capacity only for bytes
-actually passed to the PTY or explicitly failed during shutdown. A flush
-linearizes when it snapshots the last accepted sequence.
+Awaiting `write` linearizes when a complete byte count and sequence range are
+reserved. Concurrent calls retain invocation order while an earlier call waits
+for capacity. The writer releases capacity only for bytes actually passed to
+the PTY or explicitly failed during shutdown. A flush linearizes when it
+snapshots the last accepted sequence.
 
 | From | Event | To | Result |
 |---|---|---|---|
 | open | full reservation succeeds | open | bytes are accepted in sequence order |
-| open | capacity is insufficient | open | fast write returns false; waiter remains unreserved |
+| open | capacity is insufficient | open | write waits without reserving partial input |
 | open | permanent native write failure | failed | queued writes and flushes complete with the same input failure |
 | open | close commits | closed | unaccepted waits fail as closed; accepted sequences finish or receive explicit close failure |
 | failed | write or flush | failed | cached input failure is returned |

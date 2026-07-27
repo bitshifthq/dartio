@@ -10,43 +10,36 @@
 
 #ifdef _MSC_VER
 #include <windows.h>
-static volatile LONG fail_next_post = 0;
+static volatile LONG fail_next_byte_post = 0;
 
-static bool take_failed_post(void) {
-  return InterlockedExchange(&fail_next_post, 0) != 0;
+static bool take_failed_byte_post(void) {
+  return InterlockedExchange(&fail_next_byte_post, 0) != 0;
 }
 
-static void arm_failed_post(void) {
-  InterlockedExchange(&fail_next_post, 1);
+static void arm_failed_byte_post(void) {
+  InterlockedExchange(&fail_next_byte_post, 1);
 }
 #else
 #include <stdatomic.h>
-static atomic_int fail_next_post = 0;
+static atomic_int fail_next_byte_post = 0;
 
-static bool take_failed_post(void) {
-  return atomic_exchange(&fail_next_post, 0) != 0;
+static bool take_failed_byte_post(void) {
+  return atomic_exchange(&fail_next_byte_post, 0) != 0;
 }
 
-static void arm_failed_post(void) {
-  atomic_store(&fail_next_post, 1);
+static void arm_failed_byte_post(void) {
+  atomic_store(&fail_next_byte_post, 1);
 }
 #endif
 
 PTYX_HIDDEN bool ptyx_dart_post_integer(Dart_Port_DL port, int64_t message) {
-  if (take_failed_post()) {
-    return false;
-  }
   Dart_PostInteger_Type post = Dart_PostInteger_DL;
   return post != NULL && post(port, message);
 }
 
-PTYX_HIDDEN bool ptyx_dart_post_bytes(
-    Dart_Port_DL port,
-    int64_t handle,
-    const uint8_t *bytes,
-    intptr_t length
-) {
-  if (take_failed_post()) {
+PTYX_HIDDEN bool ptyx_dart_post_bytes(Dart_Port_DL port, int64_t handle,
+                                      const uint8_t *bytes, intptr_t length) {
+  if (take_failed_byte_post()) {
     return false;
   }
   Dart_CObject handle_object = {
@@ -70,5 +63,7 @@ PTYX_HIDDEN bool ptyx_dart_post_bytes(
 }
 
 PTYX_HIDDEN void ptyx_dart_fail_next_post(void) {
-  arm_failed_post();
+  // Keep integer delivery available for the BrokerLost fallback that reports
+  // the injected byte-delivery failure to Dart.
+  arm_failed_byte_post();
 }

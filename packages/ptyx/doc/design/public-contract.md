@@ -44,28 +44,25 @@ remains.
 
 ## Input
 
-The session exposes bounded input operations directly:
+The session exposes one bounded input operation:
 
 ```dart
-if (!session.tryWrite(bytes)) {
-  await session.write(bytes);
-}
+await session.write(bytes);
 await session.flush();
 ```
-
-`tryWrite` performs bounded work. It returns `true` only when the complete byte
-list is reserved and accepted in call order. It returns `false` only for
-temporary capacity exhaustion. It throws the cached `PtyInputException` when
-the session can never accept more input. It never reports partial acceptance.
 
 `write` waits asynchronously for enough capacity and then accepts the complete
 byte list. A byte list larger than the configured maximum is rejected as an
 invalid request instead of waiting forever. Close, child exit, or input
 failure completes pending writes with the corresponding typed exception.
+Concurrent calls are serialized by invocation order, including when an earlier
+call is waiting for capacity.
 
 The acceptance linearization point is the successful queue reservation under
-the native input sequence lock. Returning from either write operation does
-not mean that the child consumed the bytes.
+the native input sequence lock. Completing `write` does not mean that the child
+consumed the bytes. The asynchronous API is deliberate: a synchronous write
+could preserve bounded memory under saturation only by blocking the Dart
+isolate or exposing a retry-oriented would-block result.
 
 `flush` captures the last accepted input sequence at call time. It completes
 when the native writer has passed every byte through that sequence to the PTY

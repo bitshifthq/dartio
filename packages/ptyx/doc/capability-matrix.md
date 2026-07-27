@@ -10,7 +10,7 @@ source revisions; unresolved comparisons remain explicit.
 | Arguments and environment | direct argv; inherit, overlay, replace, clear | `exec` / `CreateProcessW` | broadly available; exact semantics vary |
 | Working directory | supported | child setup | broadly available |
 | Raw byte I/O | bounded, lossless, ordered | PTY master / ConPTY pipes | broadly available |
-| Input readiness | `tryWrite`, async capacity wait, `write` | readiness / IOCP | comparison pending |
+| Input backpressure | ordered async `write` | readiness / IOCP | comparison pending |
 | Flush | accepted sequence reaches PTY master | write completion | comparison pending |
 | Output backpressure | one credited Dart message; bounded queue | readiness disabled at bound | comparison pending |
 | Resize | cells and portable pixel metadata | `TIOCSWINSZ` / ConPTY cells | broadly available |

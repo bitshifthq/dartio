@@ -69,18 +69,12 @@ Future<void> main(List<String> arguments) async {
       await longSession.write(interactive).timeout(_operationTimeout);
       await longSession.flush().timeout(_operationTimeout);
       for (var index = 0; index < interactive.length; index++) {
-        while (true) {
-          if (!await longOutput.moveNext().timeout(_operationTimeout)) {
-            throw StateError(
-              'long-lived session ended in cycle $cycles at $index',
-            );
-          }
-          if (longOutput.current == interactive[index]) break;
-          if (Platform.isWindows &&
-              index != 0 &&
-              longOutput.current == interactive[index - 1]) {
-            continue;
-          }
+        if (!await longOutput.moveNext().timeout(_operationTimeout)) {
+          throw StateError(
+            'long-lived session ended in cycle $cycles at $index',
+          );
+        }
+        if (longOutput.current != interactive[index]) {
           throw StateError(
             'long-lived session mismatch in cycle $cycles at $index',
           );
@@ -197,16 +191,10 @@ Future<int> _runCycle(int cycle) async {
       );
     final outputDone = Future<void>(() async {
       for (var index = 0; index < input.length; index++) {
-        while (true) {
-          if (!await iterator.moveNext().timeout(_operationTimeout)) {
-            throw StateError('cycle $cycle ended at $index');
-          }
-          if (iterator.current == input[index]) break;
-          if (Platform.isWindows &&
-              index != 0 &&
-              iterator.current == input[index - 1]) {
-            continue;
-          }
+        if (!await iterator.moveNext().timeout(_operationTimeout)) {
+          throw StateError('cycle $cycle ended at $index');
+        }
+        if (iterator.current != input[index]) {
           throw StateError('cycle $cycle byte mismatch at $index');
         }
       }
