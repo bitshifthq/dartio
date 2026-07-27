@@ -1,0 +1,48 @@
+{
+  "schema": 1,
+  "candidate": "direct-rust",
+  "date": "2026-07-27",
+  "boundary": "Dart FFI, copied buffers, generation-checked candidate registry, direct PTY, child",
+  "payload_bytes": 33554432,
+  "interactive_microseconds": [
+    {"mean": 28.515, "p50": 19, "p95": 32, "p99": 56, "min": 11, "max": 3124},
+    {"mean": 26.075, "p50": 14, "p95": 22, "p99": 32, "min": 13, "max": 4327},
+    {"mean": 30.035, "p50": 17, "p95": 34, "p99": 45, "min": 13, "max": 4472},
+    {"mean": 26.5875, "p50": 14, "p95": 31, "p99": 37, "min": 12, "max": 3999},
+    {"mean": 28.255, "p50": 15, "p95": 33, "p99": 41, "min": 9, "max": 4462}
+  ],
+  "output_mib_per_second": [
+    79.47585672489929,
+    80.73468563931779,
+    96.6285688403062,
+    104.8461873666897,
+    89.05041644983817
+  ],
+  "input_mib_per_second": [
+    4.720212362354182,
+    4.726004010014402,
+    4.563251875959977,
+    4.773053962507363,
+    4.702556677196965
+  ],
+  "spawn_close_microseconds": {
+    "samples": 50,
+    "mean": 17048.58,
+    "p50": 16915,
+    "p95": 18126,
+    "p99": 18196,
+    "min": 16288,
+    "max": 18196
+  },
+  "idle_100": {
+    "created_sessions": 100,
+    "failure": null,
+    "spawn_elapsed_microseconds": 807757,
+    "rss_delta_bytes": 155648,
+    "threads_before": 9,
+    "threads_after": 9
+  },
+  "stale_handle_rejected": true,
+  "rss_before_bytes": 184000512,
+  "rss_after_bytes": 190119936
+}

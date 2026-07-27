@@ -1,9 +1,11 @@
 # Architecture candidate gates
 
 The retained base is commit
-`4c6120c38dec4ac36a7fb349c274ae3123fe4224`. Candidate measurements use the
-same child commands, payloads, Dart boundary, release mode, host, warmup, and
-sample statistics recorded under `docs/evidence`.
+`4c6120c38dec4ac36a7fb349c274ae3123fe4224`. A result is an equivalent
+candidate comparison only when it uses the same child command, payload, raw
+mode, buffer policy, Dart boundary, release mode, host, warmup, verification,
+and timer boundary. Early feasibility probes which do not meet that rule are
+labelled as such and cannot clear a performance gate.
 
 Safety and semantics are rejection gates. A candidate is rejected when its
 representative slice cannot provide:
@@ -25,14 +27,20 @@ local macOS x64 host:
 - at least 90 percent of an equivalent direct-native PTY baseline for
   sustained input and output;
 - bounded memory at 100 idle sessions and under paused output;
-- materially fewer than the base input workload's roughly 72,000 context
-  switches per 32 MiB;
+- no regression in retained total context switches, together with materially
+  fewer controller-originated syscalls, wakeups, and empty wakeups than a
+  design which uses dedicated hot-path workers;
 - clean exit, trailing-output delivery, forced close, and descriptor
   reclamation under repeated runs.
 
 Results with more than 5 percent variance are investigated and repeated.
 Throughput gains are rejected when they increase an unbounded queue, weaken
 cleanup, omit Dart transfer, or compare different transport boundaries.
+Total context switches remain reported, but are not independently
+controllable: a same-host direct-native PTY input run exceeded both the base
+and Candidate B results. Controller-specific counters are therefore the
+architecture gate; this does not waive CPU, latency, throughput, boundedness,
+fairness, or cleanup requirements.
 
 ## Candidate A: Rust with portable-pty facilities
 

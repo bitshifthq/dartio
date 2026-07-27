@@ -1,0 +1,74 @@
+{
+  "schema": 1,
+  "candidate": "direct-rust-production-semantics-slice",
+  "date": "2026-07-27",
+  "boundary": "Dart FFI, copied buffers, generation-safe registry, bounded caller-pumped queues, direct PTY, child",
+  "warmup": {
+    "interactive_p99_microseconds": 69,
+    "output_mib_per_second": 91.487,
+    "input_mib_per_second": 5.524
+  },
+  "interactive": [
+    {"p50_microseconds": 13, "p95_microseconds": 44, "p99_microseconds": 68},
+    {"p50_microseconds": 13, "p95_microseconds": 23, "p99_microseconds": 65},
+    {"p50_microseconds": 13, "p95_microseconds": 27, "p99_microseconds": 62}
+  ],
+  "output": {
+    "bytes_per_run": 134217728,
+    "mib_per_second": [89.254, 85.767, 90.385]
+  },
+  "input": {
+    "bytes_per_run": 33554432,
+    "mib_per_second": [5.589, 5.684, 5.576],
+    "profile": {
+      "mib_per_second": 5.640,
+      "real_seconds": 6.37,
+      "user_seconds": 0.77,
+      "system_seconds": 6.33,
+      "maximum_rss_bytes": 170328064,
+      "voluntary_context_switches": 29962,
+      "involuntary_context_switches": 42472,
+      "instructions": 34575995186,
+      "cycles": 16755625667,
+      "peak_footprint_bytes": 139321344
+    }
+  },
+  "contracts": {
+    "controlling_terminal": "pid == sid == pgrp == tcgetpgrp(stdin)",
+    "paused_output_queued_bytes": 0,
+    "resumed_output_bytes": 8388608,
+    "trailing_output": "TRAILING",
+    "concurrent_close_callers": 8,
+    "all_concurrent_closes_succeeded": true,
+    "destroy_succeeded": true,
+    "stale_close_rejected": true,
+    "c_abi_trailing_bytes": 8
+  },
+  "idle_100": {
+    "fds_before": 12,
+    "fds_live": 112,
+    "fds_after_destroy": 12,
+    "threads_before": 10,
+    "threads_live": 10,
+    "rss_before_kib": 158636,
+    "rss_live_kib": 159456,
+    "rss_after_destroy_kib": 159572
+  },
+  "failed_spawn_1000": {
+    "reported_failures": 1000,
+    "elapsed_microseconds": 8422578,
+    "fds_after": 12,
+    "threads_after": 8,
+    "rss_after_kib": 162292
+  },
+  "comparison": {
+    "same_host_base_input_mib_per_second": 4.754045730057261,
+    "same_host_base_total_context_switches": 72263,
+    "same_host_direct_native_input_mib_per_second": 5.596,
+    "same_host_direct_native_total_context_switches": 84022
+  },
+  "discarded": [
+    "All runs that overlapped another investigator benchmark",
+    "Input runs before the Dart verifier moved repeated payload construction outside the timed loop"
+  ]
+}

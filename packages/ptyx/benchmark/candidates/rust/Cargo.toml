@@ -1,0 +1,11 @@
+[package]
+name = "ptyx-candidate-rust"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+libc = "0.2"
