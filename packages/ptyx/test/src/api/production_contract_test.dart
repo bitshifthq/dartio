@@ -371,8 +371,11 @@ void main() {
         Directory.current = second;
         final actual = await childDirectory();
         final expected = second.resolveSymbolicLinksSync();
+        final canonicalActual = Platform.isWindows
+            ? Directory(actual).resolveSymbolicLinksSync()
+            : actual;
         expect(
-          Platform.isWindows ? actual.toLowerCase() : actual,
+          Platform.isWindows ? canonicalActual.toLowerCase() : canonicalActual,
           Platform.isWindows ? expected.toLowerCase() : expected,
         );
       } finally {

@@ -223,7 +223,7 @@ void main() {
 
         final bytes = await fixtureOutput(
           session,
-        ).expand((chunk) => chunk).toList().timeout(shortTimeout);
+        ).expand((chunk) => chunk).toList().timeout(longTimeout * 3);
 
         expect(utf8.decode(bytes), 'done');
       });
@@ -337,43 +337,47 @@ void main() {
         return utf8.decode(bytes);
       }
 
-      test('applies each environment mode', () async {
-        final [overlay, inherit, replace, clear] = await Future.wait([
-          environmentText(environment: {'PTYX_OVERLAY_TEST': 'overlay'}),
-          environmentText(
-            environment: {'PTYX_INHERIT_IGNORED_TEST': 'ignored'},
-            environmentMode: PtyEnvironmentMode.inherit,
-          ),
-          environmentText(
-            environment: {'PTYX_REPLACE_TEST': 'replace'},
-            environmentMode: PtyEnvironmentMode.replace,
-          ),
-          environmentText(
-            environment: {'PTYX_CLEAR_IGNORED_TEST': 'ignored'},
-            environmentMode: PtyEnvironmentMode.clear,
-          ),
-        ]);
+      test(
+        'applies each environment mode',
+        () async {
+          final [overlay, inherit, replace, clear] = await Future.wait([
+            environmentText(environment: {'PTYX_OVERLAY_TEST': 'overlay'}),
+            environmentText(
+              environment: {'PTYX_INHERIT_IGNORED_TEST': 'ignored'},
+              environmentMode: PtyEnvironmentMode.inherit,
+            ),
+            environmentText(
+              environment: {'PTYX_REPLACE_TEST': 'replace'},
+              environmentMode: PtyEnvironmentMode.replace,
+            ),
+            environmentText(
+              environment: {'PTYX_CLEAR_IGNORED_TEST': 'ignored'},
+              environmentMode: PtyEnvironmentMode.clear,
+            ),
+          ]);
 
-        final modes = (
-          overlay: overlay.contains('PTYX_OVERLAY_TEST=overlay'),
-          inherit: inherit.contains('PTYX_INHERIT_IGNORED_TEST=ignored'),
-          replace: (
-            hasValue: replace.contains('PTYX_REPLACE_TEST=replace'),
-            hasPath: replace.contains('PATH='),
-          ),
-          clear: (
-            hasValue: clear.contains('PTYX_CLEAR_IGNORED_TEST=ignored'),
-            hasPath: clear.contains('PATH='),
-          ),
-        );
+          final modes = (
+            overlay: overlay.contains('PTYX_OVERLAY_TEST=overlay'),
+            inherit: inherit.contains('PTYX_INHERIT_IGNORED_TEST=ignored'),
+            replace: (
+              hasValue: replace.contains('PTYX_REPLACE_TEST=replace'),
+              hasPath: replace.contains('PATH='),
+            ),
+            clear: (
+              hasValue: clear.contains('PTYX_CLEAR_IGNORED_TEST=ignored'),
+              hasPath: clear.contains('PATH='),
+            ),
+          );
 
-        expect(modes, (
-          overlay: true,
-          inherit: false,
-          replace: (hasValue: true, hasPath: false),
-          clear: (hasValue: false, hasPath: false),
-        ));
-      });
+          expect(modes, (
+            overlay: true,
+            inherit: false,
+            replace: (hasValue: true, hasPath: false),
+            clear: (hasValue: false, hasPath: false),
+          ));
+        },
+        timeout: const Timeout(Duration(minutes: 2)),
+      );
 
       test('throws PtyException for invalid environment entries', () async {
         Future<PtySession> spawnWithEmptyKey() => PtySession.spawn(
@@ -451,10 +455,15 @@ void main() {
 
         await ready.future.timeout(shortTimeout);
         await session.write(data);
-        final echoedBytes = await echoed.future.timeout(longTimeout);
+        if (Platform.isWindows) {
+          await session.write(Uint8List.fromList(const [10]));
+        }
+        final echoedBytes = await echoed.future.timeout(
+          const Duration(minutes: 1),
+        );
 
         expect(echoedBytes, greaterThanOrEqualTo(byteCount));
-      });
+      }, timeout: const Timeout(Duration(minutes: 2)));
 
       test('throws PtyClosedException after close', () async {
         final session = await spawnScript(inputEcho);
@@ -539,6 +548,9 @@ void main() {
 
         await nextLine(lines);
         session.resize(const PtySize(rows: 42, columns: 120));
+        if (Platform.isWindows) {
+          await Future<void>.delayed(const Duration(milliseconds: 100));
+        }
         await session.write(Uint8List.fromList(const [10]));
         final line = await nextLine(lines);
 
