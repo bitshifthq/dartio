@@ -221,11 +221,13 @@ Future<PtySession> _spawnFixture(
   String operation, [
   List<String> arguments = const [],
 ]) {
+  final fixture = Platform.environment['PTYX_FIXTURE_EXECUTABLE'];
   return PtySession.spawn(
     PtySpawnOptions(
-      executable: Platform.resolvedExecutable,
+      executable: fixture ?? Platform.resolvedExecutable,
       arguments: [
-        Platform.script.resolve('fixture.dart').toFilePath(),
+        if (fixture == null)
+          Platform.script.resolve('fixture.dart').toFilePath(),
         operation,
         ...arguments,
       ],

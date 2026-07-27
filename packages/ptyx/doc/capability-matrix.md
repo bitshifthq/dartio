@@ -19,7 +19,7 @@ source revisions; unresolved comparisons remain explicit.
 | Descendant cleanup | original Unix process group; Windows Job Object | broker / Job Object | implementation-dependent |
 | Terminal name | explicit Unix capability | slave PTY name | implementation-dependent |
 | Terminal modes | snapshot and distinct-change stream on Unix | termios polling | implementation-dependent |
-| Isolate loss | Dart finalizer, failed-post cleanup, and quiet-port probe | controller abandonment | comparison pending |
+| Isolate loss | Dart finalizer, failed-post cleanup, and teardown-safe quiet-port probe | controller abandonment | comparison pending |
 | Errors | typed category, operation, optional OS code | errno / Win32 status | comparison pending |
 | Platforms | qualification tracked per OS and architecture | Linux, macOS, Windows | package-specific |
 

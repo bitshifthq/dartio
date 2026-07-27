@@ -104,11 +104,13 @@ Future<int> _runCycle(int cycle) async {
 }
 
 Future<PtySession> _spawnFixture(String operation, int byteCount) async {
+  final fixture = Platform.environment['PTYX_FIXTURE_EXECUTABLE'];
   final session = await PtySession.spawn(
     PtySpawnOptions(
-      executable: Platform.resolvedExecutable,
+      executable: fixture ?? Platform.resolvedExecutable,
       arguments: [
-        Platform.script.resolve('../benchmark/fixture.dart').toFilePath(),
+        if (fixture == null)
+          Platform.script.resolve('../benchmark/fixture.dart').toFilePath(),
         operation,
         if (byteCount != 0) '$byteCount',
       ],

@@ -67,6 +67,13 @@ jobs:
           sdk: 3.11.0
       - run: rustup toolchain install stable --profile minimal
       - run: dart pub get
+      - name: compile standalone fixture
+        working-directory: packages/ptyx
+        run: |
+          FIXTURE="$RUNNER_TEMP/ptyx-fixture"
+          if [[ "$RUNNER_OS" == "Windows" ]]; then FIXTURE="$FIXTURE.exe"; fi
+          dart compile exe benchmark/fixture.dart -o "$FIXTURE"
+          printf "PTYX_FIXTURE_EXECUTABLE=%s\n" "$FIXTURE" >> "$GITHUB_ENV"
       - name: run exact-integrity lifecycle soak
         working-directory: packages/ptyx
         env:
@@ -103,6 +110,13 @@ jobs:
           sdk: 3.11.0
       - run: rustup toolchain install stable --profile minimal
       - run: dart pub get
+      - name: compile standalone fixture
+        working-directory: packages/ptyx
+        run: |
+          FIXTURE="$RUNNER_TEMP/ptyx-fixture"
+          if [[ "$RUNNER_OS" == "Windows" ]]; then FIXTURE="$FIXTURE.exe"; fi
+          dart compile exe benchmark/fixture.dart -o "$FIXTURE"
+          printf "PTYX_FIXTURE_EXECUTABLE=%s\n" "$FIXTURE" >> "$GITHUB_ENV"
       - name: run correctness-gated diagnostic scorecard
         working-directory: packages/ptyx
         run: >-

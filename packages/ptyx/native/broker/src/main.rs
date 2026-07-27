@@ -1301,9 +1301,23 @@ fn close_inherited_descriptors(retain_through: RawFd) -> io::Result<()> {
         }
     }
     #[cfg(target_os = "macos")]
-    for fd in retain_through + 1..unsafe { libc::getdtablesize() } {
-        unsafe {
-            libc::close(fd);
+    {
+        // This process has already execed and is still single-threaded, so a
+        // filesystem snapshot is safe here. Avoid scanning to getdtablesize:
+        // hosted macOS processes can have a very large descriptor ceiling.
+        let descriptors = std::fs::read_dir("/dev/fd")?
+            .map(|entry| {
+                entry?
+                    .file_name()
+                    .to_string_lossy()
+                    .parse::<RawFd>()
+                    .map_err(io::Error::other)
+            })
+            .collect::<io::Result<Vec<_>>>()?;
+        for fd in descriptors.into_iter().filter(|fd| *fd > retain_through) {
+            unsafe {
+                libc::close(fd);
+            }
         }
     }
     Ok(())

@@ -34,11 +34,13 @@ PTYX_HIDDEN bool ptyx_dart_post_integer(Dart_Port_DL port, int64_t message) {
   if (take_failed_post()) {
     return false;
   }
-  return Dart_PostInteger_DL(port, message);
+  Dart_PostInteger_Type post = Dart_PostInteger_DL;
+  return post != NULL && post(port, message);
 }
 
 PTYX_HIDDEN bool ptyx_dart_probe_port(Dart_Port_DL port) {
-  return Dart_PostInteger_DL(port, 0);
+  Dart_PostInteger_Type post = Dart_PostInteger_DL;
+  return post != NULL && post(port, 0);
 }
 
 PTYX_HIDDEN bool ptyx_dart_post_bytes(
@@ -66,7 +68,8 @@ PTYX_HIDDEN bool ptyx_dart_post_bytes(
   };
   message.value.as_array.length = 2;
   message.value.as_array.values = values;
-  return Dart_PostCObject_DL(port, &message);
+  Dart_PostCObject_Type post = Dart_PostCObject_DL;
+  return post != NULL && post(port, &message);
 }
 
 PTYX_HIDDEN void ptyx_dart_fail_next_post(void) {

@@ -329,18 +329,43 @@ void main() {
   test(
     'null working directory snapshots the parent cwd for every spawn',
     () async {
-      final result = await Process.run(Platform.resolvedExecutable, [
-        'run',
-        'test/support/current_directory_probe.dart',
-      ]).timeout(const Duration(seconds: 30));
+      Future<String> childDirectory() async {
+        final session = await PtySession.spawn(
+          PtySpawnOptions(
+            executable: Platform.isWindows
+                ? r'C:\Windows\System32\cmd.exe'
+                : '/bin/pwd',
+            arguments: Platform.isWindows ? const ['/d', '/c', 'cd'] : const [],
+            initialSize: size,
+          ),
+        );
+        try {
+          return utf8
+              .decode(await session.output.expand((chunk) => chunk).toList())
+              .trim();
+        } finally {
+          await session.close();
+        }
+      }
 
-      expect(
-        result.exitCode,
-        0,
-        reason:
-            'probe stdout:\n${result.stdout}\n'
-            'probe stderr:\n${result.stderr}',
-      );
+      final original = Directory.current;
+      final root = await Directory.systemTemp.createTemp('ptyx-cwd-');
+      final first = await Directory('${root.path}/first').create();
+      final second = await Directory('${root.path}/second').create();
+      try {
+        Directory.current = first;
+        await childDirectory();
+        Directory.current = second;
+        final actual = await childDirectory();
+        final expected = second.resolveSymbolicLinksSync();
+        expect(
+          Platform.isWindows ? actual.toLowerCase() : actual,
+          Platform.isWindows ? expected.toLowerCase() : expected,
+        );
+      } finally {
+        Directory.current = original;
+        await root.delete(recursive: true);
+      }
     },
   );
 }

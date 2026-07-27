@@ -43,10 +43,10 @@ equivalent language comparison.
   recursively close the stream or silently terminate the process.
 - Loss of a Dart port is a terminal typed failure. It starts native cleanup,
   fails all waiters, and never leaves a session waiting for another Dart call.
-- The notifier probes each distinct event port every 250 milliseconds while
-  it is otherwise idle. A failed probe commits every session routed to that
-  isolate to native abandonment, including quiet sessions that produce no
-  ordinary notification. The probe bypasses operational post fault injection.
+- A failed operational post or quiet-port probe commits every session routed
+  to that isolate to native abandonment. Background posts snapshot and
+  null-check Dart's dynamic function pointer before calling it, so VM teardown
+  becomes a failed probe instead of a call through a cleared pointer.
 
 ### Native controller
 

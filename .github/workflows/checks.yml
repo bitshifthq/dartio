@@ -114,7 +114,7 @@ jobs:
       - run: dart pub get
       - name: run Dart tests
         working-directory: packages/ptyx
-        run: dart test
+        run: dart test --concurrency=1
 
   rust:
     name: rust-${{ matrix.os }}

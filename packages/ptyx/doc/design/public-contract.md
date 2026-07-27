@@ -174,11 +174,11 @@ it with a less specific cleanup exception.
 
 A session belongs to the isolate that spawned it and is not transferable.
 Native state owns cleanup independently of the Dart wrapper. Dart
-finalization, native-port closure, failed message posting, and the native
-250-millisecond quiet-port liveness probe all commit the same idempotent native
-shutdown path. The VM does not receive a native finalizer function pointer
-that could race dynamic-library or isolate shutdown. Late messages carry
-generation-checked identities and cannot access a released session.
+finalization, failed operational posts, and teardown-safe quiet-port probes
+commit the same idempotent native shutdown path. The VM does not receive a
+native finalizer function pointer that could race dynamic-library or isolate
+shutdown. Late messages carry generation-checked identities and cannot access
+a released session.
 
 ## Errors
 
