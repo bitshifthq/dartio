@@ -119,7 +119,33 @@ void main() {
 
     await session.exitCode;
     await inputDone;
+    expect(
+      () => session.tryWrite(Uint8List(1)),
+      throwsA(isA<PtyInputException>()),
+    );
   });
+
+  test(
+    'spawn validation is typed and stable with assertions enabled',
+    () async {
+      await expectLater(
+        PtySession.spawn(
+          PtySpawnOptions(
+            executable: Platform.resolvedExecutable,
+            initialSize: const PtySize(rows: 0, columns: 80),
+            maxBufferedInput: 0,
+          ),
+        ),
+        throwsA(
+          isA<PtyInvalidArgumentException>().having(
+            (error) => error.operation,
+            'operation',
+            'spawn',
+          ),
+        ),
+      );
+    },
+  );
 
   test('capabilities describe platform-specific behavior', () async {
     final session = await PtySession.spawn(shell('exit 0'));

@@ -15,6 +15,15 @@ external void killNativeBroker();
 
 const _brokerLossChild = 'PTYX_BROKER_LOSS_TEST_CHILD';
 
+Future<bool> _processRunning(int pid) async {
+  if ((await Process.run('/bin/kill', ['-0', '$pid'])).exitCode != 0) {
+    return false;
+  }
+  final state = await Process.run('/bin/ps', ['-o', 'state=', '-p', '$pid']);
+  return state.exitCode == 0 &&
+      !(state.stdout as String).trimLeft().startsWith('Z');
+}
+
 void main() {
   if (Platform.environment[_brokerLossChild] == '1') {
     test('broker loss child case', _exerciseBrokerLoss);
@@ -85,10 +94,11 @@ Future<void> _exerciseBrokerLoss() async {
   final session = await PtySession.spawn(
     const PtySpawnOptions(
       executable: '/bin/sh',
-      arguments: ['-c', 'sleep 30'],
+      arguments: ['-c', "trap '' HUP TERM; while :; do sleep 1; done"],
       initialSize: PtySize(rows: 24, columns: 80),
     ),
   );
+  final pid = session.pid!;
   final outputFailure = expectLater(
     session.output,
     emitsError(isA<PtyInfrastructureException>()),
@@ -109,4 +119,9 @@ Future<void> _exerciseBrokerLoss() async {
     session.close(),
     throwsA(isA<PtyInfrastructureException>()),
   );
+  final deadline = DateTime.now().add(const Duration(seconds: 5));
+  while (await _processRunning(pid) && DateTime.now().isBefore(deadline)) {
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+  }
+  expect(await _processRunning(pid), isFalse);
 }

@@ -101,8 +101,21 @@ void main() {
 
         expect(
           directory.uri.pathSegments,
-          containsAllInOrder(['shared', 'cargo', 'aarch64-macos']),
+          containsAllInOrder([
+            'shared',
+            'cargo',
+            'production',
+            'aarch64-macos',
+          ]),
         );
+      });
+
+      test('separates diagnostic feature artifacts', () {
+        final directory = cargoBuildDirectory(
+          createBuildInput(userDefines: {'test_controls': 'true'}),
+        );
+
+        expect(directory.uri.pathSegments, contains('test-controls'));
       });
     });
 

@@ -16,6 +16,11 @@ final _sessionRegistryFinalizer = Finalizer<_SessionRegistryToken>(
   (token) => token.runtime._removeSession(token.handle),
 );
 
+int? _lastNativeCode() {
+  final code = controllerLastErrorCode();
+  return code == 0 ? null : code;
+}
+
 final class _SessionRegistryToken {
   const _SessionRegistryToken(this.runtime, this.handle);
 
@@ -49,6 +54,13 @@ final class NativeSession implements PtySession, Finalizable {
     );
     final handle = spawnResult.handle;
     if (handle == 0) {
+      if (_isUnsupportedNativeCode(spawnResult.nativeCode)) {
+        throw PtyUnsupportedException(
+          'native PTY support is unavailable on this operating-system build',
+          operation: 'spawn',
+          nativeCode: spawnResult.nativeCode,
+        );
+      }
       throw PtySpawnException(
         'native process spawn failed',
         nativeCode: spawnResult.nativeCode,
@@ -81,13 +93,6 @@ final class NativeSession implements PtySession, Finalizable {
       modes,
     );
     runtime._addSession(session);
-    if (!controllerActivate(handle)) {
-      runtime._removeSession(handle);
-      controllerClose(handle);
-      throw const PtyInfrastructureException(
-        'native session activation failed',
-      );
-    }
     _sessionFinalizer.attach(
       session,
       Pointer<Void>.fromAddress(handle),
@@ -98,7 +103,24 @@ final class NativeSession implements PtySession, Finalizable {
       _SessionRegistryToken(runtime, handle),
       detach: session,
     );
+    if (!controllerActivate(handle)) {
+      runtime._removeSession(handle);
+      controllerClose(handle);
+      throw const PtyInfrastructureException(
+        'native session activation failed',
+      );
+    }
     return session;
+  }
+
+  static bool _isUnsupportedNativeCode(int? nativeCode) {
+    if (Platform.isWindows) {
+      return nativeCode == 50;
+    }
+    if (Platform.isMacOS) {
+      return nativeCode == 45;
+    }
+    return nativeCode == 95;
   }
 
   final _ControllerRuntime _runtime;
@@ -118,6 +140,7 @@ final class NativeSession implements PtySession, Finalizable {
   var _outputCancelled = false;
   var _infrastructureLost = false;
   Object? _terminalFailure;
+  PtyInputException? _inputFailure;
   var _creditScheduled = false;
   Timer? _modeTimer;
   PtyTermMode? _lastMode;
@@ -151,7 +174,7 @@ final class NativeSession implements PtySession, Finalizable {
 
   @override
   PtyTermMode? get mode {
-    _checkOpen();
+    _checkOpen('mode');
     if (!capabilities.terminalModes) {
       return null;
     }
@@ -169,12 +192,13 @@ final class NativeSession implements PtySession, Finalizable {
 
   @override
   int? get pid {
-    _checkOpen();
+    _checkOpen('pid');
     final value = controllerPid(_handle);
     if (value < 0) {
-      throw const PtyMetadataException(
+      throw PtyMetadataException(
         'native child process identifier was unavailable',
         operation: 'pid',
+        nativeCode: _lastNativeCode(),
       );
     }
     return value;
@@ -182,13 +206,14 @@ final class NativeSession implements PtySession, Finalizable {
 
   @override
   PtySize get size {
-    _checkOpen();
+    _checkOpen('size');
     return using((arena) {
       final values = arena<Uint32>(4);
       if (!controllerSize(_handle, values)) {
-        throw const PtyMetadataException(
+        throw PtyMetadataException(
           'native terminal size query failed',
           operation: 'size',
+          nativeCode: _lastNativeCode(),
         );
       }
       return PtySize(
@@ -202,24 +227,26 @@ final class NativeSession implements PtySession, Finalizable {
 
   @override
   String? get ttyName {
-    _checkOpen();
+    _checkOpen('ttyName');
     if (!capabilities.terminalName) {
       return null;
     }
     final length = controllerTtyName(_handle, nullptr, 0);
     if (length < 0) {
-      throw const PtyMetadataException(
+      throw PtyMetadataException(
         'native terminal name query failed',
         operation: 'ttyName',
+        nativeCode: _lastNativeCode(),
       );
     }
     return using((arena) {
       final bytes = arena<Uint8>(length);
       final written = controllerTtyName(_handle, bytes, length);
       if (written != length) {
-        throw const PtyMetadataException(
+        throw PtyMetadataException(
           'native terminal name changed during read',
           operation: 'ttyName',
+          nativeCode: _lastNativeCode(),
         );
       }
       return utf8.decode(bytes.asTypedList(length));
@@ -228,25 +255,31 @@ final class NativeSession implements PtySession, Finalizable {
 
   bool get _isTerminal => _infrastructureLost || (_close?.isCompleted ?? false);
 
-  void _checkOpen() {
+  void _checkOpen([String operation = 'state']) {
     if (_close != null) {
-      throw const PtyClosedException('session closed');
+      throw PtyClosedException('session closed', operation: operation);
     }
   }
 
   @override
-  bool tryWrite(Uint8List data) {
-    _checkOpen();
+  bool tryWrite(Uint8List data) => _tryWrite(data, 'tryWrite');
+
+  bool _tryWrite(Uint8List data, String operation) {
+    _checkOpen(operation);
+    final inputFailure = _inputFailure;
+    if (inputFailure != null) {
+      throw inputFailure;
+    }
     if (data.isEmpty) {
-      throw const PtyInvalidArgumentException(
+      throw PtyInvalidArgumentException(
         'input data must not be empty',
-        operation: 'write',
+        operation: operation,
       );
     }
     if (data.length > _inputCapacity) {
       throw PtyInvalidArgumentException(
         'input data exceeds this session input capacity',
-        operation: 'write',
+        operation: operation,
         context: '${data.length} bytes exceeds $_inputCapacity bytes',
       );
     }
@@ -255,6 +288,16 @@ final class NativeSession implements PtySession, Finalizable {
       pointer.asTypedList(data.length).setAll(0, data);
       return controllerWrite(_handle, pointer, data.length);
     });
+    if (sequence < 0) {
+      final nativeCode = controllerLastErrorCode();
+      final failure = PtyInputException(
+        'session can no longer accept input',
+        operation: operation,
+        nativeCode: nativeCode == 0 ? null : nativeCode,
+      );
+      _inputFailure ??= failure;
+      throw _inputFailure!;
+    }
     if (sequence == 0) {
       return false;
     }
@@ -264,7 +307,11 @@ final class NativeSession implements PtySession, Finalizable {
 
   @override
   Future<void> waitForInputCapacity(int byteCount) {
-    _checkOpen();
+    _checkOpen('waitForInputCapacity');
+    final inputFailure = _inputFailure;
+    if (inputFailure != null) {
+      throw inputFailure;
+    }
     if (byteCount <= 0 || byteCount > _inputCapacity) {
       throw PtyInvalidArgumentException(
         'requested input capacity is outside this session limit',
@@ -280,14 +327,18 @@ final class NativeSession implements PtySession, Finalizable {
 
   @override
   Future<void> write(Uint8List data) async {
-    while (!tryWrite(data)) {
+    while (!_tryWrite(data, 'write')) {
       await waitForInputCapacity(data.length);
     }
   }
 
   @override
   Future<void> flush() {
-    _checkOpen();
+    _checkOpen('flush');
+    final inputFailure = _inputFailure;
+    if (inputFailure != null) {
+      throw inputFailure;
+    }
     return _runtime._wait(
       _handle,
       (waiter) => controllerWaitFlush(_handle, _lastSequence, waiter),
@@ -301,15 +352,19 @@ final class NativeSession implements PtySession, Finalizable {
     }
     final result = controllerSignal(_handle, signal.signalNumber);
     if (result < 0) {
-      throw const PtySignalException('native signal delivery failed');
+      throw PtySignalException(
+        'native signal delivery failed',
+        operation: 'kill',
+        nativeCode: _lastNativeCode(),
+      );
     }
     return result == 1;
   }
 
   @override
   void resize(PtySize size) {
-    _checkOpen();
-    _validateSize(size);
+    _checkOpen('resize');
+    _validateSize(size, operation: 'resize');
     if (!controllerResize(
       _handle,
       size.rows,
@@ -317,7 +372,10 @@ final class NativeSession implements PtySession, Finalizable {
       size.pixelWidth,
       size.pixelHeight,
     )) {
-      throw const PtyResizeException('native terminal resize failed');
+      throw PtyResizeException(
+        'native terminal resize failed',
+        nativeCode: _lastNativeCode(),
+      );
     }
   }
 
@@ -329,8 +387,6 @@ final class NativeSession implements PtySession, Finalizable {
     }
     final completion = Completer<void>();
     _close = completion;
-    _sessionFinalizer.detach(this);
-    _sessionRegistryFinalizer.detach(this);
     unawaited(_closeNative(completion));
     return completion.future;
   }
@@ -441,10 +497,11 @@ final class NativeSession implements PtySession, Finalizable {
   }
 
   void _completeInputFailure() {
+    _inputFailure ??= const PtyInputException(
+      'accepted input was not fully written',
+    );
     if (!_inputDone.isCompleted) {
-      _inputDone.completeError(
-        const PtyInputException('accepted input was not fully written'),
-      );
+      _inputDone.completeError(_inputFailure!);
     }
   }
 
@@ -570,6 +627,10 @@ final class NativeSession implements PtySession, Finalizable {
     } on Object catch (error, stackTrace) {
       recordFailure(error, stackTrace);
     }
+    if (destroyed) {
+      _sessionFinalizer.detach(this);
+      _sessionRegistryFinalizer.detach(this);
+    }
     if (failure case final Object error) {
       completion.completeError(error, failureStack);
     } else {
@@ -580,7 +641,10 @@ final class NativeSession implements PtySession, Finalizable {
   PtyTermMode? _readMode() {
     final flags = controllerMode(_handle);
     if (flags < 0) {
-      throw const PtyModeException('native terminal-mode query failed');
+      throw PtyModeException(
+        'native terminal-mode query failed',
+        nativeCode: _lastNativeCode(),
+      );
     }
     return PtyTermMode(
       canonical: flags & 1 != 0,
@@ -835,7 +899,7 @@ final class _ControllerRuntime {
 }
 
 void _validateSpawnOptions(PtySpawnOptions options) {
-  _validateSize(options.initialSize);
+  _validateSize(options.initialSize, operation: 'spawn');
   if (options.maxBufferedInput <= 0 ||
       options.maxBufferedInput > 64 * 1024 * 1024) {
     throw PtyInvalidArgumentException(
@@ -892,7 +956,7 @@ void _validateSpawnOptions(PtySpawnOptions options) {
   }
 }
 
-void _validateSize(PtySize size) {
+void _validateSize(PtySize size, {required String operation}) {
   if (size.rows <= 0 ||
       size.rows > 65535 ||
       size.columns <= 0 ||
@@ -901,9 +965,9 @@ void _validateSize(PtySize size) {
       size.pixelWidth > 65535 ||
       size.pixelHeight < 0 ||
       size.pixelHeight > 65535) {
-    throw const PtyInvalidArgumentException(
+    throw PtyInvalidArgumentException(
       'terminal dimensions are outside native bounds',
-      operation: 'resize',
+      operation: operation,
     );
   }
 }

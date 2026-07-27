@@ -18,7 +18,7 @@
 #define PTYX_EXPORT __attribute__((visibility("default")))
 #endif
 
-#define PTYX_ABI_VERSION 3u
+#define PTYX_ABI_VERSION 4u
 
 PTYX_EXPORT uint32_t ptyi_abi_version(void);
 /**
@@ -52,8 +52,11 @@ PTYX_EXPORT uint64_t ptyi_spawn(
 /** Publishes a staged session after Dart has installed its routing state. */
 PTYX_EXPORT bool ptyi_activate(uint64_t handle);
 
-/** Returns a nonzero accepted-input sequence, or zero without accepting. */
-PTYX_EXPORT uint64_t ptyi_write(
+/**
+ * Returns a positive accepted-input sequence, zero for temporary backpressure,
+ * or -1 when the session can never accept more input.
+ */
+PTYX_EXPORT int64_t ptyi_write(
     uint64_t handle,
     const uint8_t* bytes,
     size_t length);

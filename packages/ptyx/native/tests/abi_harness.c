@@ -4,7 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-_Static_assert(PTYX_ABI_VERSION == 3u, "unexpected compile-time ABI version");
+_Static_assert(PTYX_ABI_VERSION == 4u, "unexpected compile-time ABI version");
 _Static_assert(sizeof(uint32_t) == 4, "uint32_t layout is not supported");
 _Static_assert(sizeof(uint64_t) == 8, "uint64_t layout is not supported");
 _Static_assert(sizeof(int64_t) == 8, "int64_t layout is not supported");
@@ -38,10 +38,10 @@ int main(void) {
                      true, NULL, 24, 80, 0, 0, 65536, 65536, 1, 1) == 0,
           "oversized argument count was accepted");
   require(!ptyi_activate(invalid), "invalid handle activated");
-  require(ptyi_write(invalid, &byte, 1) == 0,
+  require(ptyi_write(invalid, &byte, 1) == -1,
           "invalid-handle input was accepted");
-  require(ptyi_write(invalid, NULL, 1) == 0, "NULL input was accepted");
-  require(ptyi_write(invalid, &byte, SIZE_MAX) == 0,
+  require(ptyi_write(invalid, NULL, 1) == -1, "NULL input was accepted");
+  require(ptyi_write(invalid, &byte, SIZE_MAX) == -1,
           "oversized input length was accepted");
   require(!ptyi_credit_async(invalid, 1), "invalid handle accepted credit");
   require(!ptyi_pause(invalid, true), "invalid handle paused");

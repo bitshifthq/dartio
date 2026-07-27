@@ -21,12 +21,14 @@ part of 'api.dart';
 ///   ),
 /// );
 ///
-/// final chunks = <int>[];
-/// final output = session.output.listen(chunks.addAll);
-///
-/// final exitCode = await session.exitCode;
-/// await output.cancel();
-/// await session.close();
+/// try {
+///   final outputDone = session.output.forEach(stdout.add);
+///   final exitCode = await session.exitCode;
+///   await outputDone;
+///   stdout.writeln('exit: $exitCode');
+/// } finally {
+///   await session.close();
+/// }
 /// ```
 abstract interface class PtySession {
   /// Starts a child process attached to a new pseudo terminal.
@@ -43,7 +45,7 @@ abstract interface class PtySession {
   ///
   /// The result is cached. Awaiting this future more than once returns the same
   /// value. A successful exit is usually `0`; signal exits and native process
-  /// failures use platform-specific values.
+  /// termination uses a platform-specific numeric representation.
   ///
   /// This future can complete before [output] delivers every buffered byte.
   /// Wait for [output] to close when trailing output matters.

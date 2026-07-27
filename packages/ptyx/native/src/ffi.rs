@@ -5,7 +5,8 @@ use crate::broker_client::BrokerSpawn;
 use crate::windows::BrokerSpawn;
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
-use std::ffi::{c_void, CStr, CString};
+use std::ffi::{c_void, CString};
+use std::io;
 use std::mem::size_of;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr;
@@ -19,7 +20,8 @@ struct Ports {
     event: i64,
 }
 
-static RUNTIME: OnceLock<Mutex<IntegratedRuntime>> = OnceLock::new();
+static RUNTIME: OnceLock<IntegratedRuntime> = OnceLock::new();
+static LIBRARY_PINNED: OnceLock<bool> = OnceLock::new();
 static INIT_LOCK: Mutex<()> = Mutex::new(());
 static PORTS: OnceLock<Mutex<HashMap<u64, Ports>>> = OnceLock::new();
 static LOST_PORTS: OnceLock<Mutex<HashSet<u64>>> = OnceLock::new();
@@ -38,6 +40,40 @@ thread_local! {
 
 fn set_last_error_code(code: i32) {
     LAST_ERROR_CODE.set(code);
+}
+
+fn native_error_code(error: &io::Error) -> i32 {
+    error.raw_os_error().unwrap_or_else(|| {
+        if error.kind() == io::ErrorKind::Unsupported {
+            #[cfg(windows)]
+            {
+                50 // ERROR_NOT_SUPPORTED
+            }
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            {
+                libc::ENOTSUP
+            }
+        } else {
+            libc::EIO
+        }
+    })
+}
+
+unsafe fn bounded_c_string(
+    pointer: *const libc::c_char,
+    remaining: &mut usize,
+) -> Result<CString, i32> {
+    if pointer.is_null() {
+        return Err(libc::EINVAL);
+    }
+    let maximum = remaining.saturating_add(1);
+    let length = libc::strnlen(pointer, maximum);
+    if length > *remaining {
+        return Err(libc::E2BIG);
+    }
+    let bytes = std::slice::from_raw_parts(pointer.cast::<u8>(), length);
+    *remaining -= length;
+    CString::new(bytes).map_err(|_| libc::EINVAL)
 }
 
 struct InputAdmission(usize);
@@ -63,7 +99,7 @@ impl Drop for InputAdmission {
 
 #[no_mangle]
 pub extern "C" fn ptyi_abi_version() -> u32 {
-    3
+    4
 }
 
 #[no_mangle]
@@ -83,13 +119,12 @@ pub extern "C" fn ptyi_last_error_code() -> i32 {
     LAST_ERROR_CODE.get()
 }
 
-fn runtime() -> Option<&'static Mutex<IntegratedRuntime>> {
+fn runtime() -> Option<&'static IntegratedRuntime> {
     RUNTIME.get()
 }
 
 fn with_runtime<R>(operation: impl FnOnce(&IntegratedRuntime) -> R) -> Option<R> {
-    let runtime = runtime()?.lock().ok()?;
-    Some(operation(&runtime))
+    Some(operation(runtime()?))
 }
 
 fn ports() -> &'static Mutex<HashMap<u64, Ports>> {
@@ -100,7 +135,39 @@ fn lost_ports() -> &'static Mutex<HashSet<u64>> {
     LOST_PORTS.get_or_init(|| Mutex::new(HashSet::new()))
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn pin_native_library() -> bool {
+    let mut information = std::mem::MaybeUninit::<libc::Dl_info>::zeroed();
+    let address = ptyi_init as *const () as *const c_void;
+    if unsafe { libc::dladdr(address, information.as_mut_ptr()) } == 0 {
+        return false;
+    }
+    let information = unsafe { information.assume_init() };
+    if information.dli_fname.is_null() {
+        return false;
+    }
+    !unsafe { libc::dlopen(information.dli_fname, libc::RTLD_NOW | libc::RTLD_NODELETE) }.is_null()
+}
+
+#[cfg(windows)]
+fn pin_native_library() -> bool {
+    use windows_sys::Win32::Foundation::HMODULE;
+    use windows_sys::Win32::System::LibraryLoader::{
+        GetModuleHandleExW, GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, GET_MODULE_HANDLE_EX_FLAG_PIN,
+    };
+
+    let mut module: HMODULE = std::ptr::null_mut();
+    unsafe {
+        GetModuleHandleExW(
+            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
+            ptyi_init as *const () as *const u16,
+            &mut module,
+        ) != 0
+    }
+}
+
 #[no_mangle]
+#[cfg(feature = "test-controls")]
 pub extern "C" fn ptyi_test_fail_next_post() {
     unsafe {
         ptyx_dart_fail_next_post();
@@ -108,6 +175,7 @@ pub extern "C" fn ptyi_test_fail_next_post() {
 }
 
 #[no_mangle]
+#[cfg(feature = "test-controls")]
 pub extern "C" fn ptyi_test_kill_broker() {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     let _ = with_runtime(IntegratedRuntime::kill_broker_for_test);
@@ -119,6 +187,9 @@ pub unsafe extern "C" fn ptyi_init(api_data: *mut c_void) -> bool {
         if api_data.is_null() {
             return false;
         }
+        if !*LIBRARY_PINNED.get_or_init(pin_native_library) {
+            return false;
+        }
         let Ok(_initializing) = INIT_LOCK.lock() else {
             return false;
         };
@@ -128,7 +199,7 @@ pub unsafe extern "C" fn ptyi_init(api_data: *mut c_void) -> bool {
         if Dart_InitializeApiDL(api_data) != 0 {
             return false;
         }
-        let Ok(mut runtime) = IntegratedRuntime::try_new() else {
+        let Ok(runtime) = IntegratedRuntime::try_new() else {
             return false;
         };
         let Some(notifications) = runtime.take_notifications() else {
@@ -154,7 +225,7 @@ pub unsafe extern "C" fn ptyi_init(api_data: *mut c_void) -> bool {
                     }
                 }
             });
-        if abandoner.is_err() || RUNTIME.set(Mutex::new(runtime)).is_err() {
+        if abandoner.is_err() || RUNTIME.set(runtime).is_err() {
             return false;
         }
         ABANDONMENTS.set(abandon_sender).is_ok()
@@ -226,24 +297,33 @@ pub unsafe extern "C" fn ptyi_spawn(
             set_last_error_code(libc::EINVAL);
             return 0;
         }
-        let executable = CStr::from_ptr(executable);
-        if executable.is_empty() || executable.to_bytes().len() > MAX_SPAWN_PAYLOAD {
-            set_last_error_code(libc::EINVAL);
-            return 0;
-        }
+        let mut remaining = MAX_SPAWN_PAYLOAD;
+        let executable = match bounded_c_string(executable, &mut remaining) {
+            Ok(value) if !value.is_empty() => value,
+            Ok(_) => {
+                set_last_error_code(libc::EINVAL);
+                return 0;
+            }
+            Err(code) => {
+                set_last_error_code(code);
+                return 0;
+            }
+        };
         let argument_pointers = if argument_count == 0 {
             &[][..]
         } else {
             std::slice::from_raw_parts(arguments, argument_count)
         };
-        let arguments = argument_pointers
-            .iter()
-            .map(|argument| (!argument.is_null()).then(|| CStr::from_ptr(*argument).to_owned()))
-            .collect::<Option<Vec<CString>>>();
-        let Some(arguments) = arguments else {
-            set_last_error_code(libc::EINVAL);
-            return 0;
-        };
+        let mut owned_arguments = Vec::with_capacity(argument_count);
+        for argument in argument_pointers {
+            match bounded_c_string(*argument, &mut remaining) {
+                Ok(value) => owned_arguments.push(value),
+                Err(code) => {
+                    set_last_error_code(code);
+                    return 0;
+                }
+            }
+        }
         let environment_pointers = if inherit_environment || environment_count == 0 {
             &[][..]
         } else {
@@ -252,41 +332,32 @@ pub unsafe extern "C" fn ptyi_spawn(
         let environment = if inherit_environment {
             None
         } else {
-            let values = environment_pointers
-                .iter()
-                .map(|entry| (!entry.is_null()).then(|| CStr::from_ptr(*entry).to_owned()))
-                .collect::<Option<Vec<CString>>>();
-            let Some(values) = values else {
-                set_last_error_code(libc::EINVAL);
-                return 0;
-            };
+            let mut values = Vec::with_capacity(environment_count);
+            for entry in environment_pointers {
+                match bounded_c_string(*entry, &mut remaining) {
+                    Ok(value) => values.push(value),
+                    Err(code) => {
+                        set_last_error_code(code);
+                        return 0;
+                    }
+                }
+            }
             Some(values)
         };
-        let cwd = (!cwd.is_null()).then(|| CStr::from_ptr(cwd).to_owned());
-        let payload_bytes = arguments
-            .iter()
-            .try_fold(executable.to_bytes().len(), |total, value| {
-                total.checked_add(value.as_bytes().len())
-            })
-            .and_then(|total| {
-                environment.as_ref().map_or(Some(total), |values| {
-                    values.iter().try_fold(total, |total, value| {
-                        total.checked_add(value.as_bytes().len())
-                    })
-                })
-            })
-            .and_then(|total| {
-                cwd.as_ref().map_or(Some(total), |value| {
-                    total.checked_add(value.as_bytes().len())
-                })
-            });
-        if payload_bytes.is_none_or(|bytes| bytes > MAX_SPAWN_PAYLOAD) {
-            set_last_error_code(libc::E2BIG);
-            return 0;
-        }
+        let cwd = if cwd.is_null() {
+            None
+        } else {
+            match bounded_c_string(cwd, &mut remaining) {
+                Ok(value) => Some(value),
+                Err(code) => {
+                    set_last_error_code(code);
+                    return 0;
+                }
+            }
+        };
         let config = BrokerSpawn {
-            executable: executable.to_owned(),
-            arguments,
+            executable,
+            arguments: owned_arguments,
             environment,
             cwd,
             rows,
@@ -299,7 +370,7 @@ pub unsafe extern "C" fn ptyi_spawn(
         }) {
             Some(Ok(handle)) => handle,
             Some(Err(error)) => {
-                set_last_error_code(error.raw_os_error().unwrap_or(libc::EIO));
+                set_last_error_code(native_error_code(&error));
                 0
             }
             None => {
@@ -328,6 +399,7 @@ pub unsafe extern "C" fn ptyi_spawn(
 pub extern "C" fn ptyi_activate(handle: u64) -> bool {
     catch_unwind(AssertUnwindSafe(|| {
         let activated = with_runtime(|runtime| runtime.activate(handle)).unwrap_or(false);
+        set_last_error_code(if activated { 0 } else { libc::EPIPE });
         if !activated {
             if let Ok(mut entries) = ports().lock() {
                 entries.remove(&handle);
@@ -339,63 +411,25 @@ pub extern "C" fn ptyi_activate(handle: u64) -> bool {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn ptyi_write(handle: u64, bytes: *const u8, length: usize) -> u64 {
+pub unsafe extern "C" fn ptyi_write(handle: u64, bytes: *const u8, length: usize) -> i64 {
     catch_unwind(AssertUnwindSafe(|| {
         if bytes.is_null() || length == 0 || length > isize::MAX as usize {
-            return 0;
+            set_last_error_code(libc::EINVAL);
+            return -1;
         }
         let Some(_admission) = InputAdmission::acquire(length) else {
             return 0;
         };
         let bytes = std::slice::from_raw_parts(bytes, length).to_vec();
-        with_runtime(|runtime| runtime.try_write(handle, bytes)).unwrap_or(0)
-    }))
-    .unwrap_or(0)
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn ptyi_pull(handle: u64, target: *mut u8, capacity: usize) -> usize {
-    catch_unwind(AssertUnwindSafe(|| {
-        if target.is_null() || capacity == 0 {
-            return 0;
+        let result = with_runtime(|runtime| runtime.try_write(handle, bytes)).unwrap_or(-1);
+        if result < 0 {
+            set_last_error_code(libc::EPIPE);
+        } else {
+            set_last_error_code(0);
         }
-        let Some(bytes) = with_runtime(|runtime| runtime.pull(handle, capacity)).flatten() else {
-            return 0;
-        };
-        ptr::copy_nonoverlapping(bytes.as_ptr(), target, bytes.len());
-        bytes.len()
-    }))
-    .unwrap_or(0)
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn ptyi_exchange(
-    handle: u64,
-    credit: usize,
-    target: *mut u8,
-    capacity: usize,
-) -> isize {
-    catch_unwind(AssertUnwindSafe(|| {
-        if target.is_null() || capacity == 0 {
-            return -1;
-        }
-        let Some(bytes) =
-            with_runtime(|runtime| runtime.exchange(handle, credit, capacity)).flatten()
-        else {
-            return -1;
-        };
-        ptr::copy_nonoverlapping(bytes.as_ptr(), target, bytes.len());
-        bytes.len() as isize
+        result
     }))
     .unwrap_or(-1)
-}
-
-#[no_mangle]
-pub extern "C" fn ptyi_credit(handle: u64, bytes: usize) -> bool {
-    catch_unwind(AssertUnwindSafe(|| {
-        with_runtime(|runtime| runtime.credit(handle, bytes)).unwrap_or(false)
-    }))
-    .unwrap_or(false)
 }
 
 #[no_mangle]
@@ -410,14 +444,6 @@ pub extern "C" fn ptyi_credit_async(handle: u64, bytes: usize) -> bool {
 pub extern "C" fn ptyi_pause(handle: u64, paused: bool) -> bool {
     catch_unwind(AssertUnwindSafe(|| {
         with_runtime(|runtime| runtime.pause(handle, paused)).unwrap_or(false)
-    }))
-    .unwrap_or(false)
-}
-
-#[no_mangle]
-pub extern "C" fn ptyi_flush_ready(handle: u64, sequence: u64) -> bool {
-    catch_unwind(AssertUnwindSafe(|| {
-        with_runtime(|runtime| runtime.flush_ready(handle, sequence)).unwrap_or(false)
     }))
     .unwrap_or(false)
 }
@@ -474,9 +500,11 @@ pub unsafe extern "C" fn ptyi_exit_status(handle: u64, status: *mut i64) -> bool
 #[no_mangle]
 pub extern "C" fn ptyi_pid(handle: u64) -> i64 {
     catch_unwind(AssertUnwindSafe(|| {
-        with_runtime(|runtime| runtime.pid(handle))
+        let result = with_runtime(|runtime| runtime.pid(handle))
             .flatten()
-            .map_or(-1, i64::from)
+            .map_or(-1, i64::from);
+        set_last_error_code(if result < 0 { libc::EPIPE } else { 0 });
+        result
     }))
     .unwrap_or(-1)
 }
@@ -488,9 +516,11 @@ pub unsafe extern "C" fn ptyi_size(handle: u64, values: *mut u32) -> bool {
             return false;
         }
         let Some(size) = with_runtime(|runtime| runtime.size(handle)).flatten() else {
+            set_last_error_code(libc::EPIPE);
             return false;
         };
         ptr::copy_nonoverlapping(size.as_ptr(), values, size.len());
+        set_last_error_code(0);
         true
     }))
     .unwrap_or(false)
@@ -505,8 +535,12 @@ pub extern "C" fn ptyi_resize(
     pixel_height: u32,
 ) -> bool {
     catch_unwind(AssertUnwindSafe(|| {
-        with_runtime(|runtime| runtime.resize(handle, [rows, columns, pixel_width, pixel_height]))
-            .unwrap_or(false)
+        let result = with_runtime(|runtime| {
+            runtime.resize(handle, [rows, columns, pixel_width, pixel_height])
+        })
+        .unwrap_or(false);
+        set_last_error_code(if result { 0 } else { libc::EIO });
+        result
     }))
     .unwrap_or(false)
 }
@@ -514,9 +548,11 @@ pub extern "C" fn ptyi_resize(
 #[no_mangle]
 pub extern "C" fn ptyi_signal(handle: u64, signal: i32) -> i32 {
     catch_unwind(AssertUnwindSafe(|| {
-        with_runtime(|runtime| runtime.signal(handle, signal))
+        let result = with_runtime(|runtime| runtime.signal(handle, signal))
             .flatten()
-            .map_or(-1, i32::from)
+            .map_or(-1, i32::from);
+        set_last_error_code(if result < 0 { libc::EIO } else { 0 });
+        result
     }))
     .unwrap_or(-1)
 }
@@ -524,11 +560,13 @@ pub extern "C" fn ptyi_signal(handle: u64, signal: i32) -> i32 {
 #[no_mangle]
 pub extern "C" fn ptyi_mode(handle: u64) -> i32 {
     catch_unwind(AssertUnwindSafe(|| {
-        with_runtime(|runtime| runtime.mode(handle))
+        let result = with_runtime(|runtime| runtime.mode(handle))
             .flatten()
             .map_or(-1, |mode| {
                 i32::from(mode[0]) | (i32::from(mode[1]) << 1) | (i32::from(mode[2]) << 2)
-            })
+            });
+        set_last_error_code(if result < 0 { libc::EIO } else { 0 });
+        result
     }))
     .unwrap_or(-1)
 }
@@ -537,8 +575,10 @@ pub extern "C" fn ptyi_mode(handle: u64) -> i32 {
 pub unsafe extern "C" fn ptyi_tty_name(handle: u64, target: *mut u8, capacity: usize) -> isize {
     catch_unwind(AssertUnwindSafe(|| {
         let Some(name) = with_runtime(|runtime| runtime.tty_name(handle)).flatten() else {
+            set_last_error_code(libc::EIO);
             return -1;
         };
+        set_last_error_code(0);
         if target.is_null() || capacity < name.len() {
             return name.len() as isize;
         }
@@ -549,27 +589,11 @@ pub unsafe extern "C" fn ptyi_tty_name(handle: u64, target: *mut u8, capacity: u
 }
 
 #[no_mangle]
-pub extern "C" fn ptyi_output_total(handle: u64) -> usize {
-    catch_unwind(AssertUnwindSafe(|| {
-        with_runtime(|runtime| runtime.output_total(handle))
-            .flatten()
-            .unwrap_or(0)
-    }))
-    .unwrap_or(0)
-}
-
-#[no_mangle]
-pub extern "C" fn ptyi_output_done(handle: u64) -> bool {
-    catch_unwind(AssertUnwindSafe(|| {
-        with_runtime(|runtime| runtime.output_done(handle)).unwrap_or(false)
-    }))
-    .unwrap_or(false)
-}
-
-#[no_mangle]
 pub extern "C" fn ptyi_close(handle: u64) -> bool {
     catch_unwind(AssertUnwindSafe(|| {
-        with_runtime(|runtime| runtime.close(handle)).unwrap_or(false)
+        let result = with_runtime(|runtime| runtime.close(handle)).unwrap_or(false);
+        set_last_error_code(if result { 0 } else { libc::EIO });
+        result
     }))
     .unwrap_or(false)
 }
@@ -589,25 +613,6 @@ pub extern "C" fn ptyi_destroy(handle: u64) -> bool {
         removed
     }))
     .unwrap_or(false)
-}
-
-#[no_mangle]
-pub extern "C" fn ptyi_counter(key: u32) -> u64 {
-    catch_unwind(AssertUnwindSafe(|| {
-        let counters = with_runtime(IntegratedRuntime::counters).unwrap_or_default();
-        match key {
-            0 => counters.reactor_wakeups,
-            1 => counters.reactor_events,
-            2 => counters.command_wakeups,
-            3 => counters.read_syscalls,
-            4 => counters.write_syscalls,
-            5 => counters.read_bytes,
-            6 => counters.write_bytes,
-            7 => counters.notifications,
-            _ => 0,
-        }
-    }))
-    .unwrap_or(0)
 }
 
 fn dispatch_notice(notice: Notice) {
@@ -700,5 +705,6 @@ unsafe extern "C" {
     fn Dart_InitializeApiDL(data: *mut c_void) -> libc::intptr_t;
     fn ptyx_dart_post_integer(port: i64, message: i64) -> bool;
     fn ptyx_dart_post_bytes(port: i64, handle: i64, bytes: *const u8, length: usize) -> bool;
+    #[cfg(feature = "test-controls")]
     fn ptyx_dart_fail_next_post();
 }

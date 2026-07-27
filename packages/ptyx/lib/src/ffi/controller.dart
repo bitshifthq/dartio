@@ -136,8 +136,9 @@ external int controllerWaitCapacity(int handle, int required, int waiter);
 )
 external int controllerWaitFlush(int handle, int sequence, int waiter);
 
-/// Returns a nonzero accepted-input sequence, or zero without accepting.
-@ffi.Native<ffi.Uint64 Function(ffi.Uint64, ffi.Pointer<ffi.Uint8>, ffi.Size)>(
+/// Returns a positive accepted-input sequence, zero for temporary backpressure,
+/// or -1 when the session can never accept more input.
+@ffi.Native<ffi.Int64 Function(ffi.Uint64, ffi.Pointer<ffi.Uint8>, ffi.Size)>(
   symbol: 'ptyi_write',
 )
 external int controllerWrite(
@@ -146,4 +147,4 @@ external int controllerWrite(
   int length,
 );
 
-const int controllerAbiVersionExpected = 3;
+const int controllerAbiVersionExpected = 4;

@@ -738,13 +738,8 @@ struct ExitStatus {
 
 enum SlotState {
     Vacant,
-    Running {
-        pid: libc::pid_t,
-    },
-    Exited {
-        exit: ExitStatus,
-        process_group: libc::pid_t,
-    },
+    Running { pid: libc::pid_t },
+    Exited { exit: ExitStatus, pid: libc::pid_t },
 }
 
 struct Slot {
@@ -765,6 +760,7 @@ struct Broker {
 
 impl Broker {
     fn run() -> io::Result<()> {
+        close_inherited_descriptors(CONTROL_FD)?;
         let control = unsafe { OwnedFd::from_raw_fd(CONTROL_FD) };
         set_cloexec(control.as_raw_fd())?;
         #[cfg(target_os = "macos")]
@@ -879,7 +875,11 @@ impl Broker {
                     revents: 0,
                 },
             ];
-            let ready = unsafe { libc::poll(descriptors.as_mut_ptr(), descriptors.len() as _, -1) };
+            // Re-observe known children periodically as well as on signalfd
+            // readiness. This closes the race where a very short-lived child
+            // exits while its slot is being published.
+            let ready =
+                unsafe { libc::poll(descriptors.as_mut_ptr(), descriptors.len() as _, 100) };
             if ready < 0 {
                 let error = io::Error::last_os_error();
                 if error.kind() == io::ErrorKind::Interrupted {
@@ -903,8 +903,8 @@ impl Broker {
             }
             if descriptors[1].revents & libc::POLLIN != 0 {
                 drain_sigchld(self.signal_fd.as_raw_fd())?;
-                self.reap_available()?;
             }
+            self.reap_available()?;
         }
     }
 
@@ -1007,12 +1007,9 @@ impl Broker {
                 }
                 (CLOSE_KILLED, 0)
             }
-            Some(SlotState::Exited {
-                exit,
-                process_group,
-            }) => {
+            Some(SlotState::Exited { exit, pid }) => {
                 unsafe {
-                    libc::kill(-*process_group, libc::SIGKILL);
+                    libc::kill(-*pid, libc::SIGKILL);
                 }
                 (CLOSE_ALREADY_EXITED, exit.code)
             }
@@ -1058,27 +1055,20 @@ impl Broker {
     }
 
     fn handle_release(&mut self, frame: Frame) -> io::Result<()> {
-        let released = if let Some((index, generation)) = split_session(frame.session) {
-            if let Some(slot) = self.slots.get_mut(index) {
-                if slot.generation == generation {
-                    if let SlotState::Exited { process_group, .. } = &slot.state {
-                        unsafe {
-                            libc::kill(-*process_group, libc::SIGKILL);
-                        }
-                        slot.state = SlotState::Vacant;
-                        true
-                    } else {
-                        false
-                    }
-                } else {
-                    false
-                }
-            } else {
-                false
+        let exited_pid = self.lookup(frame.session).and_then(|state| match state {
+            SlotState::Exited { pid, .. } => Some(*pid),
+            _ => None,
+        });
+        let released = exited_pid.is_some_and(|pid| {
+            unsafe {
+                libc::kill(-pid, libc::SIGKILL);
             }
-        } else {
-            false
-        };
+            if wait_exact(pid).is_err() {
+                return false;
+            }
+            self.vacate(frame.session);
+            true
+        });
         let mut response = Frame::new(RELEASE_RESULT);
         response.request = frame.request;
         response.session = frame.session;
@@ -1172,17 +1162,13 @@ impl Broker {
             Some(SlotState::Running { pid }) => *pid,
             _ => return Ok(()),
         };
-        let status = wait_exact(pid)?;
-        let exit = ExitStatus {
-            code: decode_wait_status(status),
+        let Some(exit) = observe_exit(pid)? else {
+            return Ok(());
         };
         if let Some((index, generation)) = split_session(session) {
             let slot = &mut self.slots[index];
             if slot.generation == generation {
-                slot.state = SlotState::Exited {
-                    exit,
-                    process_group: pid,
-                };
+                slot.state = SlotState::Exited { exit, pid };
             }
         }
         let mut frame = Frame::new(EXIT);
@@ -1193,43 +1179,27 @@ impl Broker {
 
     #[cfg(target_os = "linux")]
     fn reap_available(&mut self) -> io::Result<()> {
-        loop {
-            let mut status = 0;
-            let pid = unsafe { libc::waitpid(-1, &mut status, libc::WNOHANG) };
-            if pid == 0 {
-                return Ok(());
-            }
-            if pid < 0 {
-                let error = io::Error::last_os_error();
-                if error.kind() == io::ErrorKind::Interrupted {
-                    continue;
-                }
-                if error.raw_os_error() == Some(libc::ECHILD) {
-                    return Ok(());
-                }
-                return Err(error);
-            }
-            let Some((index, generation)) =
-                self.slots.iter().enumerate().find_map(|(index, slot)| {
-                    matches!(slot.state, SlotState::Running { pid: child } if child == pid)
-                        .then_some((index, slot.generation))
-                })
-            else {
+        let running: Vec<_> = self
+            .slots
+            .iter()
+            .enumerate()
+            .filter_map(|(index, slot)| match slot.state {
+                SlotState::Running { pid } => Some((index, slot.generation, pid)),
+                _ => None,
+            })
+            .collect();
+        for (index, generation, pid) in running {
+            let Some(exit) = observe_exit(pid)? else {
                 continue;
             };
             let session = make_session(index, generation);
-            let exit = ExitStatus {
-                code: decode_wait_status(status),
-            };
-            self.slots[index].state = SlotState::Exited {
-                exit,
-                process_group: pid,
-            };
+            self.slots[index].state = SlotState::Exited { exit, pid };
             let mut frame = Frame::new(EXIT);
             frame.session = session;
             frame.code = exit.code;
             send_frame(self.control.as_raw_fd(), &frame, None)?;
         }
+        Ok(())
     }
 
     fn running_jobs(&self) -> usize {
@@ -1262,7 +1232,7 @@ impl Broker {
                         exit: ExitStatus {
                             code: decode_wait_status(status),
                         },
-                        process_group: pid,
+                        pid,
                     };
                 }
             }
@@ -1284,16 +1254,58 @@ impl Broker {
                 Some(SlotState::Running { pid }) => unsafe {
                     libc::kill(-*pid, libc::SIGKILL);
                 },
-                Some(SlotState::Exited { process_group, .. }) => unsafe {
-                    libc::kill(-*process_group, libc::SIGKILL);
+                Some(SlotState::Exited { pid, .. }) => unsafe {
+                    libc::kill(-*pid, libc::SIGKILL);
                 },
                 _ => {}
             }
         }
         for session in sessions {
-            self.reap_blocking(session);
+            if let Some(pid) = self.lookup(session).and_then(|state| match state {
+                SlotState::Running { pid } | SlotState::Exited { pid, .. } => Some(*pid),
+                SlotState::Vacant => None,
+            }) {
+                let _ = wait_exact(pid);
+                self.vacate(session);
+            }
         }
     }
+}
+
+fn close_inherited_descriptors(retain_through: RawFd) -> io::Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        let result = unsafe {
+            libc::syscall(
+                libc::SYS_close_range,
+                (retain_through + 1) as libc::c_uint,
+                libc::c_uint::MAX,
+                0,
+            )
+        };
+        if result == 0 {
+            return Ok(());
+        }
+        let error = io::Error::last_os_error();
+        if !matches!(
+            error.raw_os_error(),
+            Some(libc::ENOSYS) | Some(libc::EINVAL)
+        ) {
+            return Err(error);
+        }
+        for fd in retain_through + 1..unsafe { libc::getdtablesize() } {
+            unsafe {
+                libc::close(fd);
+            }
+        }
+    }
+    #[cfg(target_os = "macos")]
+    for fd in retain_through + 1..unsafe { libc::getdtablesize() } {
+        unsafe {
+            libc::close(fd);
+        }
+    }
+    Ok(())
 }
 
 struct Spawned {
@@ -1367,6 +1379,7 @@ fn spawn_target(request: &SpawnRequest) -> io::Result<Spawned> {
                 .chain(std::iter::once(ptr::null()))
                 .collect()
         });
+    let descriptor_limit = unsafe { libc::getdtablesize() };
     let pid = unsafe { libc::fork() };
     if pid < 0 {
         return Err(io::Error::last_os_error());
@@ -1379,9 +1392,9 @@ fn spawn_target(request: &SpawnRequest) -> io::Result<Spawned> {
                 &pointers,
                 environment.as_deref(),
                 request.cwd.as_deref(),
-                master.as_raw_fd(),
                 slave.as_raw_fd(),
                 error_write.as_raw_fd(),
+                descriptor_limit,
             );
         }
     }
@@ -1405,9 +1418,9 @@ unsafe fn exec_target(
     argv: &[*const libc::c_char],
     environment: Option<&[*const libc::c_char]>,
     cwd: Option<&CStr>,
-    master: RawFd,
     slave: RawFd,
-    error_fd: RawFd,
+    mut error_fd: RawFd,
+    descriptor_limit: RawFd,
 ) -> ! {
     let mut empty = MaybeUninit::<libc::sigset_t>::uninit();
     if libc::sigemptyset(empty.as_mut_ptr()) < 0 {
@@ -1443,11 +1456,19 @@ unsafe fn exec_target(
     {
         child_fail(error_fd);
     }
-    if master > 2 && master != error_fd {
-        libc::close(master);
+    const EXEC_ERROR_FD: RawFd = 3;
+    if error_fd != EXEC_ERROR_FD {
+        if libc::dup2(error_fd, EXEC_ERROR_FD) < 0 {
+            child_fail(error_fd);
+        }
+        libc::close(error_fd);
+        error_fd = EXEC_ERROR_FD;
     }
-    if slave > 2 && slave != error_fd {
-        libc::close(slave);
+    if libc::fcntl(error_fd, libc::F_SETFD, libc::FD_CLOEXEC) < 0 {
+        child_fail(error_fd);
+    }
+    if close_child_descriptors_after(error_fd, descriptor_limit) < 0 {
+        child_fail(error_fd);
     }
     libc::execve(
         executable.as_ptr(),
@@ -1457,6 +1478,35 @@ unsafe fn exec_target(
         }),
     );
     child_fail(error_fd)
+}
+
+#[cfg(target_os = "linux")]
+unsafe fn close_child_descriptors_after(fd: RawFd, descriptor_limit: RawFd) -> libc::c_long {
+    let result = libc::syscall(
+        libc::SYS_close_range,
+        (fd + 1) as libc::c_uint,
+        libc::c_uint::MAX,
+        0,
+    );
+    if result == 0 {
+        return 0;
+    }
+    let error = current_errno();
+    if error != libc::ENOSYS && error != libc::EINVAL {
+        return -1;
+    }
+    for descriptor in fd + 1..descriptor_limit {
+        libc::close(descriptor);
+    }
+    0
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn close_child_descriptors_after(fd: RawFd, descriptor_limit: RawFd) -> libc::c_long {
+    for descriptor in fd + 1..descriptor_limit {
+        libc::close(descriptor);
+    }
+    0
 }
 
 unsafe fn child_fail(error_fd: RawFd) -> ! {
@@ -1777,6 +1827,38 @@ fn decode_wait_status(status: i32) -> i32 {
         -libc::WTERMSIG(status)
     } else {
         i32::MIN
+    }
+}
+
+fn observe_exit(pid: libc::pid_t) -> io::Result<Option<ExitStatus>> {
+    let mut information = MaybeUninit::<libc::siginfo_t>::zeroed();
+    loop {
+        let result = unsafe {
+            libc::waitid(
+                libc::P_PID,
+                pid as libc::id_t,
+                information.as_mut_ptr(),
+                libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+            )
+        };
+        if result == 0 {
+            let information = unsafe { information.assume_init() };
+            if unsafe { information.si_pid() } == 0 {
+                return Ok(None);
+            }
+            let status = unsafe { information.si_status() };
+            let code = match information.si_code {
+                libc::CLD_EXITED => status,
+                libc::CLD_KILLED | libc::CLD_DUMPED => -status,
+                _ => return Ok(None),
+            };
+            return Ok(Some(ExitStatus { code }));
+        }
+        let error = io::Error::last_os_error();
+        if error.kind() == io::ErrorKind::Interrupted {
+            continue;
+        }
+        return Err(error);
     }
 }
 

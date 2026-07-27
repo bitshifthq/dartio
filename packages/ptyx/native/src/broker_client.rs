@@ -215,11 +215,7 @@ fn receive_frame(fd: RawFd) -> io::Result<Option<(Frame, Option<OwnedFd>)>> {
             "broker sent multiple file descriptors",
         ));
     }
-    let received_fd = received_fds.pop();
-    if let Some(received_fd) = &received_fd {
-        set_nonblocking(received_fd.as_raw_fd())?;
-    }
-    Ok(Some((Frame::decode(&bytes)?, received_fd)))
+    Ok(Some((Frame::decode(&bytes)?, received_fds.pop())))
 }
 
 fn collect_received_fds(message: &libc::msghdr, received_fds: &mut Vec<OwnedFd>) -> io::Result<()> {
@@ -251,9 +247,7 @@ fn collect_received_fds(message: &libc::msghdr, received_fds: &mut Vec<OwnedFd>)
                 );
             }
             if raw >= 0 {
-                let owned = unsafe { OwnedFd::from_raw_fd(raw) };
-                set_cloexec(owned.as_raw_fd())?;
-                received_fds.push(owned);
+                received_fds.push(unsafe { OwnedFd::from_raw_fd(raw) });
             }
         }
         header = unsafe { libc::CMSG_NXTHDR(message, header) };
@@ -737,6 +731,7 @@ impl BrokerOwner {
         self.client.clone()
     }
 
+    #[cfg(feature = "test-controls")]
     pub(crate) fn kill_for_test(&self) {
         unsafe {
             libc::kill(self.pid, libc::SIGKILL);
@@ -938,9 +933,17 @@ impl Worker {
         frame.payload = payload;
         send_frame(self.control.as_raw_fd(), &frame)?;
         let (response, master) = self.receive_for(request, SPAWN_OK)?;
-        let master = master.ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidData, "broker omitted PTY master")
-        })?;
+        let Some(master) = master else {
+            let error = io::Error::new(io::ErrorKind::InvalidData, "broker omitted PTY master");
+            let _ = self.abort(response.session);
+            return Err(error);
+        };
+        if let Err(error) =
+            set_cloexec(master.as_raw_fd()).and_then(|()| set_nonblocking(master.as_raw_fd()))
+        {
+            let _ = self.abort(response.session);
+            return Err(error);
+        }
         Ok(BrokerSession {
             id: response.session,
             pid: response.code,

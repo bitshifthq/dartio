@@ -1,22 +1,49 @@
 #include "dart_api_dl.h"
-#include <stdatomic.h>
 
+#if defined(_WIN32)
+#define PTYX_HIDDEN
+#else
+#define PTYX_HIDDEN __attribute__((visibility("hidden")))
+#endif
+
+#ifdef _MSC_VER
+#include <windows.h>
+static volatile LONG fail_next_post = 0;
+
+static bool take_failed_post(void) {
+  return InterlockedExchange(&fail_next_post, 0) != 0;
+}
+
+static void arm_failed_post(void) {
+  InterlockedExchange(&fail_next_post, 1);
+}
+#else
+#include <stdatomic.h>
 static atomic_int fail_next_post = 0;
 
-bool ptyx_dart_post_integer(Dart_Port_DL port, int64_t message) {
-  if (atomic_exchange(&fail_next_post, 0) != 0) {
+static bool take_failed_post(void) {
+  return atomic_exchange(&fail_next_post, 0) != 0;
+}
+
+static void arm_failed_post(void) {
+  atomic_store(&fail_next_post, 1);
+}
+#endif
+
+PTYX_HIDDEN bool ptyx_dart_post_integer(Dart_Port_DL port, int64_t message) {
+  if (take_failed_post()) {
     return false;
   }
   return Dart_PostInteger_DL(port, message);
 }
 
-bool ptyx_dart_post_bytes(
+PTYX_HIDDEN bool ptyx_dart_post_bytes(
     Dart_Port_DL port,
     int64_t handle,
     const uint8_t *bytes,
     intptr_t length
 ) {
-  if (atomic_exchange(&fail_next_post, 0) != 0) {
+  if (take_failed_post()) {
     return false;
   }
   Dart_CObject handle_object = {
@@ -38,6 +65,6 @@ bool ptyx_dart_post_bytes(
   return Dart_PostCObject_DL(port, &message);
 }
 
-void ptyx_dart_fail_next_post(void) {
-  atomic_store(&fail_next_post, 1);
+PTYX_HIDDEN void ptyx_dart_fail_next_post(void) {
+  arm_failed_post();
 }

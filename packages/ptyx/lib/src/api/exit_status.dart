@@ -36,8 +36,7 @@ final class PtySignaled extends PtyExitStatus {
   final int signal;
 
   /// Creates a Unix signal-termination status.
-  const PtySignaled(this.signal)
-    : assert(signal > 0, 'signal must be positive');
+  const PtySignaled(this.signal);
 
   @override
   int get rawCode => -signal;

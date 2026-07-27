@@ -12,3 +12,5 @@ hooks:
   user_defines:
     ptyx:
       source: auto
+      # Workspace qualification opts into diagnostic-only native controls.
+      test_controls: true

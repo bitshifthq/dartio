@@ -91,12 +91,5 @@ final class PtySpawnOptions {
     this.maxBufferedInput = 1024 * 1024,
     this.maxBufferedOutput = 256 * 1024,
     this.gracefulCloseTimeout = const Duration(milliseconds: 250),
-  }) : assert(
-         maxBufferedInput > 0 && maxBufferedInput <= 64 * 1024 * 1024,
-         'maxBufferedInput must be between 1 byte and 64 MiB',
-       ),
-       assert(
-         maxBufferedOutput > 0 && maxBufferedOutput <= 64 * 1024 * 1024,
-         'maxBufferedOutput must be between 1 byte and 64 MiB',
-       );
+  });
 }

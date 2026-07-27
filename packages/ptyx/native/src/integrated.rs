@@ -22,6 +22,7 @@ const COMMAND_QUANTUM: usize = 64;
 const COMMAND_CAPACITY: usize = 1024;
 const NOTICE_CAPACITY: usize = 4096;
 const WAITER_CAPACITY: usize = 1024;
+const ACTIVATION_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Notice {
@@ -91,6 +92,7 @@ struct Session {
     exit_status: Option<i64>,
     close_started: bool,
     active: bool,
+    activation_deadline: Option<Instant>,
     abandoned: bool,
     read_filter_enabled: Option<bool>,
     write_filter_enabled: Option<bool>,
@@ -125,6 +127,7 @@ impl Session {
             exit_status: None,
             close_started: false,
             active: false,
+            activation_deadline: Some(Instant::now() + ACTIVATION_TIMEOUT),
             abandoned: false,
             read_filter_enabled: None,
             write_filter_enabled: None,
@@ -220,13 +223,6 @@ impl Session {
         true
     }
 
-    fn exchange(&mut self, credit: usize, maximum: usize) -> Option<Vec<u8>> {
-        if !self.credit(credit) {
-            return None;
-        }
-        Some(self.pull(maximum))
-    }
-
     fn output_total(&self) -> usize {
         self.output_bytes + self.output_outstanding
     }
@@ -246,32 +242,11 @@ pub(crate) enum Command {
     Write {
         handle: u64,
         bytes: Vec<u8>,
-        reply: Sender<u64>,
-    },
-    Pull {
-        handle: u64,
-        maximum: usize,
-        reply: Sender<Option<Vec<u8>>>,
-    },
-    Credit {
-        handle: u64,
-        bytes: usize,
-        reply: Sender<bool>,
+        reply: Sender<i64>,
     },
     CreditAsync {
         handle: u64,
         bytes: usize,
-    },
-    Exchange {
-        handle: u64,
-        credit: usize,
-        maximum: usize,
-        reply: Sender<Option<Vec<u8>>>,
-    },
-    FlushReady {
-        handle: u64,
-        sequence: u64,
-        reply: Sender<bool>,
     },
     WaitCapacity {
         handle: u64,
@@ -320,14 +295,6 @@ pub(crate) enum Command {
         signal: i32,
         reply: Sender<Option<bool>>,
     },
-    OutputTotal {
-        handle: u64,
-        reply: Sender<Option<usize>>,
-    },
-    OutputDone {
-        handle: u64,
-        reply: Sender<bool>,
-    },
     Close {
         handle: u64,
         reply: Sender<bool>,
@@ -338,9 +305,6 @@ pub(crate) enum Command {
     },
     Abandon {
         handle: u64,
-    },
-    Counters {
-        reply: Sender<RuntimeCounters>,
     },
     BrokerExit {
         broker_session: u64,
@@ -363,7 +327,7 @@ impl WakeWriter {
 
 pub struct IntegratedRuntime {
     commands: SyncSender<Command>,
-    notices: Option<Receiver<Notice>>,
+    notices: Mutex<Option<Receiver<Notice>>>,
     wake: WakeWriter,
     thread: Mutex<Option<JoinHandle<()>>>,
     broker: BrokerOwner,
@@ -409,15 +373,15 @@ impl IntegratedRuntime {
             })?;
         Ok(Self {
             commands: command_sender,
-            notices: Some(notice_receiver),
+            notices: Mutex::new(Some(notice_receiver)),
             wake: WakeWriter(write),
             thread: Mutex::new(Some(thread)),
             broker,
         })
     }
 
-    pub fn take_notifications(&mut self) -> Option<Receiver<Notice>> {
-        self.notices.take()
+    pub fn take_notifications(&self) -> Option<Receiver<Notice>> {
+        self.notices.lock().ok()?.take()
     }
 
     pub(crate) fn spawn_staged(
@@ -460,24 +424,8 @@ impl IntegratedRuntime {
         self.request(|reply| Command::Activate { handle, reply })
     }
 
-    pub fn try_write(&self, handle: u64, bytes: Vec<u8>) -> u64 {
+    pub fn try_write(&self, handle: u64, bytes: Vec<u8>) -> i64 {
         self.request(|reply| Command::Write {
-            handle,
-            bytes,
-            reply,
-        })
-    }
-
-    pub fn pull(&self, handle: u64, maximum: usize) -> Option<Vec<u8>> {
-        self.request(|reply| Command::Pull {
-            handle,
-            maximum,
-            reply,
-        })
-    }
-
-    pub fn credit(&self, handle: u64, bytes: usize) -> bool {
-        self.request(|reply| Command::Credit {
             handle,
             bytes,
             reply,
@@ -494,23 +442,6 @@ impl IntegratedRuntime {
         }
         self.wake.wake();
         true
-    }
-
-    pub fn exchange(&self, handle: u64, credit: usize, maximum: usize) -> Option<Vec<u8>> {
-        self.request(|reply| Command::Exchange {
-            handle,
-            credit,
-            maximum,
-            reply,
-        })
-    }
-
-    pub fn flush_ready(&self, handle: u64, sequence: u64) -> bool {
-        self.request(|reply| Command::FlushReady {
-            handle,
-            sequence,
-            reply,
-        })
     }
 
     pub fn wait_capacity(&self, handle: u64, required: usize, waiter: u64) -> WaitResult {
@@ -575,14 +506,6 @@ impl IntegratedRuntime {
         })
     }
 
-    pub fn output_total(&self, handle: u64) -> Option<usize> {
-        self.request(|reply| Command::OutputTotal { handle, reply })
-    }
-
-    pub fn output_done(&self, handle: u64) -> bool {
-        self.request(|reply| Command::OutputDone { handle, reply })
-    }
-
     pub fn close(&self, handle: u64) -> bool {
         self.request(|reply| Command::Close { handle, reply })
     }
@@ -599,10 +522,7 @@ impl IntegratedRuntime {
         true
     }
 
-    pub fn counters(&self) -> RuntimeCounters {
-        self.request(|reply| Command::Counters { reply })
-    }
-
+    #[cfg(feature = "test-controls")]
     pub fn kill_broker_for_test(&self) {
         self.broker.kill_for_test();
     }
@@ -885,6 +805,7 @@ fn process_commands(
                 if result.is_ok() {
                     if let Some(session) = sessions.get_mut(handle) {
                         session.active = true;
+                        session.activation_deadline = None;
                     }
                     read_ready(kqueue, handle, notices, sessions, counters);
                     if sessions
@@ -894,9 +815,10 @@ fn process_commands(
                         send_notice(notices, Notice::Exit(handle), counters);
                     }
                     refresh_output(kqueue, handle, notices, sessions, counters);
-                } else if let Some(mut session) = sessions.remove(handle) {
-                    let _ = broker_client.abort_async(session.broker_session);
-                    session.close_started = true;
+                } else if let Some(session) = sessions.get_mut(handle) {
+                    session.abandoned = true;
+                    session.activation_deadline = None;
+                    let _ = close_session(session, broker_client);
                 }
                 let _ = reply.send(result);
             }
@@ -905,43 +827,26 @@ fn process_commands(
                 bytes,
                 reply,
             } => {
-                let sequence = sessions
-                    .get_mut(handle)
-                    .and_then(|session| session.try_write(bytes).ok())
-                    .unwrap_or(0);
-                if sequence != 0 {
+                let sequence = match sessions.get_mut(handle) {
+                    None => -1,
+                    Some(session)
+                        if session.close_started || session.input_failed_from.is_some() =>
+                    {
+                        -1
+                    }
+                    Some(session) => session
+                        .try_write(bytes)
+                        .ok()
+                        .and_then(|sequence| i64::try_from(sequence).ok())
+                        .unwrap_or(0),
+                };
+                if sequence > 0 {
                     if let Some(session) = sessions.get_mut(handle).filter(|session| session.active)
                     {
                         let _ = update_write_filter(kqueue, handle, session, true);
                     }
                 }
                 let _ = reply.send(sequence);
-            }
-            Command::Pull {
-                handle,
-                maximum,
-                reply,
-            } => {
-                let bytes = sessions
-                    .get_mut(handle)
-                    .map(|session| session.pull(maximum));
-                if sessions.get(handle).is_some_and(|session| session.active) {
-                    refresh_output(kqueue, handle, notices, sessions, counters);
-                }
-                let _ = reply.send(bytes);
-            }
-            Command::Credit {
-                handle,
-                bytes,
-                reply,
-            } => {
-                let credited = sessions
-                    .get_mut(handle)
-                    .is_some_and(|session| session.credit(bytes));
-                if sessions.get(handle).is_some_and(|session| session.active) {
-                    refresh_output(kqueue, handle, notices, sessions, counters);
-                }
-                let _ = reply.send(credited);
             }
             Command::CreditAsync { handle, bytes } => {
                 if sessions
@@ -951,30 +856,6 @@ fn process_commands(
                 {
                     refresh_output(kqueue, handle, notices, sessions, counters);
                 }
-            }
-            Command::Exchange {
-                handle,
-                credit,
-                maximum,
-                reply,
-            } => {
-                let bytes = sessions
-                    .get_mut(handle)
-                    .and_then(|session| session.exchange(credit, maximum));
-                if sessions.get(handle).is_some_and(|session| session.active) {
-                    refresh_output(kqueue, handle, notices, sessions, counters);
-                }
-                let _ = reply.send(bytes);
-            }
-            Command::FlushReady {
-                handle,
-                sequence,
-                reply,
-            } => {
-                let ready = sessions
-                    .get(handle)
-                    .is_some_and(|session| sequence <= session.flushed_sequence);
-                let _ = reply.send(ready);
             }
             Command::WaitCapacity {
                 handle,
@@ -1078,17 +959,6 @@ fn process_commands(
                     }
                 }
             }
-            Command::OutputTotal { handle, reply } => {
-                let _ = reply.send(sessions.get(handle).map(Session::output_total));
-            }
-            Command::OutputDone { handle, reply } => {
-                let done = sessions.get(handle).is_some_and(|session| {
-                    session.output_eof
-                        && session.output.is_empty()
-                        && session.output_outstanding == 0
-                });
-                let _ = reply.send(done);
-            }
             Command::Close { handle, reply } => {
                 let closed = sessions.get_mut(handle).is_some_and(|session| {
                     fail_input_waiters(handle, session, notices, counters);
@@ -1100,13 +970,11 @@ fn process_commands(
                 let removable = sessions
                     .get(handle)
                     .is_some_and(|session| session.exit_status.is_some());
-                let removed = if removable {
-                    sessions.remove(handle).is_some_and(|session| {
+                let released = removable
+                    && sessions.get(handle).is_some_and(|session| {
                         broker_client.release_async(session.broker_session).is_ok()
-                    })
-                } else {
-                    false
-                };
+                    });
+                let removed = released && sessions.remove(handle).is_some();
                 let _ = reply.send(removed);
             }
             Command::Abandon { handle } => {
@@ -1125,9 +993,6 @@ fn process_commands(
                     let _ = update_read_filter(kqueue, handle, session, true);
                     let _ = update_write_filter(kqueue, handle, session, false);
                 }
-            }
-            Command::Counters { reply } => {
-                let _ = reply.send(*counters);
             }
             Command::BrokerExit {
                 broker_session,
@@ -1151,12 +1016,7 @@ fn process_commands(
                 }
             }
             Command::BrokerLost => {
-                for handle in sessions.handles() {
-                    if let Some(mut session) = sessions.remove(handle) {
-                        fail_input_waiters(handle, &mut session, notices, counters);
-                        send_notice(notices, Notice::BrokerLost(handle), counters);
-                    }
-                }
+                fail_all(notices, sessions, counters, broker_client);
             }
             Command::Shutdown => return (true, false),
         }
@@ -1520,13 +1380,24 @@ fn refresh_output(
 }
 
 fn output_poll_timeout(sessions: &GenerationRegistry<Session>) -> i32 {
-    let deadline = sessions
+    let output_deadline = sessions
         .handles()
         .into_iter()
         .filter_map(|handle| sessions.get(handle))
         .filter(|session| !session.output_notified && !session.output.is_empty())
         .filter_map(|session| session.output_deadline)
         .min();
+    let activation_deadline = sessions
+        .handles()
+        .into_iter()
+        .filter_map(|handle| sessions.get(handle))
+        .filter(|session| !session.active && !session.abandoned)
+        .filter_map(|session| session.activation_deadline)
+        .min();
+    let deadline = match (output_deadline, activation_deadline) {
+        (Some(left), Some(right)) => Some(left.min(right)),
+        (left, right) => left.or(right),
+    };
     let Some(deadline) = deadline else {
         return -1;
     };
@@ -1553,15 +1424,38 @@ fn close_session(session: &mut Session, broker: &BrokerClient) -> bool {
     if session.close_started {
         return true;
     }
-    session.close_started = true;
     if session.exit_status.is_some() {
+        session.close_started = true;
         return true;
     }
-    broker.close_async(session.broker_session).is_ok()
+    if broker.close_async(session.broker_session).is_err() {
+        return false;
+    }
+    session.close_started = true;
+    true
 }
 
 fn reap_abandoned(sessions: &mut GenerationRegistry<Session>, broker: &BrokerClient) {
     for handle in sessions.handles() {
+        if let Some(session) = sessions.get_mut(handle) {
+            if !session.active
+                && !session.abandoned
+                && session
+                    .activation_deadline
+                    .is_some_and(|deadline| deadline <= Instant::now())
+            {
+                session.abandoned = true;
+                session.activation_deadline = None;
+                session.input.clear();
+                session.input_bytes = 0;
+                session.output.clear();
+                session.output_bytes = 0;
+                session.output_outstanding = 0;
+            }
+            if session.abandoned && !session.close_started {
+                let _ = close_session(session, broker);
+            }
+        }
         let removable = sessions.get(handle).is_some_and(|session| {
             session.abandoned
                 && session.exit_status.is_some()
@@ -1570,8 +1464,11 @@ fn reap_abandoned(sessions: &mut GenerationRegistry<Session>, broker: &BrokerCli
                 && session.output_outstanding == 0
         });
         if removable {
-            if let Some(session) = sessions.remove(handle) {
-                let _ = broker.release_async(session.broker_session);
+            let released = sessions
+                .get(handle)
+                .is_some_and(|session| broker.release_async(session.broker_session).is_ok());
+            if released {
+                let _ = sessions.remove(handle);
             }
         }
     }
@@ -1600,8 +1497,37 @@ fn fail_all(
         if let Some(mut session) = sessions.remove(handle) {
             session.close_started = true;
             fail_input_waiters(handle, &mut session, notices, counters);
+            force_terminal_group(session.master.as_raw_fd(), session.pid);
             let _ = broker.abort_async(session.broker_session);
             send_notice(notices, Notice::BrokerLost(handle), counters);
+        }
+    }
+}
+
+fn force_terminal_group(master: RawFd, session_leader: libc::pid_t) {
+    // TIOCSIG is bound to this PTY object rather than a recyclable numeric
+    // process-group identifier. Linux restricts it to job-control signals;
+    // Darwin accepts SIGKILL.
+    #[cfg(target_os = "linux")]
+    unsafe {
+        libc::ioctl(master, libc::TIOCSIG, libc::SIGQUIT);
+    }
+    #[cfg(target_os = "macos")]
+    unsafe {
+        libc::ioctl(master, libc::TIOCSIG.into(), libc::SIGKILL);
+    }
+    let signal = libc::SIGKILL;
+    let foreground = unsafe { libc::tcgetpgrp(master) };
+    if foreground > 0 {
+        unsafe {
+            libc::kill(-foreground, signal);
+        }
+    }
+    // The controlling terminal retains the OS session identity. Only use the
+    // cached leader/group number after this object-bound identity check.
+    if unsafe { libc::tcgetsid(master) } == session_leader {
+        unsafe {
+            libc::kill(-session_leader, signal);
         }
     }
 }

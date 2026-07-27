@@ -38,6 +38,7 @@ const WAITER_CAPACITY: usize = 1024;
 const SESSION_NOTICE_RESERVATIONS: usize = 4;
 const CLOSE_ADMISSION_CAPACITY: usize = 128;
 const QUARANTINED_IO_CAPACITY: usize = CLOSE_ADMISSION_CAPACITY * 2;
+const ACTIVATION_TIMEOUT: Duration = Duration::from_secs(5);
 const EXIT_KEY_TAG: usize = 1_usize << (usize::BITS - 1);
 const CLOSE_KEY_TAG: usize = 1_usize << (usize::BITS - 2);
 static QUARANTINED_IO_OPERATIONS: AtomicUsize = AtomicUsize::new(0);
@@ -125,6 +126,7 @@ struct Session {
     cleanup_failed: bool,
     broker_lost_notified: bool,
     active: bool,
+    activation_deadline: Option<Instant>,
     abandoned: bool,
 }
 
@@ -176,6 +178,7 @@ impl Session {
             cleanup_failed: false,
             broker_lost_notified: false,
             active: false,
+            activation_deadline: Some(Instant::now() + ACTIVATION_TIMEOUT),
             abandoned: false,
         }
     }
@@ -274,10 +277,6 @@ impl Session {
         true
     }
 
-    fn exchange(&mut self, credit: usize, maximum: usize) -> Option<Vec<u8>> {
-        self.credit(credit).then(|| self.pull(maximum))
-    }
-
     fn output_total(&self) -> usize {
         self.output_bytes + self.output_outstanding
     }
@@ -295,6 +294,9 @@ impl Session {
 
 impl Drop for Session {
     fn drop(&mut self) {
+        unsafe {
+            TerminateJobObject(self.job.raw(), 1);
+        }
         if let Some(read) = self.read.take() {
             quarantine_io_operation(read);
         }
@@ -328,11 +330,7 @@ fn quarantine_pseudoconsole(pseudoconsole: OwnedPseudoConsole, permit: Option<Cl
 
 enum Command {
     Add {
-        spawned: spawn::SpawnedSession,
-        close_permit: ClosePermit,
-        notice_reservations: Vec<NoticeReservation>,
-        input_capacity: usize,
-        output_capacity: usize,
+        session: Session,
         reply: Sender<io::Result<u64>>,
     },
     Activate {
@@ -342,32 +340,11 @@ enum Command {
     Write {
         handle: u64,
         bytes: Vec<u8>,
-        reply: Sender<u64>,
-    },
-    Pull {
-        handle: u64,
-        maximum: usize,
-        reply: Sender<Option<Vec<u8>>>,
-    },
-    Credit {
-        handle: u64,
-        bytes: usize,
-        reply: Sender<bool>,
+        reply: Sender<i64>,
     },
     CreditAsync {
         handle: u64,
         bytes: usize,
-    },
-    Exchange {
-        handle: u64,
-        credit: usize,
-        maximum: usize,
-        reply: Sender<Option<Vec<u8>>>,
-    },
-    FlushReady {
-        handle: u64,
-        sequence: u64,
-        reply: Sender<bool>,
     },
     WaitCapacity {
         handle: u64,
@@ -416,14 +393,6 @@ enum Command {
         signal: i32,
         reply: Sender<Option<bool>>,
     },
-    OutputTotal {
-        handle: u64,
-        reply: Sender<Option<usize>>,
-    },
-    OutputDone {
-        handle: u64,
-        reply: Sender<bool>,
-    },
     Close {
         handle: u64,
         reply: Sender<bool>,
@@ -434,9 +403,6 @@ enum Command {
     },
     Abandon {
         handle: u64,
-    },
-    Counters {
-        reply: Sender<RuntimeCounters>,
     },
     Shutdown,
 }
@@ -681,7 +647,7 @@ impl CloserPool {
 pub(crate) struct IntegratedRuntime {
     commands: SyncSender<Command>,
     notice_emitter: NoticeEmitter,
-    notices: Option<NoticeReceiver>,
+    notices: Mutex<Option<NoticeReceiver>>,
     iocp: IocpSender,
     closer: CloserPool,
     thread: Mutex<Option<JoinHandle<()>>>,
@@ -720,15 +686,15 @@ impl IntegratedRuntime {
         Ok(Self {
             commands: command_sender,
             notice_emitter,
-            notices: Some(notices),
+            notices: Mutex::new(Some(notices)),
             iocp: iocp_sender,
             closer,
             thread: Mutex::new(Some(thread)),
         })
     }
 
-    pub(crate) fn take_notifications(&mut self) -> Option<NoticeReceiver> {
-        self.notices.take()
+    pub(crate) fn take_notifications(&self) -> Option<NoticeReceiver> {
+        self.notices.lock().ok()?.take()
     }
 
     pub(crate) fn spawn_staged(
@@ -756,14 +722,14 @@ impl IntegratedRuntime {
             )
         })?;
         let spawned = spawn::spawn(config)?;
-        self.request(|reply| Command::Add {
+        let session = Session::from_spawned(
             spawned,
             close_permit,
             notice_reservations,
             input_capacity,
             output_capacity,
-            reply,
-        })
+        );
+        self.request_result(|reply| Command::Add { session, reply })?
     }
 
     pub(crate) fn activate(&self, handle: u64) -> bool {
@@ -771,24 +737,8 @@ impl IntegratedRuntime {
             .is_ok()
     }
 
-    pub(crate) fn try_write(&self, handle: u64, bytes: Vec<u8>) -> u64 {
+    pub(crate) fn try_write(&self, handle: u64, bytes: Vec<u8>) -> i64 {
         self.request(|reply| Command::Write {
-            handle,
-            bytes,
-            reply,
-        })
-    }
-
-    pub(crate) fn pull(&self, handle: u64, maximum: usize) -> Option<Vec<u8>> {
-        self.request(|reply| Command::Pull {
-            handle,
-            maximum,
-            reply,
-        })
-    }
-
-    pub(crate) fn credit(&self, handle: u64, bytes: usize) -> bool {
-        self.request(|reply| Command::Credit {
             handle,
             bytes,
             reply,
@@ -804,23 +754,6 @@ impl IntegratedRuntime {
             return false;
         }
         self.iocp.post_command().is_ok()
-    }
-
-    pub(crate) fn exchange(&self, handle: u64, credit: usize, maximum: usize) -> Option<Vec<u8>> {
-        self.request(|reply| Command::Exchange {
-            handle,
-            credit,
-            maximum,
-            reply,
-        })
-    }
-
-    pub(crate) fn flush_ready(&self, handle: u64, sequence: u64) -> bool {
-        self.request(|reply| Command::FlushReady {
-            handle,
-            sequence,
-            reply,
-        })
     }
 
     pub(crate) fn wait_capacity(&self, handle: u64, required: usize, waiter: u64) -> WaitResult {
@@ -893,14 +826,6 @@ impl IntegratedRuntime {
         })
     }
 
-    pub(crate) fn output_total(&self, handle: u64) -> Option<usize> {
-        self.request(|reply| Command::OutputTotal { handle, reply })
-    }
-
-    pub(crate) fn output_done(&self, handle: u64) -> bool {
-        self.request(|reply| Command::OutputDone { handle, reply })
-    }
-
     pub(crate) fn close(&self, handle: u64) -> bool {
         self.request(|reply| Command::Close { handle, reply })
     }
@@ -917,15 +842,20 @@ impl IntegratedRuntime {
         true
     }
 
-    pub(crate) fn counters(&self) -> RuntimeCounters {
-        self.request(|reply| Command::Counters { reply })
+    fn request<R>(&self, command: impl FnOnce(Sender<R>) -> Command) -> R {
+        self.request_result(command)
+            .expect("ptyx IOCP request channel closed")
     }
 
-    fn request<R>(&self, command: impl FnOnce(Sender<R>) -> Command) -> R {
+    fn request_result<R>(&self, command: impl FnOnce(Sender<R>) -> Command) -> io::Result<R> {
         let (sender, receiver) = mpsc::channel();
-        self.commands.send(command(sender)).unwrap();
-        self.iocp.post_command().unwrap();
-        receiver.recv().unwrap()
+        self.commands
+            .send(command(sender))
+            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "ptyx IOCP reactor stopped"))?;
+        self.iocp.post_command()?;
+        receiver
+            .recv()
+            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "ptyx IOCP reactor stopped"))
     }
 }
 
@@ -957,7 +887,14 @@ fn reactor(
             &mut sessions,
             &mut counters,
         );
-        reap_abandoned(&mut sessions);
+        reap_abandoned(
+            iocp.raw(),
+            &iocp_sender,
+            &closer,
+            &notices,
+            &mut sessions,
+            &mut counters,
+        );
         let timeout = output_timeout(&sessions);
         let mut transferred = 0;
         let mut key = 0;
@@ -1050,21 +987,8 @@ fn process_commands(
             return false;
         };
         match command {
-            Command::Add {
-                spawned,
-                close_permit,
-                notice_reservations,
-                input_capacity,
-                output_capacity,
-                reply,
-            } => {
-                let handle = sessions.insert(Session::from_spawned(
-                    spawned,
-                    close_permit,
-                    notice_reservations,
-                    input_capacity,
-                    output_capacity,
-                ));
+            Command::Add { session, reply } => {
+                let handle = sessions.insert(session);
                 let result = associate_session(
                     &iocp_sender.0,
                     handle,
@@ -1102,6 +1026,7 @@ fn process_commands(
                     .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "stale session"))
                     .map(|session| {
                         session.active = true;
+                        session.activation_deadline = None;
                         if session.exit_status.is_some() && !session.exit_notified {
                             session.exit_notified = true;
                             send_lifecycle_notice(session, notices, Notice::Exit(handle), counters);
@@ -1119,44 +1044,25 @@ fn process_commands(
                 bytes,
                 reply,
             } => {
-                let sequence = sessions
-                    .get_mut(handle)
-                    .and_then(|session| session.try_write(bytes).ok())
-                    .unwrap_or(0);
-                if sequence != 0 {
+                let sequence = match sessions.get_mut(handle) {
+                    None => -1,
+                    Some(session)
+                        if session.close_started || session.input_failed_from.is_some() =>
+                    {
+                        -1
+                    }
+                    Some(session) => session
+                        .try_write(bytes)
+                        .ok()
+                        .and_then(|sequence| i64::try_from(sequence).ok())
+                        .unwrap_or(0),
+                };
+                if sequence > 0 {
                     if let Some(session) = sessions.get_mut(handle).filter(|value| value.active) {
                         ensure_write(iocp, handle, session, notices, counters);
                     }
                 }
                 let _ = reply.send(sequence);
-            }
-            Command::Pull {
-                handle,
-                maximum,
-                reply,
-            } => {
-                let value = sessions
-                    .get_mut(handle)
-                    .map(|session| session.pull(maximum));
-                if let Some(session) = sessions.get_mut(handle) {
-                    ensure_read(iocp, handle, session, notices, counters);
-                    refresh_output(handle, session, notices, counters);
-                }
-                let _ = reply.send(value);
-            }
-            Command::Credit {
-                handle,
-                bytes,
-                reply,
-            } => {
-                let value = sessions
-                    .get_mut(handle)
-                    .is_some_and(|session| session.credit(bytes));
-                if let Some(session) = sessions.get_mut(handle) {
-                    ensure_read(iocp, handle, session, notices, counters);
-                    refresh_output(handle, session, notices, counters);
-                }
-                let _ = reply.send(value);
             }
             Command::CreditAsync { handle, bytes } => {
                 if let Some(session) = sessions.get_mut(handle) {
@@ -1165,31 +1071,6 @@ fn process_commands(
                         refresh_output(handle, session, notices, counters);
                     }
                 }
-            }
-            Command::Exchange {
-                handle,
-                credit,
-                maximum,
-                reply,
-            } => {
-                let value = sessions
-                    .get_mut(handle)
-                    .and_then(|session| session.exchange(credit, maximum));
-                if let Some(session) = sessions.get_mut(handle) {
-                    ensure_read(iocp, handle, session, notices, counters);
-                    refresh_output(handle, session, notices, counters);
-                }
-                let _ = reply.send(value);
-            }
-            Command::FlushReady {
-                handle,
-                sequence,
-                reply,
-            } => {
-                let ready = sessions
-                    .get(handle)
-                    .is_some_and(|session| sequence <= session.flushed_sequence);
-                let _ = reply.send(ready);
             }
             Command::WaitCapacity {
                 handle,
@@ -1301,16 +1182,6 @@ fn process_commands(
                 });
                 let _ = reply.send(result);
             }
-            Command::OutputTotal { handle, reply } => {
-                let _ = reply.send(sessions.get(handle).map(Session::output_total));
-            }
-            Command::OutputDone { handle, reply } => {
-                let _ = reply.send(sessions.get(handle).is_some_and(|session| {
-                    session.output_eof
-                        && session.output.is_empty()
-                        && session.output_outstanding == 0
-                }));
-            }
             Command::Close { handle, reply } => {
                 let closed = sessions.get_mut(handle).is_some_and(|session| {
                     if !session.close_started {
@@ -1337,29 +1208,16 @@ fn process_commands(
             }
             Command::Abandon { handle } => {
                 if let Some(session) = sessions.get_mut(handle) {
-                    session.abandoned = true;
-                    session.active = false;
-                    if !session.close_started {
-                        session.close_started = true;
-                        session.paused = false;
-                        session.input.clear();
-                        session.input_bytes = 0;
-                        session.capacity_waiters.clear();
-                        session.flush_waiters.clear();
-                        session.output.clear();
-                        session.output_bytes = 0;
-                        session.output_outstanding = 0;
-                        unsafe {
-                            TerminateJobObject(session.job.raw(), 1);
-                        }
-                        cancel_write(session);
-                    }
-                    start_pseudoconsole_close(iocp_sender, handle, session, closer);
-                    ensure_read(iocp, handle, session, notices, counters);
+                    abandon_session(
+                        iocp,
+                        iocp_sender,
+                        handle,
+                        session,
+                        closer,
+                        notices,
+                        counters,
+                    );
                 }
-            }
-            Command::Counters { reply } => {
-                let _ = reply.send(*counters);
             }
             Command::Shutdown => return true,
         }
@@ -1828,8 +1686,66 @@ fn refresh_due_outputs(
     }
 }
 
-fn reap_abandoned(sessions: &mut GenerationRegistry<Session>) {
+#[allow(clippy::too_many_arguments)]
+fn abandon_session(
+    iocp: HANDLE,
+    iocp_sender: &IocpSender,
+    handle: u64,
+    session: &mut Session,
+    closer: &CloserPool,
+    notices: &NoticeEmitter,
+    counters: &mut RuntimeCounters,
+) {
+    session.abandoned = true;
+    session.active = false;
+    session.activation_deadline = None;
+    if !session.close_started {
+        session.close_started = true;
+        session.paused = false;
+        session.input.clear();
+        session.input_bytes = 0;
+        session.capacity_waiters.clear();
+        session.flush_waiters.clear();
+        session.output.clear();
+        session.output_bytes = 0;
+        session.output_outstanding = 0;
+        unsafe {
+            TerminateJobObject(session.job.raw(), 1);
+        }
+        cancel_write(session);
+    }
+    start_pseudoconsole_close(iocp_sender, handle, session, closer);
+    ensure_read(iocp, handle, session, notices, counters);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn reap_abandoned(
+    iocp: HANDLE,
+    iocp_sender: &IocpSender,
+    closer: &CloserPool,
+    notices: &NoticeEmitter,
+    sessions: &mut GenerationRegistry<Session>,
+    counters: &mut RuntimeCounters,
+) {
     for handle in sessions.handles() {
+        if let Some(session) = sessions.get_mut(handle) {
+            if !session.active
+                && !session.abandoned
+                && session
+                    .activation_deadline
+                    .is_some_and(|deadline| deadline <= Instant::now())
+            {
+                abandon_session(
+                    iocp,
+                    iocp_sender,
+                    handle,
+                    session,
+                    closer,
+                    notices,
+                    counters,
+                );
+            }
+        }
         let removable = sessions
             .get(handle)
             .is_some_and(|session| session.abandoned && session.terminal());
@@ -1840,13 +1756,24 @@ fn reap_abandoned(sessions: &mut GenerationRegistry<Session>) {
 }
 
 fn output_timeout(sessions: &GenerationRegistry<Session>) -> u32 {
-    let deadline = sessions
+    let output_deadline = sessions
         .handles()
         .into_iter()
         .filter_map(|handle| sessions.get(handle))
         .filter(|session| !session.output_notified && !session.output.is_empty())
         .filter_map(|session| session.output_deadline)
         .min();
+    let activation_deadline = sessions
+        .handles()
+        .into_iter()
+        .filter_map(|handle| sessions.get(handle))
+        .filter(|session| !session.active && !session.abandoned)
+        .filter_map(|session| session.activation_deadline)
+        .min();
+    let deadline = match (output_deadline, activation_deadline) {
+        (Some(left), Some(right)) => Some(left.min(right)),
+        (left, right) => left.or(right),
+    };
     let Some(deadline) = deadline else {
         return INFINITE;
     };

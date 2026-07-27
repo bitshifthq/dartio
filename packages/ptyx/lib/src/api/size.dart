@@ -42,19 +42,7 @@ final class PtySize {
     required this.columns,
     this.pixelWidth = 0,
     this.pixelHeight = 0,
-  }) : assert(rows > 0 && rows <= 65535, 'rows must be between 1 and 65535'),
-       assert(
-         columns > 0 && columns <= 65535,
-         'columns must be between 1 and 65535',
-       ),
-       assert(
-         pixelWidth >= 0 && pixelWidth <= 65535,
-         'pixelWidth must be between 0 and 65535',
-       ),
-       assert(
-         pixelHeight >= 0 && pixelHeight <= 65535,
-         'pixelHeight must be between 0 and 65535',
-       );
+  });
 
   @override
   bool operator ==(Object other) =>
