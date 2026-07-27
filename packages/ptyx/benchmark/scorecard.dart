@@ -443,7 +443,7 @@ Future<Map<String, Object?>> _inputThroughput(int byteCount) async {
     }
 
     final expectedReport = 'OK $byteCount';
-    final result = await _readExactText(bytes, expectedReport.length);
+    final result = await _readReport(bytes, expectedReport);
     stopwatch.stop();
     final report = result.trim();
     final exitCode = await session.exitCode.timeout(_timeout);
@@ -510,7 +510,7 @@ while ($received -lt {bytes}) {
       );
       sent += count;
     }
-    final report = await _readExactText(bytes, '$byteCount'.length);
+    final report = await _readReport(bytes, '$byteCount');
     stopwatch.stop();
     if (report.trim() != '$byteCount') {
       throw StateError('transport input mismatch: $report');
@@ -701,7 +701,7 @@ Future<Map<String, Object?>> _inputSaturation(int capacity) async {
     final resourceAfterRecovery = await _resourceSnapshot();
     await activeSession.flush().timeout(_timeout);
     final expectedReport = 'OK $capacity';
-    final report = await _readExactText(activeBytes, expectedReport.length);
+    final report = await _readReport(activeBytes, expectedReport);
     if (report != 'OK $capacity') {
       throw StateError('saturation integrity failure: $report');
     }
@@ -1010,16 +1010,34 @@ Future<Map<String, Object?>> _idleSessions(int count) async {
   }
 }
 
-Future<String> _readExactText(_ChunkReader bytes, int length) async {
+Future<String> _readReport(_ChunkReader bytes, String expected) async {
+  if (!Platform.isWindows) return (await _readLine(bytes)).trim();
   final result = StringBuffer();
-  while (result.length < length) {
+  while (result.length < expected.length) {
     final value = await bytes.readByte().timeout(_timeout);
     if (value == null) {
-      throw StateError('child reached EOF before reporting $length bytes');
+      throw StateError(
+        'child reached EOF before reporting ${expected.length} bytes',
+      );
     }
     result.writeCharCode(value);
   }
   return result.toString();
+}
+
+Future<String> _readLine(_ChunkReader bytes) async {
+  final result = StringBuffer();
+  while (true) {
+    final value = await bytes.readByte().timeout(_timeout);
+    if (value == null) {
+      throw StateError('child reached EOF before reporting a line');
+    }
+    if (value == 10 || value == 13) {
+      if (result.isNotEmpty) return result.toString();
+    } else {
+      result.writeCharCode(value);
+    }
+  }
 }
 
 Future<Map<String, Object?>> _resourceSnapshot() async {
