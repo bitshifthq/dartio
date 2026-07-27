@@ -29,6 +29,7 @@ jobs:
               - ".github/workflows/checks.yml"
               - ".github/workflows/build.yml"
               - ".github/workflows/ptyx-extended.yml"
+              - ".github/workflows/ptyx-acceptance.yml"
               - ".github/workflows/release-ptyx.yml"
 
   dart-quality:
@@ -101,8 +102,8 @@ jobs:
           restore-keys: ptyx-tests-${{ matrix.os }}-
       - name: install Rust
         run: |
-          rustup toolchain install stable --profile minimal
-          rustup default stable
+          rustup toolchain install 1.95.0 --profile minimal
+          rustup default 1.95.0
       - name: configure Dart SDK
         run: |
           SDK="$(dirname "$(dirname "$(command -v dart)")")"
@@ -156,9 +157,9 @@ jobs:
           restore-keys: ptyx-rust-${{ matrix.os }}-
       - name: install Rust
         run: |
-          rustup toolchain install stable --profile minimal
-          rustup default stable
-          rustup component add clippy rustfmt
+          rustup toolchain install 1.95.0 --profile minimal
+          rustup default 1.95.0
+          rustup component add --toolchain 1.95.0 clippy rustfmt
       - name: configure Dart SDK
         run: |
           SDK="$(dirname "$(dirname "$(command -v dart)")")"
@@ -249,9 +250,9 @@ jobs:
           restore-keys: ptyx-clippy-
       - name: install Rust
         run: |
-          rustup toolchain install stable --profile minimal
-          rustup default stable
-          rustup component add clippy
+          rustup toolchain install 1.95.0 --profile minimal
+          rustup default 1.95.0
+          rustup component add --toolchain 1.95.0 clippy
       - name: configure Dart SDK
         run: |
           SDK="$(dirname "$(dirname "$(command -v dart)")")"

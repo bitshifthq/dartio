@@ -1,0 +1,42 @@
+name: ptyx-acceptance
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ptyx-acceptance-${{ github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  retain:
+    name: verify-and-retain-exact-revision-bundle
+    runs-on: [self-hosted, ptyx-qualification]
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dart-lang/setup-dart@65eb853c7ba17dde3be364c3d2858773e7144260 # v1.7.2
+        with:
+          sdk: 3.11.0
+      - name: verify provisioned qualification bundle
+        env:
+          ACCEPTANCE_BUNDLE: ${{ vars.PTYX_ACCEPTANCE_BUNDLE }}
+        working-directory: packages/ptyx
+        run: |
+          if [[ -z "$ACCEPTANCE_BUNDLE" || ! -d "$ACCEPTANCE_BUNDLE" ]]; then
+            echo "::error::PTYX_ACCEPTANCE_BUNDLE is not a readable directory."
+            exit 1
+          fi
+          dart run tool/verify_release_evidence.dart \
+            "$ACCEPTANCE_BUNDLE/release-acceptance.json" \
+            --revision="$GITHUB_SHA" \
+            --evidence-root="$ACCEPTANCE_BUNDLE"
+      - name: retain verified exact-revision bundle
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ptyx-release-acceptance-${{ github.sha }}
+          path: ${{ vars.PTYX_ACCEPTANCE_BUNDLE }}
+          if-no-files-found: error
+          retention-days: 90

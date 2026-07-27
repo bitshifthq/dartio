@@ -25,17 +25,125 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  sanitizers:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: address-leak-sanitizer
+            sanitizer: address
+            options: detect_leaks=1:halt_on_error=1
+          - name: thread-sanitizer
+            sanitizer: thread
+            options: halt_on_error=1
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dart-lang/setup-dart@65eb853c7ba17dde3be364c3d2858773e7144260 # v1.7.2
+        with:
+          sdk: 3.11.0
+      - name: install pinned nightly with sanitizer standard library sources
+        run: >-
+          rustup toolchain install nightly-2026-07-20
+          --profile minimal
+          --component rust-src
+      - name: configure Dart SDK
+        run: |
+          SDK="$(dirname "$(dirname "$(command -v dart)")")"
+          printf "DART_SDK=%s\n" "$SDK" >> "$GITHUB_ENV"
+          printf "PTYX_DART_SDK=%s\n" "$SDK" >> "$GITHUB_ENV"
+      - name: run controller sanitizer tests
+        env:
+          RUSTFLAGS: -Zsanitizer=${{ matrix.sanitizer }}
+          ASAN_OPTIONS: ${{ matrix.options }}
+          TSAN_OPTIONS: ${{ matrix.options }}
+        run: >-
+          cargo +nightly-2026-07-20 test
+          -Zbuild-std
+          --target x86_64-unknown-linux-gnu
+          --manifest-path packages/ptyx/native/Cargo.toml
+          --all-targets
+      - name: run broker sanitizer tests
+        env:
+          RUSTFLAGS: -Zsanitizer=${{ matrix.sanitizer }}
+          ASAN_OPTIONS: ${{ matrix.options }}
+          TSAN_OPTIONS: ${{ matrix.options }}
+        run: >-
+          cargo +nightly-2026-07-20 test
+          -Zbuild-std
+          --target x86_64-unknown-linux-gnu
+          --manifest-path packages/ptyx/native/broker/Cargo.toml
+          --all-targets
+
+  miri:
+    name: miri-unsafe-model-tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dart-lang/setup-dart@65eb853c7ba17dde3be364c3d2858773e7144260 # v1.7.2
+        with:
+          sdk: 3.11.0
+      - name: install pinned Miri
+        run: >-
+          rustup toolchain install nightly-2026-07-20
+          --profile minimal
+          --component miri
+      - name: configure Dart SDK
+        run: |
+          SDK="$(dirname "$(dirname "$(command -v dart)")")"
+          printf "DART_SDK=%s\n" "$SDK" >> "$GITHUB_ENV"
+          printf "PTYX_DART_SDK=%s\n" "$SDK" >> "$GITHUB_ENV"
+      - run: cargo +nightly-2026-07-20 miri setup
+      - name: run controller model tests under Miri
+        env:
+          PTYX_BROKER_BINARY: /bin/true
+          PTYX_SKIP_DART_BRIDGE: "1"
+        run: |
+          cargo +nightly-2026-07-20 miri test \
+            --manifest-path packages/ptyx/native/Cargo.toml \
+            --lib generation_registry_model_rejects_every_retired_handle
+          cargo +nightly-2026-07-20 miri test \
+            --manifest-path packages/ptyx/native/Cargo.toml \
+            --lib exhausted_generations_retire_the_slot_instead_of_wrapping
+      - name: run broker decoder tests under Miri
+        run: |
+          for test in \
+            generation_identity_rejects_zero_components \
+            protocol_rejects_oversize_payloads \
+            spawn_v2_decoder_round_trips_all_owned_fields \
+            spawn_decoder_rejects_arbitrary_bytes_without_panicking
+          do
+            cargo +nightly-2026-07-20 miri test \
+              --manifest-path packages/ptyx/native/broker/Cargo.toml \
+              "$test"
+          done
+
   fuzz:
     name: broker-protocol-fuzz
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - run: rustup toolchain install nightly --profile minimal
-      - run: cargo install cargo-fuzz --locked
+      - run: rustup toolchain install nightly-2026-07-20 --profile minimal
+      - run: cargo install cargo-fuzz --locked --version 0.13.2
       - name: fuzz spawn protocol with AddressSanitizer
         working-directory: packages/ptyx/native/fuzz
-        run: cargo +nightly fuzz run spawn_protocol -- -max_total_time=300 -timeout=5
+        run: >-
+          cargo +nightly-2026-07-20 fuzz run spawn_protocol
+          -- -max_total_time=300 -timeout=5
+      - name: retain fuzz artifacts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ptyx-spawn-protocol-fuzz-${{ github.sha }}
+          path: |
+            packages/ptyx/native/fuzz/artifacts
+            packages/ptyx/native/fuzz/corpus
+          if-no-files-found: warn
+          retention-days: 90
 
   soak:
     name: soak-${{ matrix.os }}
@@ -65,7 +173,7 @@ jobs:
       - uses: dart-lang/setup-dart@65eb853c7ba17dde3be364c3d2858773e7144260 # v1.7.2
         with:
           sdk: 3.11.0
-      - run: rustup toolchain install stable --profile minimal
+      - run: rustup toolchain install 1.95.0 --profile minimal
       - run: dart pub get
       - name: compile standalone fixture
         working-directory: packages/ptyx
@@ -78,7 +186,16 @@ jobs:
         working-directory: packages/ptyx
         env:
           SOAK_SECONDS: ${{ inputs.soak_seconds || '1800' }}
-        run: dart run tool/soak.dart "$SOAK_SECONDS"
+        run: >-
+          dart run tool/soak.dart "$SOAK_SECONDS"
+          --output=soak-${{ matrix.os }}.json
+      - if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ptyx-soak-${{ matrix.os }}-${{ github.sha }}
+          path: packages/ptyx/soak-${{ matrix.os }}.json
+          if-no-files-found: error
+          retention-days: 90
 
   scorecard:
     name: scorecard-${{ matrix.os }}
@@ -108,7 +225,7 @@ jobs:
       - uses: dart-lang/setup-dart@65eb853c7ba17dde3be364c3d2858773e7144260 # v1.7.2
         with:
           sdk: 3.11.0
-      - run: rustup toolchain install stable --profile minimal
+      - run: rustup toolchain install 1.95.0 --profile minimal
       - run: dart pub get
       - name: compile standalone fixture
         working-directory: packages/ptyx
@@ -125,7 +242,8 @@ jobs:
           --repetitions=1
           --bytes=8388608
           --output=scorecard-${{ matrix.os }}.json
-      - uses: actions/upload-artifact@v4
+      - if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: ptyx-scorecard-${{ matrix.os }}-${{ github.sha }}
           path: packages/ptyx/scorecard-${{ matrix.os }}.json
@@ -142,12 +260,19 @@ jobs:
       - uses: dart-lang/setup-dart@65eb853c7ba17dde3be364c3d2858773e7144260 # v1.7.2
         with:
           sdk: 3.11.0
-      - run: rustup toolchain install stable --profile minimal
+      - run: rustup toolchain install 1.95.0 --profile minimal
       - run: dart pub get
+      - name: compile standalone fixture
+        working-directory: packages/ptyx
+        run: |
+          dart compile exe benchmark/fixture.dart -o "$RUNNER_TEMP/ptyx-fixture"
+          printf "PTYX_FIXTURE_EXECUTABLE=%s\n" \
+            "$RUNNER_TEMP/ptyx-fixture" >> "$GITHUB_ENV"
       - name: retain a five-hour, forty-five-minute hosted soak result
         working-directory: packages/ptyx
-        run: dart run tool/soak.dart 20700 | tee soak-linux-x64.json
-      - uses: actions/upload-artifact@v4
+        run: dart run tool/soak.dart 20700 --output=soak-linux-x64.json
+      - if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: ptyx-soak-linux-x64-${{ github.sha }}
           path: packages/ptyx/soak-linux-x64.json

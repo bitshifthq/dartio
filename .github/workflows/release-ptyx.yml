@@ -25,9 +25,13 @@ jobs:
     needs: [qualification]
     runs-on: ubuntu-latest
     permissions:
+      actions: read
       contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dart-lang/setup-dart@65eb853c7ba17dde3be364c3d2858773e7144260 # v1.7.2
+        with:
+          sdk: 3.11.0
       - name: check tag matches package version
         run: |
           TAG_VERSION="${GITHUB_REF_NAME#ptyx-v}"
@@ -44,6 +48,63 @@ jobs:
           if [[ "$TAG_VERSION" != "$PUBSPEC_VERSION" ]]; then
             exit 1
           fi
+      - name: download exact-revision acceptance bundle
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ARTIFACT_NAME="ptyx-release-acceptance-$GITHUB_SHA"
+          gh api \
+            "repos/$GITHUB_REPOSITORY/actions/workflows/ptyx-acceptance.yml/runs?event=workflow_dispatch&status=completed&head_sha=$GITHUB_SHA&per_page=100" \
+            > "$RUNNER_TEMP/acceptance-runs.json"
+          gh api \
+            "repos/$GITHUB_REPOSITORY/actions/artifacts?name=$ARTIFACT_NAME&per_page=100" \
+            > "$RUNNER_TEMP/acceptance-artifacts.json"
+          ARTIFACT_ID="$(
+            jq -r --arg sha "$GITHUB_SHA" \
+              --slurpfile runs "$RUNNER_TEMP/acceptance-runs.json" \
+              '[.artifacts[] as $artifact |
+                select(
+                  $artifact.expired == false and
+                  $artifact.workflow_run.head_sha == $sha and
+                  any(
+                    $runs[0].workflow_runs[];
+                    .id == $artifact.workflow_run.id and
+                    .head_sha == $sha and
+                    .conclusion == "success"
+                  )
+                ) |
+                $artifact] |
+                sort_by(.created_at) | last | .id // empty' \
+              "$RUNNER_TEMP/acceptance-artifacts.json"
+          )"
+          if [[ -z "$ARTIFACT_ID" ]]; then
+            echo "::error::No unexpired acceptance bundle exists for $GITHUB_SHA."
+            exit 1
+          fi
+          mkdir "$RUNNER_TEMP/release-evidence"
+          gh api \
+            "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID/zip" \
+            > "$RUNNER_TEMP/release-evidence.zip"
+          unzip -q "$RUNNER_TEMP/release-evidence.zip" \
+            -d "$RUNNER_TEMP/release-evidence"
+          MANIFEST="$(
+            find "$RUNNER_TEMP/release-evidence" \
+              -name release-acceptance.json -type f -print -quit
+          )"
+          if [[ -z "$MANIFEST" ]]; then
+            echo "::error::Acceptance bundle has no release-acceptance.json."
+            exit 1
+          fi
+          printf "PTYX_ACCEPTANCE_MANIFEST=%s\n" "$MANIFEST" >> "$GITHUB_ENV"
+          printf "PTYX_ACCEPTANCE_ROOT=%s\n" \
+            "$(dirname "$MANIFEST")" >> "$GITHUB_ENV"
+      - name: require production acceptance evidence
+        working-directory: packages/ptyx
+        run: >-
+          dart run tool/verify_release_evidence.dart
+          "$PTYX_ACCEPTANCE_MANIFEST"
+          --revision="$GITHUB_SHA"
+          --evidence-root="$PTYX_ACCEPTANCE_ROOT"
 
   github-release:
     name: github-release

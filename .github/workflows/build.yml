@@ -20,6 +20,9 @@ on:
       - "pubspec.yaml"
       - ".github/workflows/build.yml"
       - ".github/workflows/checks.yml"
+      - ".github/workflows/ptyx-extended.yml"
+      - ".github/workflows/ptyx-acceptance.yml"
+      - ".github/workflows/release-ptyx.yml"
   workflow_dispatch:
     inputs:
       extended:
@@ -107,9 +110,9 @@ jobs:
           sudo apt-get install -y ${{ matrix.apt_packages }}
       - name: install Rust target
         run: |
-          rustup toolchain install stable --profile minimal
-          rustup default stable
-          rustup target add ${{ matrix.rust_target }}
+          rustup toolchain install 1.95.0 --profile minimal
+          rustup default 1.95.0
+          rustup target add --toolchain 1.95.0 ${{ matrix.rust_target }}
       - name: configure Dart SDK
         run: |
           SDK="$(dirname "$(dirname "$(command -v dart)")")"

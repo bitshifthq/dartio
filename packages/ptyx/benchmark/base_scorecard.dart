@@ -15,6 +15,16 @@ Future<void> main(List<String> arguments) async {
   final byteCount = _option(arguments, '--bytes=', 32 * 1024 * 1024);
   final repetitions = _option(arguments, '--repetitions=', 5);
   final output = _textOption(arguments, '--output=');
+  final workload = _textOption(arguments, '--workload=') ?? 'all';
+  if (!const {
+    'all',
+    'interactive',
+    'transport_output',
+    'transport_input',
+    'spawn_close',
+  }.contains(workload)) {
+    throw ArgumentError.value(workload, 'workload', 'unsupported workload');
+  }
   final result = <String, Object?>{
     'schema': 1,
     'suite': 'ptyx-base-compatible-scorecard',
@@ -26,16 +36,21 @@ Future<void> main(List<String> arguments) async {
     'dart_version': Platform.version,
     'byte_count': byteCount,
     'repetitions': repetitions,
-    'interactive': [
-      for (var run = 0; run < repetitions; run++) await _interactive(),
-    ],
-    'transport_output': [
-      for (var run = 0; run < repetitions; run++) await _output(byteCount),
-    ],
-    'transport_input': [
-      for (var run = 0; run < repetitions; run++) await _input(byteCount),
-    ],
-    'spawn_close': await _spawnClose(50),
+    'workload': workload,
+    if (workload == 'all' || workload == 'interactive')
+      'interactive': [
+        for (var run = 0; run < repetitions; run++) await _interactive(),
+      ],
+    if (workload == 'all' || workload == 'transport_output')
+      'transport_output': [
+        for (var run = 0; run < repetitions; run++) await _output(byteCount),
+      ],
+    if (workload == 'all' || workload == 'transport_input')
+      'transport_input': [
+        for (var run = 0; run < repetitions; run++) await _input(byteCount),
+      ],
+    if (workload == 'all' || workload == 'spawn_close')
+      'spawn_close': await _spawnClose(50),
   };
   final encoded = const JsonEncoder.withIndent('  ').convert(result);
   stdout.writeln(encoded);

@@ -3,6 +3,7 @@ import 'dart:io';
 import 'dart:typed_data';
 
 const _ready = [82, 69, 65, 68, 89];
+const _outputFlushBytes = 1024 * 1024;
 
 Future<void> main(List<String> arguments) async {
   if (arguments.isEmpty) {
@@ -18,32 +19,32 @@ Future<void> main(List<String> arguments) async {
     case 'exit':
       exit(int.parse(arguments[1]));
     case 'output':
-      _writeReady();
+      await _writeReady();
       await _waitForGate();
       await _writePattern(int.parse(arguments[1]));
     case 'input-verify':
-      _writeReady();
+      await _writeReady();
       final result = await _readPattern(int.parse(arguments[1]), echo: false);
       stdout.writeln(result);
       await stdout.flush();
-    case 'delayed-input-verify':
-      _writeReady();
-      await stdout.flush();
-      await Future<void>.delayed(
-        Duration(milliseconds: int.parse(arguments[2])),
-      );
+    case 'gated-input-verify':
+      await _writeReady();
+      final gate = File(arguments[2]);
+      while (!gate.existsSync()) {
+        await Future<void>.delayed(const Duration(milliseconds: 1));
+      }
       final result = await _readPattern(int.parse(arguments[1]), echo: false);
       stdout.writeln(result);
       await stdout.flush();
     case 'echo-count':
-      _writeReady();
+      await _writeReady();
       final result = await _readPattern(int.parse(arguments[1]), echo: true);
       if (result != 'OK ${arguments[1]}') {
         stderr.writeln(result);
         exitCode = 65;
       }
     case 'ready-cat':
-      _writeReady();
+      await _writeReady();
       await for (final chunk in stdin) {
         stdout.add(chunk);
         await stdout.flush();
@@ -56,8 +57,9 @@ Future<void> main(List<String> arguments) async {
   }
 }
 
-void _writeReady() {
+Future<void> _writeReady() async {
   stdout.add(_ready);
+  await stdout.flush();
 }
 
 Future<void> _waitForGate() async {
@@ -81,8 +83,10 @@ Future<void> _writePattern(int byteCount) async {
     }
     stdout.add(count == chunk.length ? chunk : chunk.sublist(0, count));
     offset += count;
+    if (offset % _outputFlushBytes == 0 || offset == byteCount) {
+      await stdout.flush();
+    }
   }
-  await stdout.flush();
 }
 
 Future<String> _readPattern(int byteCount, {required bool echo}) async {

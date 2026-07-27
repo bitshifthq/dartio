@@ -1,0 +1,85 @@
+{
+  "schema": 4,
+  "suite": "ptyx-diagnostic-scorecard",
+  "acceptance_result": false,
+  "missing_acceptance_workloads": [
+    "clean exact-revision acceptance manifest for multi-gigabyte integrity",
+    "base, direct-native, and competitor comparisons",
+    "allocation and copy instrumentation"
+  ],
+  "boundary": "Dart public API through native PTY and child; release native asset",
+  "platform": "macos",
+  "platform_version": "Version 26.5.2 (Build 25F84)",
+  "architecture": "x86_64",
+  "dart_version": "3.12.2 (stable) (Tue Jun 9 01:11:39 2026 -0700) on \"macos_x64\"",
+  "rustc_version": "rustc 1.95.0 (59807616e 2026-04-14)",
+  "cargo_version": "cargo 1.95.0 (f2d3ce0bd 2026-03-21)",
+  "processors": 16,
+  "revision": "61c0f76599ff5738e841f1c7b37b6377eab150d7",
+  "tree_dirty": true,
+  "working_tree_sha256": "8fdfa3e9da9767a430cce904cff1987455ab1b966360d203d857acf64805037d",
+  "command": [
+    "transport_output",
+    "--bytes=134217728",
+    "--repetitions=5",
+    "--warmups=1",
+    "--allow-dirty",
+    "--output=benchmark/results/current-128m-base-compatible-macos-x64-61c0f76.json"
+  ],
+  "fixture_sha256": "0c8cb4341e47db180408e2d44e6f7f63b63c70ca4b782d858dfa5942383257e2",
+  "fixture_executable": null,
+  "fixture_executable_sha256": null,
+  "scorecard_sha256": "ceaa5260bcc1631188105fe92d4a9a0ce17db7ed4b4de3c8e1ab37e48bf43f70",
+  "warmups": 1,
+  "repetitions": 5,
+  "pid": 40060,
+  "rss_before_bytes": 203558912,
+  "transport_output": {
+    "warmups": 1,
+    "repetitions": 5,
+    "metric": "mib_per_second",
+    "distribution": {
+      "samples": 5,
+      "mean": 97.00053352624533,
+      "stddev": 3.25736819238768,
+      "p50": 97.19545550498354,
+      "p95": 100.63391504453443,
+      "p99": 100.63391504453443,
+      "min": 91.19069398967837,
+      "max": 100.63391504453443
+    },
+    "raw_runs": [
+      {
+        "bytes": 134217728,
+        "elapsed_us": 1271937,
+        "mib_per_second": 100.63391504453443,
+        "exit_code": 0
+      },
+      {
+        "bytes": 134217728,
+        "elapsed_us": 1287438,
+        "mib_per_second": 99.4222634410356,
+        "exit_code": 0
+      },
+      {
+        "bytes": 134217728,
+        "elapsed_us": 1403652,
+        "mib_per_second": 91.19069398967837,
+        "exit_code": 0
+      },
+      {
+        "bytes": 134217728,
+        "elapsed_us": 1316934,
+        "mib_per_second": 97.19545550498354,
+        "exit_code": 0
+      },
+      {
+        "bytes": 134217728,
+        "elapsed_us": 1325596,
+        "mib_per_second": 96.56033965099472,
+        "exit_code": 0
+      }
+    ]
+  },
+  "rss_after_bytes": 208113664
+}

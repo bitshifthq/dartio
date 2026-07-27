@@ -36,19 +36,23 @@ Future<void> main(List<String> arguments) async {
     '--porcelain=v1',
     '--untracked-files=all',
   ]);
-  final dirty = status?.isNotEmpty ?? false;
+  if (revision == null || status == null) {
+    throw StateError('benchmark retention requires a readable Git revision');
+  }
+  final dirty = status.isNotEmpty;
   if (outputPath != null && dirty && !allowDirty) {
     throw StateError(
       'refusing to retain a benchmark from a dirty tree; commit the exact '
       'artifact or pass --allow-dirty to retain a diagnostic result',
     );
   }
+  final fixtureExecutable = Platform.environment['PTYX_FIXTURE_EXECUTABLE'];
   final results = <String, Object?>{
     'schema': 4,
     'suite': 'ptyx-diagnostic-scorecard',
     'acceptance_result': false,
     'missing_acceptance_workloads': const [
-      'retained multi-gigabyte exact-integrity run',
+      'clean exact-revision acceptance manifest for multi-gigabyte integrity',
       'base, direct-native, and competitor comparisons',
       'allocation and copy instrumentation',
     ],
@@ -63,13 +67,15 @@ Future<void> main(List<String> arguments) async {
     'processors': Platform.numberOfProcessors,
     'revision': Platform.environment['PTYX_BENCHMARK_REVISION'] ?? revision,
     'tree_dirty': dirty,
-    'working_tree_sha256': dirty
-        ? sha256.convert(utf8.encode(status ?? '')).toString()
-        : null,
+    'working_tree_sha256': dirty ? await _workingTreeHash() : null,
     'command': arguments,
     'fixture_sha256': await _fileHash(
       Platform.script.resolve('fixture.dart').toFilePath(),
     ),
+    'fixture_executable': fixtureExecutable,
+    'fixture_executable_sha256': fixtureExecutable == null
+        ? null
+        : await _fileHash(fixtureExecutable),
     'scorecard_sha256': await _fileHash(Platform.script.toFilePath()),
     'warmups': warmups,
     'repetitions': repetitions,
@@ -140,7 +146,7 @@ Future<void> main(List<String> arguments) async {
     results['no_listener'] = await _noListener(8 * 1024 * 1024);
   }
   if (selected == null || selected == 'all' || selected == 'saturation') {
-    results['saturation'] = await _inputSaturation(1024 * 1024, 250);
+    results['saturation'] = await _inputSaturation(1024 * 1024);
   }
   if (selected == null || selected == 'all' || selected == 'fairness') {
     results['fairness'] = await _fairness(16, 100);
@@ -220,6 +226,7 @@ Future<Map<String, Object?>> _repeated({
 Future<PtySession> _spawnFixture(
   String operation, [
   List<String> arguments = const [],
+  int? maxBufferedInput,
 ]) {
   final fixture = Platform.environment['PTYX_FIXTURE_EXECUTABLE'];
   return PtySession.spawn(
@@ -232,6 +239,7 @@ Future<PtySession> _spawnFixture(
         ...arguments,
       ],
       initialSize: _size,
+      maxBufferedInput: maxBufferedInput ?? 1024 * 1024,
     ),
   );
 }
@@ -637,7 +645,7 @@ Future<Map<String, Object?>> _discardOutput(int byteCount) async {
 }
 
 Future<Map<String, Object?>> _noListener(int byteCount) async {
-  final (:session, :bytes) = await _readySession('output', ['$byteCount']);
+  final session = await _spawnFixture('output', ['$byteCount']);
   final before = await _resourceSnapshot();
   try {
     await session.write(Uint8List.fromList(const [1]));
@@ -645,7 +653,6 @@ Future<Map<String, Object?>> _noListener(int byteCount) async {
     await Future<void>.delayed(const Duration(milliseconds: 250));
     final bounded = await _resourceSnapshot();
     final stopwatch = Stopwatch()..start();
-    await bytes.cancel();
     session.discardOutput();
     final exitCode = await session.exitCode.timeout(_timeout);
     stopwatch.stop();
@@ -662,53 +669,53 @@ Future<Map<String, Object?>> _noListener(int byteCount) async {
   }
 }
 
-Future<Map<String, Object?>> _inputSaturation(
-  int capacity,
-  int childDelayMs,
-) async {
-  final session = await PtySession.spawn(
-    PtySpawnOptions(
-      executable: Platform.resolvedExecutable,
-      arguments: [
-        Platform.script.resolve('fixture.dart').toFilePath(),
-        'delayed-input-verify',
-        '$capacity',
-        '$childDelayMs',
-      ],
-      initialSize: _size,
-      maxBufferedInput: capacity,
-    ),
-  );
-  final bytes = _ChunkReader(session.output);
+Future<Map<String, Object?>> _inputSaturation(int capacity) async {
+  final temporary = Directory.systemTemp.createTempSync('ptyx-saturation-');
+  final gate = File('${temporary.path}/release');
+  PtySession? session;
+  _ChunkReader? bytes;
   try {
+    final activeSession = session = await _spawnFixture('gated-input-verify', [
+      '$capacity',
+      gate.path,
+    ], capacity);
+    final activeBytes = bytes = _ChunkReader(activeSession.output);
     for (final expected in ascii.encode('READY')) {
-      if (await bytes.readByte().timeout(_timeout) != expected) {
+      if (await activeBytes.readByte().timeout(_timeout) != expected) {
         throw StateError('saturation child did not emit READY');
       }
     }
     final payload = Uint8List(capacity);
     _fillPattern(payload, 0, payload.length);
-    if (!session.tryWrite(payload)) {
+    final resourceBefore = await _resourceSnapshot();
+    if (!activeSession.tryWrite(payload)) {
       throw StateError('initial saturation write was rejected');
     }
+    final resourceAtCapacity = await _resourceSnapshot();
     final stopwatch = Stopwatch()..start();
-    await session.waitForInputCapacity(capacity).timeout(_timeout);
+    gate.createSync();
+    await activeSession.waitForInputCapacity(capacity).timeout(_timeout);
     stopwatch.stop();
-    await session.flush().timeout(_timeout);
-    final report = await _readLine(bytes);
+    final resourceAfterRecovery = await _resourceSnapshot();
+    await activeSession.flush().timeout(_timeout);
+    final report = await _readLine(activeBytes);
     if (report != 'OK $capacity') {
       throw StateError('saturation integrity failure: $report');
     }
     return {
       'capacity_bytes': capacity,
-      'child_delay_ms': childDelayMs,
+      'release_handshake': 'external gate created after capacity snapshot',
       'capacity_recovery_us': stopwatch.elapsedMicroseconds,
+      'resource_before': resourceBefore,
+      'resource_at_capacity': resourceAtCapacity,
+      'resource_after_recovery': resourceAfterRecovery,
       'report': report,
-      'exit_code': await session.exitCode.timeout(_timeout),
+      'exit_code': await activeSession.exitCode.timeout(_timeout),
     };
   } finally {
-    await bytes.cancel();
-    await session.close();
+    await bytes?.cancel();
+    await session?.close();
+    temporary.deleteSync(recursive: true);
   }
 }
 
@@ -1023,9 +1030,10 @@ Future<Map<String, Object?>> _resourceSnapshot() async {
         '-NonInteractive',
         '-Command',
         r'''
+$rootPid = [uint32]$env:PTYX_RESOURCE_ROOT_PID
 $all = Get-CimInstance Win32_Process
 $ids = [System.Collections.Generic.HashSet[uint32]]::new()
-[void]$ids.Add($PID)
+[void]$ids.Add($rootPid)
 do {
   $before = $ids.Count
   foreach ($process in $all) {
@@ -1034,13 +1042,15 @@ do {
     }
   }
 } while ($ids.Count -ne $before)
+[void]$ids.Remove([uint32]$PID)
 $processes = Get-Process -Id @($ids) -ErrorAction SilentlyContinue
 $cpu = ($processes | Measure-Object CPU -Sum).Sum
 $rss = ($processes | Measure-Object WorkingSet64 -Sum).Sum
 $handles = ($processes | Measure-Object HandleCount -Sum).Sum
-"$([int64]($cpu * 1000000))|$([int64]$rss)|$([int64]$handles)|$($ids.Count)"
+"$([int64]($cpu * 1000000))|$([int64]$rss)|$([int64]$handles)|$($processes.Count)"
 ''',
       ],
+      environment: {'PTYX_RESOURCE_ROOT_PID': '$pid'},
     );
     if (result.exitCode != 0) {
       throw StateError('Windows resource query failed: ${result.stderr}');
@@ -1054,21 +1064,27 @@ $handles = ($processes | Measure-Object HandleCount -Sum).Sum
       'dart_threads': await _threadCount(),
     };
   }
-  final result = await Process.run('ps', const [
+  final sampler = await Process.start('ps', const [
     '-axo',
     'pid=,ppid=,rss=,time=',
   ]);
-  if (result.exitCode != 0) {
-    throw StateError('ps resource query failed: ${result.stderr}');
+  final stdout = sampler.stdout.transform(utf8.decoder).join();
+  final stderr = sampler.stderr.transform(utf8.decoder).join();
+  final exitCode = await sampler.exitCode;
+  final output = await stdout;
+  final errorOutput = await stderr;
+  if (exitCode != 0) {
+    throw StateError('ps resource query failed: $errorOutput');
   }
   final entries = <int, ({int parent, int rssKiB, int cpuUs})>{};
-  for (final line in const LineSplitter().convert('${result.stdout}')) {
+  for (final line in const LineSplitter().convert(output)) {
     final fields = line.trim().split(RegExp(r'\s+'));
     if (fields.length != 4) continue;
     final process = int.tryParse(fields[0]);
     final parent = int.tryParse(fields[1]);
     final rss = int.tryParse(fields[2]);
     if (process == null || parent == null || rss == null) continue;
+    if (process == sampler.pid) continue;
     entries[process] = (
       parent: parent,
       rssKiB: rss,
@@ -1088,9 +1104,8 @@ $handles = ($processes | Measure-Object HandleCount -Sum).Sum
   final treeEntries = tree
       .map((process) => entries[process])
       .whereType<({int parent, int rssKiB, int cpuUs})>();
-  final descriptors = Platform.isLinux
-      ? await Directory('/proc/$pid/fd').list(followLinks: false).length
-      : await _macDescriptorCount();
+  final liveTree = tree.where(entries.containsKey).toSet();
+  final descriptors = await _unixDescriptorCount(liveTree);
   return {
     'tree_cpu_us': treeEntries.fold<int>(
       0,
@@ -1101,19 +1116,35 @@ $handles = ($processes | Measure-Object HandleCount -Sum).Sum
       (total, entry) => total + entry.rssKiB * 1024,
     ),
     'tree_descriptors': descriptors,
-    'tree_processes': tree.length,
+    'tree_processes': liveTree.length,
     'dart_threads': await _threadCount(),
   };
 }
 
-Future<int> _macDescriptorCount() async {
+Future<int> _unixDescriptorCount(Set<int> processes) async {
+  if (Platform.isLinux) {
+    var total = 0;
+    for (final process in processes) {
+      try {
+        total += await Directory(
+          '/proc/$process/fd',
+        ).list(followLinks: false).length;
+      } on FileSystemException {
+        // A short-lived child may exit between the process and descriptor
+        // snapshots. It contributes no live descriptors at the later instant.
+      }
+    }
+    return total;
+  }
   final result = await Process.run('/usr/sbin/lsof', [
     '-a',
     '-p',
-    '$pid',
+    processes.join(','),
     '-Fn',
   ]);
-  if (result.exitCode != 0) {
+  // lsof exits 1 if any process exits between the ps and lsof snapshots while
+  // still emitting complete records for the processes that remain alive.
+  if (result.exitCode != 0 && '${result.stdout}'.trim().isEmpty) {
     throw StateError('lsof descriptor query failed: ${result.stderr}');
   }
   return const LineSplitter()
@@ -1208,6 +1239,46 @@ Future<String?> _commandOutput(
 
 Future<String> _fileHash(String path) async {
   return sha256.convert(await File(path).readAsBytes()).toString();
+}
+
+Future<String?> _workingTreeHash() async {
+  final status = await Process.run('git', const [
+    'status',
+    '--porcelain=v1',
+    '-z',
+    '--untracked-files=all',
+  ], stdoutEncoding: null);
+  final diff = await Process.run('git', const [
+    'diff',
+    '--binary',
+    'HEAD',
+  ], stdoutEncoding: null);
+  if (status.exitCode != 0 || diff.exitCode != 0) {
+    return null;
+  }
+  final statusBytes = status.stdout! as List<int>;
+  final bytes = BytesBuilder(copy: false)
+    ..add(statusBytes)
+    ..add(diff.stdout! as List<int>);
+  for (final entry in _nulSeparated(statusBytes)) {
+    if (!entry.startsWith('?? ')) continue;
+    final path = entry.substring(3);
+    final file = File(path);
+    if (!file.existsSync()) continue;
+    bytes
+      ..add(utf8.encode(path))
+      ..add(utf8.encode(sha256.convert(file.readAsBytesSync()).toString()));
+  }
+  return sha256.convert(bytes.takeBytes()).toString();
+}
+
+Iterable<String> _nulSeparated(List<int> bytes) sync* {
+  var start = 0;
+  for (var index = 0; index < bytes.length; index++) {
+    if (bytes[index] != 0) continue;
+    yield utf8.decode(bytes.sublist(start, index));
+    start = index + 1;
+  }
 }
 
 int _pattern(int offset) => 32 + ((offset * 31 + 17) % 95);
