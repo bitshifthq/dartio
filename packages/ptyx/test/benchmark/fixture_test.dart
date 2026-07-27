@@ -53,5 +53,33 @@ void main() {
         65,
       ]);
     });
+
+    test('decodes ordered ConPTY fixture frames and ignores redraws', () async {
+      final chunks = Stream.fromIterable([
+        Uint8List.fromList('READY\u001b[2K\r~P'.codeUnits),
+        Uint8List.fromList(
+          'F~~0:QUJD~\r   \u001b[2K\r~0:QUJD~\r~1:REU=~'.codeUnits,
+        ),
+      ]);
+
+      expect(
+        await fixturePayload(
+          chunks,
+          discardC0: true,
+        ).expand((chunk) => chunk).toList(),
+        [...'READY'.codeUnits, ...'ABCDE'.codeUnits],
+      );
+    });
+
+    test('preserves ordinary output containing frame delimiters', () async {
+      final chunks = Stream.fromIterable([
+        Uint8List.fromList('left~not-a-frame~right'.codeUnits),
+      ]);
+
+      expect(
+        await fixturePayload(chunks).expand((chunk) => chunk).toList(),
+        'left~not-a-frame~right'.codeUnits,
+      );
+    });
   });
 }

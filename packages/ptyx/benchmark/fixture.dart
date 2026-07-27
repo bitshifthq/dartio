@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:ffi';
 import 'dart:io';
 import 'dart:typed_data';
@@ -7,8 +8,9 @@ import 'package:ffi/ffi.dart';
 
 const _ready = [82, 69, 65, 68, 89];
 const _outputFlushBytes = 1024 * 1024;
-const _conptyLineWidth = 64;
+const _conptyFrameBytes = 48;
 const _conptyEraseLine = [0x1b, 0x5b, 0x32, 0x4b, 13];
+var _conptyFrameSequence = 0;
 
 Future<void> main(List<String> arguments) async {
   if (arguments.isEmpty) {
@@ -27,6 +29,10 @@ Future<void> main(List<String> arguments) async {
       await _writeReady();
       await _waitForGate();
       await _writePattern(int.parse(arguments[1]));
+    case 'output-constant':
+      await _writeReady();
+      await _waitForGate();
+      await _writeConstant(int.parse(arguments[1]), 120);
     case 'input-verify':
       await _writeReady();
       final result = await _readPattern(int.parse(arguments[1]), echo: false);
@@ -61,9 +67,14 @@ Future<void> main(List<String> arguments) async {
       );
       await stdout.flush();
     case 'size':
-      await _writeSize();
+      final initialSize = _terminalSize();
+      await _writeSize(initialSize);
       await stdin.first;
-      await _writeSize();
+      await _writeSize(
+        Platform.isWindows
+            ? await _waitForTerminalSizeChange(initialSize)
+            : _terminalSize(),
+      );
     case 'idle':
       await stdin.drain<void>();
     default:
@@ -104,6 +115,21 @@ Future<void> _writePattern(int byteCount) async {
   }
 }
 
+Future<void> _writeConstant(int byteCount, int byte) async {
+  final chunk = Uint8List(64 * 1024)..fillRange(0, 64 * 1024, byte);
+  var offset = 0;
+  while (offset != byteCount) {
+    final count = byteCount - offset < chunk.length
+        ? byteCount - offset
+        : chunk.length;
+    _writePayload(count == chunk.length ? chunk : chunk.sublist(0, count));
+    offset += count;
+    if (offset % _outputFlushBytes == 0 || offset == byteCount) {
+      await stdout.flush();
+    }
+  }
+}
+
 Future<String> _readPattern(int byteCount, {required bool echo}) async {
   var received = 0;
   await for (final chunk in stdin) {
@@ -126,10 +152,20 @@ Future<String> _readPattern(int byteCount, {required bool echo}) async {
   return received == byteCount ? 'OK $received' : 'SHORT $received $byteCount';
 }
 
-Future<void> _writeSize() async {
-  final (rows, columns) = _terminalSize();
+Future<void> _writeSize((int, int) size) async {
+  final (rows, columns) = size;
   stdout.writeln('$rows $columns');
   await stdout.flush();
+}
+
+Future<(int, int)> _waitForTerminalSizeChange((int, int) initial) async {
+  final deadline = DateTime.now().add(const Duration(seconds: 5));
+  var current = _terminalSize();
+  while (current == initial && DateTime.now().isBefore(deadline)) {
+    await Future<void>.delayed(const Duration(milliseconds: 1));
+    current = _terminalSize();
+  }
+  return current;
 }
 
 (int, int) _terminalSize() {
@@ -168,16 +204,18 @@ void _writePayload(List<int> bytes) {
     stdout.add(bytes);
     return;
   }
-  // Keep ConPTY on one row. Scrolling can represent screen updates by
-  // repainting cells, which is unsuitable for byte-integrity fixtures. Erase
-  // the row before every payload fragment so overwrites cannot retain or
-  // repaint bytes from the previous fragment.
-  for (var offset = 0; offset < bytes.length; offset += _conptyLineWidth) {
-    final end = offset + _conptyLineWidth < bytes.length
-        ? offset + _conptyLineWidth
+  // ConPTY transports screen differences rather than application writes.
+  // Sequence frames let the benchmark decoder reject redraw duplicates while
+  // still verifying every original byte. The base64 alphabet excludes '~',
+  // so frame boundaries remain unambiguous after VT controls are removed.
+  for (var offset = 0; offset < bytes.length; offset += _conptyFrameBytes) {
+    final end = offset + _conptyFrameBytes < bytes.length
+        ? offset + _conptyFrameBytes
         : bytes.length;
+    final payload = base64.encode(bytes.sublist(offset, end));
+    final sequence = (_conptyFrameSequence++).toRadixString(36);
     stdout.add(_conptyEraseLine);
-    stdout.add(bytes.sublist(offset, end));
+    stdout.write('~PF~~$sequence:$payload~');
     stdout.add(const [13]);
   }
 }

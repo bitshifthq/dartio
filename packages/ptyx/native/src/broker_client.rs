@@ -1,3 +1,4 @@
+#[cfg(target_os = "macos")]
 use crate::dup_cloexec;
 use crate::integrated::Command;
 use crate::oneshot::{self, Sender as ReplySender};

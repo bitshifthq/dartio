@@ -357,20 +357,38 @@ Future<Map<String, Object?>> _outputThroughput(int byteCount) async {
 }
 
 Future<Map<String, Object?>> _transportOutput(int byteCount) async {
-  final windowsScript =
-      r'''
-[Console]::Write("READY")
-$null = [Console]::In.Read()
-$out = [Console]::OpenStandardOutput()
-$chunk = [Text.Encoding]::ASCII.GetBytes(("x" * 65536))
-$remaining = {bytes}
-while ($remaining -gt 0) {
-  $count = [Math]::Min($chunk.Length, $remaining)
-  $out.Write($chunk, 0, $count)
-  $remaining -= $count
-}
-'''
-          .replaceFirst('{bytes}', '$byteCount');
+  if (Platform.isWindows) {
+    final (:session, :bytes) = await _readySession('output-constant', [
+      '$byteCount',
+    ]);
+    try {
+      await session.write(Uint8List.fromList(const [1]));
+      final stopwatch = Stopwatch()..start();
+      var received = 0;
+      while (received < byteCount) {
+        final chunk = await bytes.readChunk().timeout(_timeout);
+        if (chunk == null) {
+          throw StateError('transport output reached EOF at $received');
+        }
+        if (chunk.any((byte) => byte != 120)) {
+          throw StateError('transport output mismatch at $received');
+        }
+        received += chunk.length;
+      }
+      stopwatch.stop();
+      return {
+        'bytes': received,
+        'elapsed_us': stopwatch.elapsedMicroseconds,
+        'mib_per_second':
+            received / (1024 * 1024) / (stopwatch.elapsedMicroseconds / 1e6),
+        'exit_code': await session.exitCode.timeout(_timeout),
+      };
+    } finally {
+      await bytes.cancel();
+      await session.close();
+    }
+  }
+
   final posixScript =
       '''
 stty raw -echo
@@ -380,12 +398,8 @@ head -c $byteCount /dev/zero
 ''';
   final session = await PtySession.spawn(
     PtySpawnOptions(
-      executable: Platform.isWindows
-          ? r'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe'
-          : '/bin/sh',
-      arguments: Platform.isWindows
-          ? ['-NoProfile', '-NonInteractive', '-Command', windowsScript]
-          : ['-c', posixScript],
+      executable: '/bin/sh',
+      arguments: ['-c', posixScript],
       initialSize: _size,
     ),
   );
@@ -404,8 +418,7 @@ head -c $byteCount /dev/zero
       if (chunk == null) {
         throw StateError('transport output reached EOF at $received');
       }
-      final expected = Platform.isWindows ? 120 : 0;
-      if (chunk.any((byte) => byte != expected)) {
+      if (chunk.any((byte) => byte != 0)) {
         throw StateError('transport output mismatch at $received');
       }
       received += chunk.length;
