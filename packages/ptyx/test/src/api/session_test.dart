@@ -275,6 +275,17 @@ void main() {
 
         expect(exitCode, 0);
       });
+
+      test('explicitly discards output without attaching a listener', () async {
+        final session = await spawnCommand(
+          finiteOutputCommand(2 * 1024 * 1024),
+        );
+
+        session.discardOutput();
+
+        await session.exitCode.timeout(longTimeout);
+        await session.output.drain<void>().timeout(longTimeout);
+      });
     });
 
     group('environment', () {

@@ -56,30 +56,9 @@ jobs:
           - target: x86_64-windows
             runner: windows-latest
             rust_target: x86_64-pc-windows-msvc
-          - target: aarch64-linux-android
-            runner: ubuntu-latest
-            rust_target: aarch64-linux-android
-            android: true
-            android_linker: aarch64-linux-android21-clang
-            cargo_linker_env: CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER
-            cc_env: CC_aarch64_linux_android
-            ar_env: AR_aarch64_linux_android
-          - target: x86_64-linux-android
-            runner: ubuntu-latest
-            rust_target: x86_64-linux-android
-            android: true
-            android_linker: x86_64-linux-android21-clang
-            cargo_linker_env: CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER
-            cc_env: CC_x86_64_linux_android
-            ar_env: AR_x86_64_linux_android
-          - target: arm-linux-androideabi
-            runner: ubuntu-latest
-            rust_target: arm-linux-androideabi
-            android: true
-            android_linker: armv7a-linux-androideabi21-clang
-            cargo_linker_env: CARGO_TARGET_ARM_LINUX_ANDROIDEABI_LINKER
-            cc_env: CC_arm_linux_androideabi
-            ar_env: AR_arm_linux_androideabi
+          - target: aarch64-windows
+            runner: windows-latest
+            rust_target: aarch64-pc-windows-msvc
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -119,24 +98,17 @@ jobs:
           LINKER="$(command -v ${{ matrix.linker }})"
           printf "${{ matrix.cargo_linker_env }}=%s\n" "$LINKER" >> "$GITHUB_ENV"
           printf "${{ matrix.cc_env }}=%s\n" "$LINKER" >> "$GITHUB_ENV"
-      - name: configure Android linker
-        if: matrix.android == true
+      - name: build target Unix broker
+        if: runner.os != 'Windows'
         run: |
-          NDK="${ANDROID_NDK_HOME:-${ANDROID_NDK_ROOT:-}}"
-          if [[ -z "$NDK" ]]; then
-            echo "Android NDK was not found."
-            exit 1
-          fi
-          TOOLCHAIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
-          LINKER="$TOOLCHAIN/${{ matrix.android_linker }}"
-          ARCHIVER="$TOOLCHAIN/llvm-ar"
-          if [[ ! -x "$LINKER" || ! -x "$ARCHIVER" ]]; then
-            echo "Android toolchain was not found in $TOOLCHAIN."
-            exit 1
-          fi
-          printf "${{ matrix.cargo_linker_env }}=%s\n" "$LINKER" >> "$GITHUB_ENV"
-          printf "${{ matrix.cc_env }}=%s\n" "$LINKER" >> "$GITHUB_ENV"
-          printf "${{ matrix.ar_env }}=%s\n" "$ARCHIVER" >> "$GITHUB_ENV"
+          cargo build \
+            --manifest-path packages/ptyx/native/broker/Cargo.toml \
+            --release \
+            --target ${{ matrix.rust_target }} \
+            --target-dir target/ptyx/${{ matrix.target }}/broker
+          printf "PTYX_BROKER_BINARY=%s\n" \
+            "$GITHUB_WORKSPACE/target/ptyx/${{ matrix.target }}/broker/${{ matrix.rust_target }}/release/ptyx-broker" \
+            >> "$GITHUB_ENV"
       - name: compile
         run: |
           cargo build \

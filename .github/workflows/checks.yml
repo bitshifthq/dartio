@@ -47,6 +47,11 @@ jobs:
           restore-keys: pub-linux-
       - run: dart pub get
       - run: dart format --set-exit-if-changed --output=none packages/ptyx
+      - name: verify generated ptyx ABI bindings
+        working-directory: packages/ptyx
+        run: |
+          dart run tool/ffigen.dart
+          git diff --exit-code -- include/ptyx.h lib/src/ffi/controller.dart
       - run: dart analyze --fatal-infos --fatal-warnings packages/ptyx
       - name: publish dry run
         working-directory: packages/ptyx
@@ -149,9 +154,22 @@ jobs:
           fi
           printf "DART_SDK=%s\n" "$SDK" >> "$GITHUB_ENV"
           printf "PTYX_DART_SDK=%s\n" "$SDK" >> "$GITHUB_ENV"
+      - name: build Unix broker
+        if: runner.os != 'Windows'
+        run: |
+          cargo build --manifest-path packages/ptyx/native/broker/Cargo.toml --release
+          printf "PTYX_BROKER_BINARY=%s\n" \
+            "$GITHUB_WORKSPACE/packages/ptyx/native/broker/target/release/ptyx-broker" \
+            >> "$GITHUB_ENV"
       - run: cargo fmt --manifest-path packages/ptyx/native/Cargo.toml -- --check
+      - if: runner.os != 'Windows'
+        run: cargo fmt --manifest-path packages/ptyx/native/broker/Cargo.toml -- --check
       - run: cargo test --manifest-path packages/ptyx/native/Cargo.toml
+      - if: runner.os != 'Windows'
+        run: cargo test --manifest-path packages/ptyx/native/broker/Cargo.toml
       - run: cargo doc --manifest-path packages/ptyx/native/Cargo.toml --no-deps
+      - if: runner.os != 'Windows'
+        run: cargo doc --manifest-path packages/ptyx/native/broker/Cargo.toml --no-deps
 
   clippy:
     name: clippy
@@ -182,6 +200,13 @@ jobs:
           SDK="$(dirname "$(dirname "$(command -v dart)")")"
           printf "DART_SDK=%s\n" "$SDK" >> "$GITHUB_ENV"
           printf "PTYX_DART_SDK=%s\n" "$SDK" >> "$GITHUB_ENV"
+      - name: build broker
+        run: |
+          cargo build --manifest-path packages/ptyx/native/broker/Cargo.toml --release
+          printf "PTYX_BROKER_BINARY=%s\n" \
+            "$GITHUB_WORKSPACE/packages/ptyx/native/broker/target/release/ptyx-broker" \
+            >> "$GITHUB_ENV"
+      - run: cargo clippy --manifest-path packages/ptyx/native/broker/Cargo.toml --all-targets --all-features -- -D warnings
       - run: cargo clippy --manifest-path packages/ptyx/native/Cargo.toml --all-targets -- -D warnings
 
   checks:

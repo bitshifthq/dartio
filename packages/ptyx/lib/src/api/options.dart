@@ -37,7 +37,7 @@ enum PtyEnvironmentMode {
 ///   initialSize: PtySize(rows: 30, columns: 100),
 /// );
 ///
-/// final session = PtySession.spawn(options);
+/// final session = await PtySession.spawn(options);
 /// ```
 @immutable
 final class PtySpawnOptions {
@@ -77,6 +77,9 @@ final class PtySpawnOptions {
   /// Maximum queued and in-flight output bytes retained by this session.
   final int maxBufferedOutput;
 
+  /// Time allowed for graceful termination before forced cleanup.
+  final Duration gracefulCloseTimeout;
+
   /// Creates spawn options for [PtySession.spawn].
   const PtySpawnOptions({
     required this.executable,
@@ -87,6 +90,7 @@ final class PtySpawnOptions {
     this.workingDirectory,
     this.maxBufferedInput = 1024 * 1024,
     this.maxBufferedOutput = 256 * 1024,
+    this.gracefulCloseTimeout = const Duration(milliseconds: 250),
   }) : assert(
          maxBufferedInput > 0 && maxBufferedInput <= 64 * 1024 * 1024,
          'maxBufferedInput must be between 1 byte and 64 MiB',

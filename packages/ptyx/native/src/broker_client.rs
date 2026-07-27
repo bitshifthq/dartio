@@ -17,6 +17,7 @@ const MAX_PAYLOAD: usize = 64 * 1024;
 const FRAME_TIMEOUT: Duration = Duration::from_secs(5);
 const SPAWN_V2: u32 = 0x5854_5950;
 const CONTROL_FD: RawFd = 3;
+#[cfg(target_os = "macos")]
 const POSIX_SPAWN_CLOEXEC_DEFAULT: libc::c_int = 0x4000;
 
 const HELLO: u16 = 1;
@@ -41,7 +42,7 @@ fn hello_payload() -> Vec<u8> {
         "{}|{}|{}",
         env!("CARGO_PKG_VERSION"),
         std::env::consts::ARCH,
-        1
+        2
     )
     .into_bytes()
 }
@@ -232,8 +233,8 @@ fn collect_received_fds(message: &libc::msghdr, received_fds: &mut Vec<OwnedFd>)
                 "unexpected broker ancillary data",
             ));
         }
-        let data_length =
-            unsafe { (*header).cmsg_len }.saturating_sub(unsafe { libc::CMSG_LEN(0) }) as usize;
+        let data_length = (unsafe { (*header).cmsg_len } as usize)
+            .saturating_sub(unsafe { libc::CMSG_LEN(0) } as usize);
         if data_length == 0 || !data_length.is_multiple_of(size_of::<RawFd>()) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -319,7 +320,11 @@ fn set_nonblocking(fd: RawFd) -> io::Result<()> {
 
 fn socket_pair() -> io::Result<(OwnedFd, OwnedFd)> {
     let mut sockets = [-1; 2];
-    if unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, sockets.as_mut_ptr()) } < 0 {
+    #[cfg(target_os = "macos")]
+    let socket_type = libc::SOCK_STREAM;
+    #[cfg(target_os = "linux")]
+    let socket_type = libc::SOCK_STREAM | libc::SOCK_CLOEXEC;
+    if unsafe { libc::socketpair(libc::AF_UNIX, socket_type, 0, sockets.as_mut_ptr()) } < 0 {
         return Err(io::Error::last_os_error());
     }
     let first = unsafe { OwnedFd::from_raw_fd(sockets[0]) };
@@ -329,8 +334,10 @@ fn socket_pair() -> io::Result<(OwnedFd, OwnedFd)> {
     Ok((first, second))
 }
 
+#[cfg(target_os = "macos")]
 struct SpawnAttrs(libc::posix_spawnattr_t);
 
+#[cfg(target_os = "macos")]
 impl Drop for SpawnAttrs {
     fn drop(&mut self) {
         unsafe {
@@ -339,8 +346,10 @@ impl Drop for SpawnAttrs {
     }
 }
 
+#[cfg(target_os = "macos")]
 struct FileActions(libc::posix_spawn_file_actions_t);
 
+#[cfg(target_os = "macos")]
 impl Drop for FileActions {
     fn drop(&mut self) {
         unsafe {
@@ -349,6 +358,7 @@ impl Drop for FileActions {
     }
 }
 
+#[cfg(target_os = "macos")]
 fn spawn_code(code: libc::c_int) -> io::Result<()> {
     if code == 0 {
         Ok(())
@@ -357,14 +367,15 @@ fn spawn_code(code: libc::c_int) -> io::Result<()> {
     }
 }
 
+#[cfg(target_os = "macos")]
 fn launch_broker_at(path: &CStr) -> io::Result<(OwnedFd, libc::pid_t)> {
     let (controller, broker) = socket_pair()?;
-    let mut attrs_raw = ptr::null_mut();
-    spawn_code(unsafe { libc::posix_spawnattr_init(&mut attrs_raw) })?;
-    let mut attrs = SpawnAttrs(attrs_raw);
-    let mut actions_raw = ptr::null_mut();
-    spawn_code(unsafe { libc::posix_spawn_file_actions_init(&mut actions_raw) })?;
-    let mut actions = FileActions(actions_raw);
+    let mut attrs_raw = MaybeUninit::<libc::posix_spawnattr_t>::uninit();
+    spawn_code(unsafe { libc::posix_spawnattr_init(attrs_raw.as_mut_ptr()) })?;
+    let mut attrs = SpawnAttrs(unsafe { attrs_raw.assume_init() });
+    let mut actions_raw = MaybeUninit::<libc::posix_spawn_file_actions_t>::uninit();
+    spawn_code(unsafe { libc::posix_spawn_file_actions_init(actions_raw.as_mut_ptr()) })?;
+    let mut actions = FileActions(unsafe { actions_raw.assume_init() });
 
     let mut empty = MaybeUninit::<libc::sigset_t>::uninit();
     if unsafe { libc::sigemptyset(empty.as_mut_ptr()) } < 0 {
@@ -372,7 +383,11 @@ fn launch_broker_at(path: &CStr) -> io::Result<(OwnedFd, libc::pid_t)> {
     }
     let empty = unsafe { empty.assume_init() };
     spawn_code(unsafe { libc::posix_spawnattr_setsigmask(&mut attrs.0, &empty) })?;
-    let flags = (POSIX_SPAWN_CLOEXEC_DEFAULT | libc::POSIX_SPAWN_SETSIGMASK) as libc::c_short;
+    #[cfg(target_os = "macos")]
+    let flags = POSIX_SPAWN_CLOEXEC_DEFAULT | libc::POSIX_SPAWN_SETSIGMASK;
+    #[cfg(target_os = "linux")]
+    let flags = libc::POSIX_SPAWN_SETSIGMASK;
+    let flags = flags as libc::c_short;
     spawn_code(unsafe { libc::posix_spawnattr_setflags(&mut attrs.0, flags) })?;
     spawn_code(unsafe {
         libc::posix_spawn_file_actions_adddup2(&mut actions.0, broker.as_raw_fd(), CONTROL_FD)
@@ -419,6 +434,182 @@ fn launch_broker_at(path: &CStr) -> io::Result<(OwnedFd, libc::pid_t)> {
         ));
     }
     Ok((controller, pid))
+}
+
+#[cfg(target_os = "linux")]
+fn launch_broker_at(path: &CStr) -> io::Result<(OwnedFd, libc::pid_t)> {
+    let (controller, broker) = socket_pair()?;
+    let mut error_pipe = [-1; 2];
+    if unsafe { libc::pipe2(error_pipe.as_mut_ptr(), libc::O_CLOEXEC) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let error_read = unsafe { OwnedFd::from_raw_fd(error_pipe[0]) };
+    let error_write = unsafe { OwnedFd::from_raw_fd(error_pipe[1]) };
+    set_nonblocking(error_read.as_raw_fd())?;
+    let broker_arg = CString::new("--broker").unwrap();
+    let argv = [path.as_ptr(), broker_arg.as_ptr(), ptr::null()];
+    let mut empty = MaybeUninit::<libc::sigset_t>::uninit();
+    if unsafe { libc::sigemptyset(empty.as_mut_ptr()) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let empty = unsafe { empty.assume_init() };
+    let mut limit = MaybeUninit::<libc::rlimit>::uninit();
+    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, limit.as_mut_ptr()) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let maximum_fd = unsafe { limit.assume_init() }.rlim_cur.min(1_048_576) as RawFd;
+
+    let pid = unsafe { libc::fork() };
+    if pid < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if pid == 0 {
+        unsafe {
+            launch_broker_child(
+                path,
+                &argv,
+                broker.as_raw_fd(),
+                error_write.as_raw_fd(),
+                &empty,
+                maximum_fd,
+            );
+        }
+    }
+    drop(broker);
+    drop(error_write);
+    if let Some(code) = read_child_error(error_read.as_raw_fd())? {
+        let _ = unsafe { libc::waitpid(pid, ptr::null_mut(), 0) };
+        return Err(io::Error::from_raw_os_error(code));
+    }
+    let handshake = receive_frame(controller.as_raw_fd());
+    let (hello, passed) = match handshake {
+        Ok(Some(frame)) => frame,
+        Ok(None) => {
+            let _ = unsafe { libc::waitpid(pid, ptr::null_mut(), 0) };
+            return Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "broker handshake EOF",
+            ));
+        }
+        Err(error) => {
+            unsafe {
+                libc::kill(pid, libc::SIGKILL);
+                libc::waitpid(pid, ptr::null_mut(), 0);
+            }
+            return Err(error);
+        }
+    };
+    if hello.kind != HELLO
+        || hello.aux != VERSION as u32
+        || hello.payload != hello_payload()
+        || passed.is_some()
+    {
+        unsafe {
+            libc::kill(pid, libc::SIGKILL);
+            libc::waitpid(pid, ptr::null_mut(), 0);
+        }
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "broker handshake rejected",
+        ));
+    }
+    Ok((controller, pid))
+}
+
+#[cfg(target_os = "linux")]
+unsafe fn launch_broker_child(
+    path: &CStr,
+    argv: &[*const libc::c_char; 3],
+    broker_fd: RawFd,
+    error_fd: RawFd,
+    empty_mask: &libc::sigset_t,
+    maximum_fd: RawFd,
+) -> ! {
+    if libc::dup2(broker_fd, CONTROL_FD) < 0
+        || libc::fcntl(CONTROL_FD, libc::F_SETFD, 0) < 0
+        || (error_fd != 4 && libc::dup3(error_fd, 4, libc::O_CLOEXEC) < 0)
+        || libc::sigprocmask(libc::SIG_SETMASK, empty_mask, ptr::null_mut()) < 0
+    {
+        launch_child_fail(if error_fd == 4 { error_fd } else { 4 });
+    }
+    let close_result = libc::syscall(libc::SYS_close_range, 5_u32, u32::MAX, 0_u32);
+    if close_result < 0 && current_errno() == libc::ENOSYS {
+        for fd in 5..maximum_fd {
+            libc::close(fd);
+        }
+    } else if close_result < 0 {
+        launch_child_fail(4);
+    }
+    libc::execve(path.as_ptr(), argv.as_ptr(), environ.cast());
+    launch_child_fail(4)
+}
+
+#[cfg(target_os = "linux")]
+unsafe fn launch_child_fail(error_fd: RawFd) -> ! {
+    let bytes = current_errno().to_ne_bytes();
+    let mut offset = 0;
+    while offset < bytes.len() {
+        let written = libc::write(
+            error_fd,
+            bytes[offset..].as_ptr().cast(),
+            bytes.len() - offset,
+        );
+        if written > 0 {
+            offset += written as usize;
+        } else if written < 0 && current_errno() == libc::EINTR {
+            continue;
+        } else {
+            break;
+        }
+    }
+    libc::_exit(127)
+}
+
+#[cfg(target_os = "linux")]
+unsafe fn current_errno() -> libc::c_int {
+    *libc::__errno_location()
+}
+
+#[cfg(target_os = "linux")]
+fn read_child_error(fd: RawFd) -> io::Result<Option<libc::c_int>> {
+    let deadline = Instant::now() + FRAME_TIMEOUT;
+    let mut bytes = [0_u8; size_of::<libc::c_int>()];
+    let mut offset = 0;
+    loop {
+        let read = unsafe {
+            libc::read(
+                fd,
+                bytes[offset..].as_mut_ptr().cast(),
+                bytes.len() - offset,
+            )
+        };
+        if read > 0 {
+            offset += read as usize;
+            if offset == bytes.len() {
+                return Ok(Some(libc::c_int::from_ne_bytes(bytes)));
+            }
+            continue;
+        }
+        if read == 0 {
+            return if offset == 0 {
+                Ok(None)
+            } else {
+                Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "partial broker exec failure record",
+                ))
+            };
+        }
+        let error = io::Error::last_os_error();
+        if error.kind() == io::ErrorKind::Interrupted {
+            continue;
+        }
+        if error.kind() == io::ErrorKind::WouldBlock {
+            wait_for_io(fd, libc::POLLIN, deadline)?;
+            continue;
+        }
+        return Err(error);
+    }
 }
 
 pub(crate) struct BrokerSession {

@@ -17,6 +17,8 @@ final class NativeSession implements PtySession {
     this._runtime,
     this._handle,
     this._size,
+    this._inputCapacity,
+    this._gracefulCloseTimeout,
     this._outputController,
     this._modeController,
   );
@@ -54,10 +56,19 @@ final class NativeSession implements PtySession {
       runtime,
       handle,
       options.initialSize,
+      options.maxBufferedInput,
+      options.gracefulCloseTimeout,
       output,
       modes,
     );
     runtime._sessions[handle] = session;
+    if (!controllerActivate(handle)) {
+      runtime._sessions.remove(handle);
+      controllerClose(handle);
+      throw const PtyInfrastructureException(
+        'native session activation failed',
+      );
+    }
     return session;
   }
 
@@ -69,6 +80,8 @@ final class NativeSession implements PtySession {
   final _outputDone = Completer<void>();
   final _inputDone = Completer<void>();
   PtySize _size;
+  final int _inputCapacity;
+  final Duration _gracefulCloseTimeout;
   Completer<void>? _close;
   var _lastSequence = 0;
   var _pendingCredit = 0;
@@ -83,12 +96,15 @@ final class NativeSession implements PtySession {
   var _unchangedModeSamples = 0;
 
   @override
-  PtyCapabilities get capabilities => PtyCapabilities(
-    signals: !Platform.isWindows,
-    processGroups: !Platform.isWindows,
-    terminalModes: !Platform.isWindows,
-    conPty: Platform.isWindows,
-  );
+  PtyCapabilities get capabilities {
+    final bits = controllerCapabilities();
+    return PtyCapabilities(
+      signals: bits & 1 != 0,
+      processGroups: bits & 2 != 0,
+      terminalModes: bits & 4 != 0,
+      conPty: bits & 8 != 0,
+    );
+  }
 
   @override
   Future<int> get exitCode => _exit.future;
@@ -107,6 +123,9 @@ final class NativeSession implements PtySession {
 
   @override
   Stream<Uint8List> get output => _outputController.stream;
+
+  @override
+  void discardOutput() => _cancelOutput();
 
   @override
   int? get pid {
@@ -164,6 +183,9 @@ final class NativeSession implements PtySession {
     if (data.isEmpty) {
       throw ArgumentError.value(data, 'data', 'must not be empty');
     }
+    if (data.length > _inputCapacity) {
+      return false;
+    }
     final sequence = using((arena) {
       final pointer = arena<Uint8>(data.length);
       pointer.asTypedList(data.length).setAll(0, data);
@@ -219,6 +241,7 @@ final class NativeSession implements PtySession {
   @override
   void resize(PtySize size) {
     _checkOpen();
+    _validateSize(size);
     if (!controllerResize(
       _handle,
       size.rows,
@@ -293,6 +316,9 @@ final class NativeSession implements PtySession {
   void _drainCredit() {
     final bytes = _runtime._credit[_handle] ?? 0;
     if (bytes == 0 || _isTerminal) {
+      if (_isTerminal) {
+        _runtime._credit.remove(_handle);
+      }
       _creditScheduled = false;
       return;
     }
@@ -380,7 +406,7 @@ final class NativeSession implements PtySession {
     _cancelOutput();
     controllerSignal(_handle, ProcessSignal.sigterm.signalNumber);
     try {
-      await _exit.future.timeout(const Duration(milliseconds: 250));
+      await _exit.future.timeout(_gracefulCloseTimeout);
     } on TimeoutException {
       controllerClose(_handle);
     } on Object {
@@ -629,6 +655,31 @@ int _spawnNative(PtySpawnOptions options, int outputPort, int eventPort) {
 }
 
 void _validateSpawnOptions(PtySpawnOptions options) {
+  _validateSize(options.initialSize);
+  if (options.maxBufferedInput <= 0 ||
+      options.maxBufferedInput > 64 * 1024 * 1024) {
+    throw RangeError.range(
+      options.maxBufferedInput,
+      1,
+      64 * 1024 * 1024,
+      'maxBufferedInput',
+    );
+  }
+  if (options.maxBufferedOutput <= 0 ||
+      options.maxBufferedOutput > 64 * 1024 * 1024) {
+    throw RangeError.range(
+      options.maxBufferedOutput,
+      1,
+      64 * 1024 * 1024,
+      'maxBufferedOutput',
+    );
+  }
+  if (options.gracefulCloseTimeout.isNegative ||
+      options.gracefulCloseTimeout > const Duration(minutes: 1)) {
+    throw RangeError(
+      'gracefulCloseTimeout must be between zero and one minute',
+    );
+  }
   if (options.executable.isEmpty || options.executable.contains('\u0000')) {
     throw const PtyException('invalid executable in process spawn options');
   }
@@ -651,5 +702,18 @@ void _validateSpawnOptions(PtySpawnOptions options) {
         'invalid environment entry in process spawn options',
       );
     }
+  }
+}
+
+void _validateSize(PtySize size) {
+  if (size.rows <= 0 ||
+      size.rows > 65535 ||
+      size.columns <= 0 ||
+      size.columns > 65535 ||
+      size.pixelWidth < 0 ||
+      size.pixelWidth > 65535 ||
+      size.pixelHeight < 0 ||
+      size.pixelHeight > 65535) {
+    throw RangeError('terminal dimensions are outside native bounds');
   }
 }

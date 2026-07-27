@@ -19,6 +19,7 @@ void main() {
         );
 
         expect(defaults, (0, 0, PtyEnvironmentMode.overlay, null));
+        expect(options.gracefulCloseTimeout, const Duration(milliseconds: 250));
       });
     });
   });

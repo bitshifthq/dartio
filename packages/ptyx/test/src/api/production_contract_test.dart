@@ -31,6 +31,14 @@ void main() {
     expect(String.fromCharCodes(output), 'ready');
   });
 
+  test('fast exits cannot outrun Dart session publication', () async {
+    for (var iteration = 0; iteration < 100; iteration++) {
+      final session = await PtySession.spawn(shell('exit 7'));
+      expect(await session.exitCode, 7);
+      await session.close();
+    }
+  });
+
   test(
     'input exposes all-or-reject, capacity, flush, and terminal state',
     () async {

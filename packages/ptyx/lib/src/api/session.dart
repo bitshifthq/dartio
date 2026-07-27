@@ -13,7 +13,7 @@ part of 'api.dart';
 /// Example:
 ///
 /// ```dart
-/// final session = PtySession.spawn(
+/// final session = await PtySession.spawn(
 ///   const PtySpawnOptions(
 ///     executable: '/bin/sh',
 ///     arguments: ['-c', 'printf hello'],
@@ -82,6 +82,13 @@ abstract interface class PtySession {
   /// this stream has no listener or while its subscription is paused. Cancel
   /// the subscription to discard unread output and allow the child to continue.
   Stream<Uint8List> get output;
+
+  /// Discards buffered and future output without blocking the child.
+  ///
+  /// This is useful when only [exitCode] matters. It has the same transport
+  /// effect as canceling an [output] subscription, but can be called before a
+  /// listener is attached.
+  void discardOutput();
 
   /// The child process identifier.
   ///

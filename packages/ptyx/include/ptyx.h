@@ -18,9 +18,11 @@
 #define PTYX_EXPORT __attribute__((visibility("default")))
 #endif
 
-#define PTYX_ABI_VERSION 1u
+#define PTYX_ABI_VERSION 2u
 
 PTYX_EXPORT uint32_t ptyi_abi_version(void);
+/** Capability bits: signals=1, process groups=2, modes=4, ConPTY=8. */
+PTYX_EXPORT uint32_t ptyi_capabilities(void);
 PTYX_EXPORT bool ptyi_init(void* dart_initialize_api_dl_data);
 
 PTYX_EXPORT uint64_t ptyi_spawn(
@@ -39,6 +41,9 @@ PTYX_EXPORT uint64_t ptyi_spawn(
     size_t output_capacity,
     int64_t output_port,
     int64_t event_port);
+
+/** Publishes a staged session after Dart has installed its routing state. */
+PTYX_EXPORT bool ptyi_activate(uint64_t handle);
 
 /** Returns a nonzero accepted-input sequence, or zero without accepting. */
 PTYX_EXPORT uint64_t ptyi_write(

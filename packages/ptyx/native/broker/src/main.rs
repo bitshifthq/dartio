@@ -16,6 +16,7 @@ const MAX_PAYLOAD: usize = 64 * 1024;
 const FRAME_TIMEOUT: Duration = Duration::from_secs(5);
 const SPAWN_V2: u32 = 0x5854_5950;
 const CONTROL_FD: RawFd = 3;
+#[cfg(target_os = "macos")]
 const POSIX_SPAWN_CLOEXEC_DEFAULT: libc::c_int = 0x4000;
 
 const HELLO: u16 = 1;
@@ -48,7 +49,7 @@ fn hello_payload() -> Vec<u8> {
         "{}|{}|{}",
         env!("CARGO_PKG_VERSION"),
         std::env::consts::ARCH,
-        1
+        2
     )
     .into_bytes()
 }
@@ -144,7 +145,7 @@ fn send_frame(fd: RawFd, frame: &Frame, passed_fd: Option<RawFd>) -> io::Result<
             message.msg_iov = &mut iovec;
             message.msg_iovlen = 1;
             message.msg_control = control.as_mut_ptr().cast();
-            message.msg_controllen = unsafe { libc::CMSG_SPACE(size_of::<RawFd>() as _) };
+            message.msg_controllen = unsafe { libc::CMSG_SPACE(size_of::<RawFd>() as _) } as _;
             let header = unsafe { libc::CMSG_FIRSTHDR(&message) };
             if header.is_null() {
                 return Err(io::Error::other("missing ancillary header"));
@@ -152,7 +153,7 @@ fn send_frame(fd: RawFd, frame: &Frame, passed_fd: Option<RawFd>) -> io::Result<
             unsafe {
                 (*header).cmsg_level = libc::SOL_SOCKET;
                 (*header).cmsg_type = libc::SCM_RIGHTS;
-                (*header).cmsg_len = libc::CMSG_LEN(size_of::<RawFd>() as _);
+                (*header).cmsg_len = libc::CMSG_LEN(size_of::<RawFd>() as _) as _;
                 ptr::copy_nonoverlapping(
                     (&passed_fd as *const RawFd).cast::<u8>(),
                     libc::CMSG_DATA(header),
@@ -265,8 +266,8 @@ fn collect_received_fds(message: &libc::msghdr, received_fds: &mut Vec<OwnedFd>)
                 "unexpected protocol ancillary data",
             ));
         }
-        let data_length =
-            unsafe { (*header).cmsg_len }.saturating_sub(unsafe { libc::CMSG_LEN(0) }) as usize;
+        let data_length = (unsafe { (*header).cmsg_len } as usize)
+            .saturating_sub(unsafe { libc::CMSG_LEN(0) } as usize);
         if data_length == 0 || !data_length.is_multiple_of(size_of::<RawFd>()) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -356,7 +357,11 @@ fn set_nonblocking(fd: RawFd) -> io::Result<()> {
 
 fn socket_pair() -> io::Result<(OwnedFd, OwnedFd)> {
     let mut sockets = [-1; 2];
-    if unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, sockets.as_mut_ptr()) } < 0 {
+    #[cfg(target_os = "macos")]
+    let socket_type = libc::SOCK_STREAM;
+    #[cfg(target_os = "linux")]
+    let socket_type = libc::SOCK_STREAM | libc::SOCK_CLOEXEC;
+    if unsafe { libc::socketpair(libc::AF_UNIX, socket_type, 0, sockets.as_mut_ptr()) } < 0 {
         return Err(io::Error::last_os_error());
     }
     let first = unsafe { OwnedFd::from_raw_fd(sockets[0]) };
@@ -396,12 +401,12 @@ fn spawn_code(code: libc::c_int) -> io::Result<()> {
 
 fn launch_broker_at(path: &CStr) -> io::Result<Client> {
     let (controller, broker) = socket_pair()?;
-    let mut attrs_raw = ptr::null_mut();
-    spawn_code(unsafe { libc::posix_spawnattr_init(&mut attrs_raw) })?;
-    let mut attrs = SpawnAttrs(attrs_raw);
-    let mut actions_raw = ptr::null_mut();
-    spawn_code(unsafe { libc::posix_spawn_file_actions_init(&mut actions_raw) })?;
-    let mut actions = FileActions(actions_raw);
+    let mut attrs_raw = MaybeUninit::<libc::posix_spawnattr_t>::uninit();
+    spawn_code(unsafe { libc::posix_spawnattr_init(attrs_raw.as_mut_ptr()) })?;
+    let mut attrs = SpawnAttrs(unsafe { attrs_raw.assume_init() });
+    let mut actions_raw = MaybeUninit::<libc::posix_spawn_file_actions_t>::uninit();
+    spawn_code(unsafe { libc::posix_spawn_file_actions_init(actions_raw.as_mut_ptr()) })?;
+    let mut actions = FileActions(unsafe { actions_raw.assume_init() });
 
     let mut empty = MaybeUninit::<libc::sigset_t>::uninit();
     if unsafe { libc::sigemptyset(empty.as_mut_ptr()) } < 0 {
@@ -409,7 +414,11 @@ fn launch_broker_at(path: &CStr) -> io::Result<Client> {
     }
     let empty = unsafe { empty.assume_init() };
     spawn_code(unsafe { libc::posix_spawnattr_setsigmask(&mut attrs.0, &empty) })?;
-    let flags = (POSIX_SPAWN_CLOEXEC_DEFAULT | libc::POSIX_SPAWN_SETSIGMASK) as libc::c_short;
+    #[cfg(target_os = "macos")]
+    let flags = POSIX_SPAWN_CLOEXEC_DEFAULT | libc::POSIX_SPAWN_SETSIGMASK;
+    #[cfg(target_os = "linux")]
+    let flags = libc::POSIX_SPAWN_SETSIGMASK;
+    let flags = flags as libc::c_short;
     spawn_code(unsafe { libc::posix_spawnattr_setflags(&mut attrs.0, flags) })?;
     spawn_code(unsafe {
         libc::posix_spawn_file_actions_adddup2(&mut actions.0, broker.as_raw_fd(), CONTROL_FD)
@@ -740,7 +749,10 @@ struct Slot {
 
 struct Broker {
     control: OwnedFd,
+    #[cfg(target_os = "macos")]
     kqueue: OwnedFd,
+    #[cfg(target_os = "linux")]
+    signal_fd: OwnedFd,
     slots: Vec<Slot>,
     signal_after_reap: u32,
     injected_cleanups: u32,
@@ -750,12 +762,17 @@ impl Broker {
     fn run() -> io::Result<()> {
         let control = unsafe { OwnedFd::from_raw_fd(CONTROL_FD) };
         set_cloexec(control.as_raw_fd())?;
+        #[cfg(target_os = "macos")]
         let kqueue = unsafe { libc::kqueue() };
+        #[cfg(target_os = "macos")]
         if kqueue < 0 {
             return Err(io::Error::last_os_error());
         }
+        #[cfg(target_os = "macos")]
         let kqueue = unsafe { OwnedFd::from_raw_fd(kqueue) };
+        #[cfg(target_os = "macos")]
         set_cloexec(kqueue.as_raw_fd())?;
+        #[cfg(target_os = "macos")]
         let change = libc::kevent {
             ident: control.as_raw_fd() as usize,
             filter: libc::EVFILT_READ,
@@ -764,6 +781,7 @@ impl Broker {
             data: 0,
             udata: ptr::null_mut(),
         };
+        #[cfg(target_os = "macos")]
         if unsafe {
             libc::kevent(
                 kqueue.as_raw_fd(),
@@ -777,9 +795,14 @@ impl Broker {
         {
             return Err(io::Error::last_os_error());
         }
+        #[cfg(target_os = "linux")]
+        let signal_fd = create_sigchld_fd()?;
         let mut broker = Self {
             control,
+            #[cfg(target_os = "macos")]
             kqueue,
+            #[cfg(target_os = "linux")]
+            signal_fd,
             slots: Vec::new(),
             signal_after_reap: 0,
             injected_cleanups: 0,
@@ -793,6 +816,7 @@ impl Broker {
         result
     }
 
+    #[cfg(target_os = "macos")]
     fn event_loop(&mut self) -> io::Result<()> {
         loop {
             let mut events: [MaybeUninit<libc::kevent>; 32] =
@@ -831,6 +855,50 @@ impl Broker {
                 } else if event.filter == libc::EVFILT_PROC {
                     self.reap_event(event.udata as usize as u64)?;
                 }
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn event_loop(&mut self) -> io::Result<()> {
+        loop {
+            let mut descriptors = [
+                libc::pollfd {
+                    fd: self.control.as_raw_fd(),
+                    events: libc::POLLIN,
+                    revents: 0,
+                },
+                libc::pollfd {
+                    fd: self.signal_fd.as_raw_fd(),
+                    events: libc::POLLIN,
+                    revents: 0,
+                },
+            ];
+            let ready = unsafe { libc::poll(descriptors.as_mut_ptr(), descriptors.len() as _, -1) };
+            if ready < 0 {
+                let error = io::Error::last_os_error();
+                if error.kind() == io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(error);
+            }
+            if descriptors[0].revents & (libc::POLLHUP | libc::POLLERR) != 0 {
+                return Ok(());
+            }
+            if descriptors[0].revents & libc::POLLIN != 0 {
+                match receive_frame(self.control.as_raw_fd())? {
+                    Some((frame, passed)) => {
+                        drop(passed);
+                        if !self.handle_request(frame)? {
+                            return Ok(());
+                        }
+                    }
+                    None => return Ok(()),
+                }
+            }
+            if descriptors[1].revents & libc::POLLIN != 0 {
+                drain_sigchld(self.signal_fd.as_raw_fd())?;
+                self.reap_available()?;
             }
         }
     }
@@ -1047,6 +1115,7 @@ impl Broker {
         }
     }
 
+    #[cfg(target_os = "macos")]
     fn register_process(&self, pid: libc::pid_t, session: u64) -> io::Result<()> {
         let change = libc::kevent {
             ident: pid as usize,
@@ -1072,6 +1141,12 @@ impl Broker {
         Ok(())
     }
 
+    #[cfg(target_os = "linux")]
+    fn register_process(&self, _pid: libc::pid_t, _session: u64) -> io::Result<()> {
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
     fn reap_event(&mut self, session: u64) -> io::Result<()> {
         let pid = match self.lookup(session) {
             Some(SlotState::Running { pid }) => *pid,
@@ -1091,6 +1166,44 @@ impl Broker {
         frame.session = session;
         frame.code = exit.code;
         send_frame(self.control.as_raw_fd(), &frame, None)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn reap_available(&mut self) -> io::Result<()> {
+        loop {
+            let mut status = 0;
+            let pid = unsafe { libc::waitpid(-1, &mut status, libc::WNOHANG) };
+            if pid == 0 {
+                return Ok(());
+            }
+            if pid < 0 {
+                let error = io::Error::last_os_error();
+                if error.kind() == io::ErrorKind::Interrupted {
+                    continue;
+                }
+                if error.raw_os_error() == Some(libc::ECHILD) {
+                    return Ok(());
+                }
+                return Err(error);
+            }
+            let Some((index, generation)) =
+                self.slots.iter().enumerate().find_map(|(index, slot)| {
+                    matches!(slot.state, SlotState::Running { pid: child } if child == pid)
+                        .then_some((index, slot.generation))
+                })
+            else {
+                continue;
+            };
+            let session = make_session(index, generation);
+            let exit = ExitStatus {
+                code: decode_wait_status(status),
+            };
+            self.slots[index].state = SlotState::Exited(exit);
+            let mut frame = Frame::new(EXIT);
+            frame.session = session;
+            frame.code = exit.code;
+            send_frame(self.control.as_raw_fd(), &frame, None)?;
+        }
     }
 
     fn running_jobs(&self) -> usize {
@@ -1310,7 +1423,7 @@ unsafe fn exec_target(
 }
 
 unsafe fn child_fail(error_fd: RawFd) -> ! {
-    let code = *libc::__error();
+    let code = current_errno();
     let bytes = code.to_ne_bytes();
     let mut offset = 0;
     while offset < bytes.len() {
@@ -1321,13 +1434,23 @@ unsafe fn child_fail(error_fd: RawFd) -> ! {
         );
         if wrote > 0 {
             offset += wrote as usize;
-        } else if wrote < 0 && *libc::__error() == libc::EINTR {
+        } else if wrote < 0 && current_errno() == libc::EINTR {
             continue;
         } else {
             break;
         }
     }
     libc::_exit(127)
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn current_errno() -> libc::c_int {
+    *libc::__error()
+}
+
+#[cfg(target_os = "linux")]
+unsafe fn current_errno() -> libc::c_int {
+    *libc::__errno_location()
 }
 
 fn read_exec_result(fd: RawFd) -> io::Result<Option<i32>> {
@@ -1543,6 +1666,65 @@ fn wait_exact(pid: libc::pid_t) -> io::Result<i32> {
             continue;
         }
         return Err(error);
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn create_sigchld_fd() -> io::Result<OwnedFd> {
+    let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
+    action.sa_sigaction = libc::SIG_DFL;
+    if unsafe { libc::sigemptyset(&mut action.sa_mask) } < 0
+        || unsafe { libc::sigaction(libc::SIGCHLD, &action, ptr::null_mut()) } < 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    let mut mask = MaybeUninit::<libc::sigset_t>::uninit();
+    if unsafe { libc::sigemptyset(mask.as_mut_ptr()) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let mut mask = unsafe { mask.assume_init() };
+    if unsafe { libc::sigaddset(&mut mask, libc::SIGCHLD) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let mask_result = unsafe { libc::pthread_sigmask(libc::SIG_BLOCK, &mask, ptr::null_mut()) };
+    if mask_result != 0 {
+        return Err(io::Error::from_raw_os_error(mask_result));
+    }
+    let fd = unsafe { libc::signalfd(-1, &mask, libc::SFD_CLOEXEC | libc::SFD_NONBLOCK) };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+}
+
+#[cfg(target_os = "linux")]
+fn drain_sigchld(fd: RawFd) -> io::Result<()> {
+    let mut info = MaybeUninit::<libc::signalfd_siginfo>::uninit();
+    loop {
+        let read = unsafe {
+            libc::read(
+                fd,
+                info.as_mut_ptr().cast(),
+                size_of::<libc::signalfd_siginfo>(),
+            )
+        };
+        if read == size_of::<libc::signalfd_siginfo>() as isize {
+            continue;
+        }
+        if read < 0 {
+            let error = io::Error::last_os_error();
+            if error.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            if error.kind() == io::ErrorKind::WouldBlock {
+                return Ok(());
+            }
+            return Err(error);
+        }
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "partial SIGCHLD record",
+        ));
     }
 }
 

@@ -1,9 +1,12 @@
-use super::{set_cloexec, set_nonblocking, GenerationRegistry};
+use super::{dup_cloexec, set_cloexec, set_nonblocking, GenerationRegistry};
 use crate::broker_client::{BrokerClient, BrokerOwner, BrokerSession, BrokerSpawn};
 use std::collections::{HashMap, VecDeque};
 use std::ffi::CString;
 use std::io;
+#[cfg(target_os = "linux")]
+use std::mem::MaybeUninit;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+#[cfg(target_os = "macos")]
 use std::ptr;
 use std::sync::mpsc::{self, Receiver, Sender, SyncSender};
 use std::sync::Mutex;
@@ -88,6 +91,8 @@ struct Session {
     active: bool,
     read_filter_enabled: Option<bool>,
     write_filter_enabled: Option<bool>,
+    #[cfg(target_os = "linux")]
+    readiness_registered: bool,
 }
 
 impl Session {
@@ -118,6 +123,8 @@ impl Session {
             active: false,
             read_filter_enabled: None,
             write_filter_enabled: None,
+            #[cfg(target_os = "linux")]
+            readiness_registered: false,
         }
     }
 
@@ -355,36 +362,31 @@ pub struct IntegratedRuntime {
 }
 
 impl IntegratedRuntime {
-    pub fn new() -> Self {
+    pub fn try_new() -> io::Result<Self> {
         let mut pipe = [-1; 2];
-        assert_eq!(unsafe { libc::pipe(pipe.as_mut_ptr()) }, 0);
+        #[cfg(target_os = "macos")]
+        let pipe_result = unsafe { libc::pipe(pipe.as_mut_ptr()) };
+        #[cfg(target_os = "linux")]
+        let pipe_result =
+            unsafe { libc::pipe2(pipe.as_mut_ptr(), libc::O_CLOEXEC | libc::O_NONBLOCK) };
+        if pipe_result < 0 {
+            return Err(io::Error::last_os_error());
+        }
         let read = unsafe { OwnedFd::from_raw_fd(pipe[0]) };
         let write = unsafe { OwnedFd::from_raw_fd(pipe[1]) };
-        set_cloexec(read.as_raw_fd()).unwrap();
-        set_cloexec(write.as_raw_fd()).unwrap();
-        set_nonblocking(read.as_raw_fd()).unwrap();
-        set_nonblocking(write.as_raw_fd()).unwrap();
-        let reactor_wake = unsafe { libc::dup(write.as_raw_fd()) };
-        assert!(reactor_wake >= 0);
-        let reactor_wake = unsafe { OwnedFd::from_raw_fd(reactor_wake) };
-        set_cloexec(reactor_wake.as_raw_fd()).unwrap();
-        set_nonblocking(reactor_wake.as_raw_fd()).unwrap();
+        set_cloexec(read.as_raw_fd())?;
+        set_cloexec(write.as_raw_fd())?;
+        set_nonblocking(read.as_raw_fd())?;
+        set_nonblocking(write.as_raw_fd())?;
+        let reactor_wake = dup_cloexec(write.as_raw_fd())?;
         let (command_sender, command_receiver) = mpsc::sync_channel(COMMAND_CAPACITY);
         let (notice_sender, notice_receiver) = mpsc::sync_channel(NOTICE_CAPACITY);
-        let broker_reactor_wake = unsafe { libc::dup(write.as_raw_fd()) };
-        assert!(broker_reactor_wake >= 0);
-        let broker_reactor_wake = unsafe { OwnedFd::from_raw_fd(broker_reactor_wake) };
-        set_cloexec(broker_reactor_wake.as_raw_fd()).unwrap();
-        set_nonblocking(broker_reactor_wake.as_raw_fd()).unwrap();
-        let broker_path = CString::new(
-            crate::broker_materializer::broker_path()
-                .unwrap()
-                .as_os_str()
-                .as_encoded_bytes(),
-        )
-        .unwrap();
+        let broker_reactor_wake = dup_cloexec(write.as_raw_fd())?;
+        let materialized = crate::broker_materializer::broker_path()?;
+        let broker_path = CString::new(materialized.as_os_str().as_encoded_bytes())
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "NUL broker path"))?;
         let broker =
-            BrokerOwner::launch(&broker_path, command_sender.clone(), broker_reactor_wake).unwrap();
+            BrokerOwner::launch(&broker_path, command_sender.clone(), broker_reactor_wake)?;
         let broker_client = broker.client();
         let thread = thread::Builder::new()
             .name("ptyx-integrated-reactor".to_owned())
@@ -396,19 +398,18 @@ impl IntegratedRuntime {
                     notice_sender,
                     broker_client,
                 )
-            })
-            .unwrap();
-        Self {
+            })?;
+        Ok(Self {
             commands: command_sender,
             notices: Some(notice_receiver),
             wake: WakeWriter(write),
             thread: Mutex::new(Some(thread)),
             broker,
-        }
+        })
     }
 
-    pub fn take_notifications(&mut self) -> Receiver<Notice> {
-        self.notices.take().unwrap()
+    pub fn take_notifications(&mut self) -> Option<Receiver<Notice>> {
+        self.notices.take()
     }
 
     pub(crate) fn spawn_staged(
@@ -587,12 +588,6 @@ impl IntegratedRuntime {
     }
 }
 
-impl Default for IntegratedRuntime {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl Drop for IntegratedRuntime {
     fn drop(&mut self) {
         let _ = self.commands.send(Command::Shutdown);
@@ -603,6 +598,7 @@ impl Drop for IntegratedRuntime {
     }
 }
 
+#[cfg(target_os = "macos")]
 fn reactor(
     wake: OwnedFd,
     self_wake: OwnedFd,
@@ -696,6 +692,117 @@ fn reactor(
             }
         }
         refresh_due_outputs(-1, &notices, &mut sessions, &mut counters);
+        if shutdown {
+            shutdown_all(&mut sessions, &broker);
+            return;
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn reactor(
+    wake: OwnedFd,
+    self_wake: OwnedFd,
+    commands: Receiver<Command>,
+    notices: SyncSender<Notice>,
+    broker: BrokerClient,
+) {
+    let epoll = unsafe { libc::epoll_create1(libc::EPOLL_CLOEXEC) };
+    if epoll < 0 {
+        return;
+    }
+    let epoll = unsafe { OwnedFd::from_raw_fd(epoll) };
+    let mut wake_event = libc::epoll_event {
+        events: libc::EPOLLIN as u32,
+        u64: 0,
+    };
+    if unsafe {
+        libc::epoll_ctl(
+            epoll.as_raw_fd(),
+            libc::EPOLL_CTL_ADD,
+            wake.as_raw_fd(),
+            &mut wake_event,
+        )
+    } < 0
+    {
+        return;
+    }
+
+    let mut sessions: GenerationRegistry<Session> = GenerationRegistry::new();
+    let mut counters = RuntimeCounters::default();
+    let mut rotation = 0;
+    loop {
+        let mut events: [MaybeUninit<libc::epoll_event>; 128] =
+            unsafe { MaybeUninit::uninit().assume_init() };
+        let ready = unsafe {
+            libc::epoll_wait(
+                epoll.as_raw_fd(),
+                events.as_mut_ptr().cast(),
+                events.len() as i32,
+                output_poll_timeout(&sessions),
+            )
+        };
+        if ready < 0 {
+            if io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            shutdown_all(&mut sessions, &broker);
+            return;
+        }
+        counters.reactor_wakeups += 1;
+        counters.reactor_events += ready as u64;
+        let mut ready_events: Vec<_> = events[..ready as usize]
+            .iter()
+            .map(|event| unsafe { event.assume_init() })
+            .collect();
+        if !ready_events.is_empty() {
+            let length = ready_events.len();
+            ready_events.rotate_left(rotation % length);
+            rotation = rotation.wrapping_add(1);
+        }
+        let mut shutdown = false;
+        for event in ready_events {
+            let handle = event.u64;
+            if handle == 0 {
+                drain_wake(wake.as_raw_fd());
+                counters.command_wakeups += 1;
+                let (requested_shutdown, more_commands) = process_commands(
+                    epoll.as_raw_fd(),
+                    &commands,
+                    &notices,
+                    &mut sessions,
+                    &mut counters,
+                    &broker,
+                );
+                shutdown |= requested_shutdown;
+                if more_commands {
+                    let byte = [1_u8];
+                    unsafe {
+                        libc::write(self_wake.as_raw_fd(), byte.as_ptr().cast(), byte.len());
+                    }
+                }
+                continue;
+            }
+            if event.events & (libc::EPOLLIN | libc::EPOLLHUP | libc::EPOLLERR) as u32 != 0 {
+                read_ready(
+                    epoll.as_raw_fd(),
+                    handle,
+                    &notices,
+                    &mut sessions,
+                    &mut counters,
+                );
+            }
+            if event.events & libc::EPOLLOUT as u32 != 0 {
+                write_ready(
+                    epoll.as_raw_fd(),
+                    handle,
+                    &notices,
+                    &mut sessions,
+                    &mut counters,
+                );
+            }
+        }
+        refresh_due_outputs(epoll.as_raw_fd(), &notices, &mut sessions, &mut counters);
         if shutdown {
             shutdown_all(&mut sessions, &broker);
             return;
@@ -994,6 +1101,7 @@ fn update_read_filter(
     if session.read_filter_enabled == Some(enabled) {
         return Ok(());
     }
+    #[cfg(target_os = "macos")]
     if kqueue >= 0 {
         set_filter(
             kqueue,
@@ -1004,6 +1112,8 @@ fn update_read_filter(
         )?;
     }
     session.read_filter_enabled = Some(enabled);
+    #[cfg(target_os = "linux")]
+    update_epoll_interest(kqueue, handle, session)?;
     Ok(())
 }
 
@@ -1016,6 +1126,7 @@ fn update_write_filter(
     if session.write_filter_enabled == Some(enabled) {
         return Ok(());
     }
+    #[cfg(target_os = "macos")]
     if kqueue >= 0 {
         set_filter(
             kqueue,
@@ -1026,9 +1137,55 @@ fn update_write_filter(
         )?;
     }
     session.write_filter_enabled = Some(enabled);
+    #[cfg(target_os = "linux")]
+    update_epoll_interest(kqueue, handle, session)?;
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
+fn update_epoll_interest(epoll: RawFd, handle: u64, session: &mut Session) -> io::Result<()> {
+    let mut events = 0_u32;
+    if session.read_filter_enabled == Some(true) {
+        events |= libc::EPOLLIN as u32;
+    }
+    if session.write_filter_enabled == Some(true) {
+        events |= libc::EPOLLOUT as u32;
+    }
+    if events == 0 {
+        if !session.readiness_registered {
+            return Ok(());
+        }
+        let result = unsafe {
+            libc::epoll_ctl(
+                epoll,
+                libc::EPOLL_CTL_DEL,
+                session.master.as_raw_fd(),
+                std::ptr::null_mut(),
+            )
+        };
+        if result < 0 && io::Error::last_os_error().raw_os_error() != Some(libc::ENOENT) {
+            return Err(io::Error::last_os_error());
+        }
+        session.readiness_registered = false;
+        return Ok(());
+    }
+    let operation = if session.readiness_registered {
+        libc::EPOLL_CTL_MOD
+    } else {
+        libc::EPOLL_CTL_ADD
+    };
+    let mut event = libc::epoll_event {
+        events,
+        u64: handle,
+    };
+    if unsafe { libc::epoll_ctl(epoll, operation, session.master.as_raw_fd(), &mut event) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    session.readiness_registered = true;
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
 fn set_filter(
     kqueue: RawFd,
     fd: RawFd,
@@ -1397,6 +1554,7 @@ fn send_notice(notices: &SyncSender<Notice>, notice: Notice, counters: &mut Runt
     }
 }
 
+#[cfg(target_os = "macos")]
 fn event(
     ident: usize,
     filter: libc::c_short,
@@ -1414,6 +1572,7 @@ fn event(
     }
 }
 
+#[cfg(target_os = "macos")]
 fn submit(kqueue: RawFd, change: &libc::kevent) -> io::Result<()> {
     let result = unsafe { libc::kevent(kqueue, change, 1, ptr::null_mut(), 0, ptr::null()) };
     if result < 0 {

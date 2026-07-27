@@ -43,7 +43,12 @@ impl Drop for InputAdmission {
 
 #[no_mangle]
 pub extern "C" fn ptyi_abi_version() -> u32 {
-    1
+    2
+}
+
+#[no_mangle]
+pub extern "C" fn ptyi_capabilities() -> u32 {
+    1 | 2 | 4
 }
 
 fn runtime() -> Option<&'static Mutex<IntegratedRuntime>> {
@@ -87,8 +92,12 @@ pub unsafe extern "C" fn ptyi_init(api_data: *mut c_void) -> bool {
         if RUNTIME.get().is_some() {
             return true;
         }
-        let mut runtime = IntegratedRuntime::new();
-        let notifications = runtime.take_notifications();
+        let Ok(mut runtime) = IntegratedRuntime::try_new() else {
+            return false;
+        };
+        let Some(notifications) = runtime.take_notifications() else {
+            return false;
+        };
         let notifier = std::thread::Builder::new()
             .name("ptyx-dart-notifier".to_owned())
             .spawn(move || {
@@ -178,15 +187,23 @@ pub unsafe extern "C" fn ptyi_spawn(
                 },
             );
         }
-        if !with_runtime(|runtime| runtime.activate(handle)).unwrap_or(false) {
-            if let Ok(mut entries) = ports().lock() {
-                entries.remove(&handle);
-            }
-            return 0;
-        }
         handle
     }))
     .unwrap_or(0)
+}
+
+#[no_mangle]
+pub extern "C" fn ptyi_activate(handle: u64) -> bool {
+    catch_unwind(AssertUnwindSafe(|| {
+        let activated = with_runtime(|runtime| runtime.activate(handle)).unwrap_or(false);
+        if !activated {
+            if let Ok(mut entries) = ports().lock() {
+                entries.remove(&handle);
+            }
+        }
+        activated
+    }))
+    .unwrap_or(false)
 }
 
 #[no_mangle]
