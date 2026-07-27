@@ -1,0 +1,122 @@
+{
+  "schema": 1,
+  "base_commit": "4c6120c38dec4ac36a7fb349c274ae3123fe4224",
+  "date": "2026-07-27",
+  "host": {
+    "os": "macOS 26.5.2 (25F84)",
+    "architecture": "x86_64",
+    "cpu": "Intel(R) Core(TM) i9-9880H CPU @ 2.30GHz",
+    "memory_bytes": 34359738368,
+    "dart": "3.12.2 stable",
+    "rustc": "1.95.0",
+    "cargo": "1.95.0",
+    "clang": "Apple clang 21.0.0",
+    "xcode": "26.5 (17F42)",
+    "zig": "0.16.0",
+    "open_file_soft_limit": 256
+  },
+  "boundary": "Dart public API through release native asset, PTY, and child",
+  "commands": {
+    "workload": "dart --packages=<base>/.dart_tool/package_config.json benchmark/base_scorecard.dart <workload>",
+    "profile": "xctrace record --template 'Time Profiler' --launch -- <dart> --packages=<base>/.dart_tool/package_config.json benchmark/base_scorecard.dart input"
+  },
+  "interactive_round_trip": {
+    "unit": "microseconds",
+    "repetitions_per_run": 400,
+    "runs": [
+      {
+        "mean": 1363.63,
+        "p50": 1356,
+        "p95": 1572,
+        "p99": 1813,
+        "minimum": 1106,
+        "maximum": 3585
+      },
+      {
+        "mean": 1403.86,
+        "p50": 1420,
+        "p95": 1564,
+        "p99": 1675,
+        "minimum": 1108,
+        "maximum": 3801
+      },
+      {
+        "mean": 1420.7275,
+        "p50": 1433,
+        "p95": 1569,
+        "p99": 1674,
+        "minimum": 1145,
+        "maximum": 3629
+      },
+      {
+        "mean": 1415.725,
+        "p50": 1426,
+        "p95": 1571,
+        "p99": 1693,
+        "minimum": 1131,
+        "maximum": 3753
+      },
+      {
+        "mean": 1422.31,
+        "p50": 1447,
+        "p95": 1537,
+        "p99": 1594,
+        "minimum": 1166,
+        "maximum": 3894
+      }
+    ]
+  },
+  "output": {
+    "bytes_per_run": 33554432,
+    "integrity": "Every received byte checked as zero",
+    "mib_per_second": [
+      84.0181689290309,
+      89.28945128841887,
+      90.63692264988373,
+      56.057543067959266,
+      90.285046821261
+    ]
+  },
+  "input": {
+    "bytes_per_run": 33554432,
+    "integrity": "Child-reported byte count checked",
+    "mib_per_second": [
+      4.634357854686233,
+      4.577265238502696,
+      4.618339686677404,
+      4.550464581103427,
+      4.54684701735361
+    ],
+    "profile": {
+      "samples": 8619,
+      "write_syscall_samples": 6962,
+      "poll_samples": 168,
+      "memmove_leaf_samples": 20,
+      "mutex_lock_leaf_samples": 16,
+      "observation": "80.8% of sampled CPU stacks ended in write(2)"
+    }
+  },
+  "spawn_output_exit_close": {
+    "unit": "microseconds",
+    "samples": 50,
+    "mean": 25972.88,
+    "p50": 24215,
+    "p95": 32638,
+    "p99": 79076,
+    "minimum": 20661,
+    "maximum": 79076
+  },
+  "idle_100": {
+    "requested_sessions": 100,
+    "created_sessions": 60,
+    "result": "PtyException: Too many open files (os error 24)",
+    "spawn_elapsed_microseconds": 1512040,
+    "rss_delta_bytes_at_failure": 20365312,
+    "threads_before": 12
+  },
+  "notes": [
+    "The 56.1 MiB/s output run is retained as observed variance.",
+    "The first attempted output harness flattened chunks into per-byte stream events and was rejected before measurement because it benchmarked the harness.",
+    "The first sample(1) attempt attached to the Dart launcher shell and was rejected. The retained profile was recorded by launching the Dart VM under xctrace."
+  ]
+}
