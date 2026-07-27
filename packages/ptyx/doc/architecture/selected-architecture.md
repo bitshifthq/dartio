@@ -48,6 +48,9 @@ equivalent language comparison.
 
 - One process-wide controller owns a bounded command queue, a generation
   registry, Dart notification routing, and platform reactor state.
+- The native module is pinned before controller threads start. The controller
+  intentionally lives for the host process, so library unloading cannot race
+  a reactor, notifier, broker-controller, closer, or TLS destructor.
 - Controller initialization is transactional. The registry, reactor,
   notifier, broker or IOCP owner, and failure route either become observable
   together or are all torn down before initialization reports failure.
@@ -83,9 +86,10 @@ parent of every PTY child.
 - It atomically opens PTY descriptors with close-on-exec, forks only from its
   single thread, establishes the session and controlling terminal, and runs a
   fixed async-signal-safe child syscall sequence before `exec`.
-- It owns child and process-group identities until exact `waitpid` completion.
-  The controller sends signal requests through the broker and never signals a
-  cached PID after broker loss.
+- It observes direct-child status with non-reaping `waitid`, retains the zombie
+  leader to prevent process-group ID reuse, and performs exact `waitpid` reap
+  only after descendant cleanup. The controller sends signal requests through
+  the broker and never signals a cached PID after broker loss.
 - PTY masters move to the controller with `SCM_RIGHTS`. A versioned, bounded,
   nonblocking protocol carries generation IDs, spawn results, signal
   acknowledgements, exit status, and cleanup state.
@@ -97,8 +101,11 @@ parent of every PTY child.
   lengths. Close, release, abort, and signal acknowledgements are completed by
   the broker-controller thread and do not block the PTY readiness reactor.
 - Controller EOF makes the broker terminate and reap all jobs. Broker EOF
-  makes the controller close PTY masters and report cleanup uncertainty; it
-  does not guess that a cached numeric process group is still the owned job.
+  makes the controller issue a terminal-bound signal (`SIGQUIT` on Linux,
+  `SIGKILL` on macOS), resolve the foreground group through the still-owned
+  terminal, and force that group down before closing each PTY master and
+  reporting any remaining cleanup uncertainty. It does not signal a cached
+  group unless `tcgetsid` still binds that identity to the owned terminal.
 
 For ordinary Dart command-line applications, the library may materialize an
 integrity-checked embedded broker to an owner-only, version-and-hash-qualified
@@ -119,18 +126,20 @@ reset, and `execve`.
 
 The controller observes only PTY masters and its wake descriptor through
 `epoll`; it never waits for or signals a PTY child. The broker blocks
-`SIGCHLD`, consumes it through `signalfd`, and drains exact `waitpid` results.
+`SIGCHLD`, consumes it through `signalfd`, and periodically re-observes every
+known direct child so rapid exits do not depend on one signal edge. It records
+status with `waitid(..., WNOWAIT)` and retains the zombie leader until release.
 This remains safe because no other thread or host runtime is a parent of those
-children. A generation-tagged live-job entry is removed before its numeric PID
-can be reused.
+children. A generation-tagged live-job entry is removed only after group
+cleanup and exact reap.
 
 Controller loss closes the broker channel, terminates each owned process
 group, reaps every child, and exits. Broker loss makes the controller drop
-all PTY masters and produce a typed infrastructure failure; it never signals
-cached numeric identities. Linux helper materialization obeys the same
-owner/mode/hash/ABI checks as macOS. A no-exec cache or temporary filesystem
-requires an explicit executable helper path; it never triggers in-process
-fork fallback.
+all PTY masters after a terminal-bound forced signal and produce a typed
+infrastructure failure; it never signals cached numeric identities. Linux
+helper materialization obeys the same owner/mode/hash/ABI checks as macOS. A
+no-exec cache or temporary filesystem requires an explicit executable helper
+path; it never triggers in-process fork fallback.
 
 Linux x64 requires a retained runtime integration run before release. Linux
 arm64 must cross-build during development and run on a representative arm64
@@ -225,8 +234,9 @@ The decisive results are:
   `SIGCHLD` behavior can steal exit status, making broker-owned parenting a
   selection requirement;
 - the Windows slice cross-compiled for x64 and arm64 and established the
-  required ownership model, while also identifying runtime qualification and
-  pre-build-26100 close behavior as unresolved gates.
+  required ownership model. The production implementation subsequently
+  bounded older `ClosePseudoConsole` behavior with admission and quarantine;
+  exact-target runtime qualification remains a release gate.
 
 Independent correctness and platform re-reviews passed this architecture for
 implementation. The corrected vertical slice passed its correctness checks,

@@ -7,12 +7,17 @@ returns to a live state after its release transition.
 ## Ownership model
 
 Before spawn commits, a native spawn transaction owns every acquired object.
+An unpublished staged entry has a five-second activation deadline; expiry
+commits native abandonment so isolate loss between native spawn and Dart
+publication cannot orphan the child. The native module is pinned for the
+process lifetime before any controller thread starts, ensuring those threads
+and their TLS destructors cannot outlive loaded code.
 After commit, a generation-checked session entry owns:
 
 - the PTY master and platform child or job identity;
 - direct-child exit observation and exact-once reap state;
 - input queue bytes, sequence numbers, capacity waiters, and flush barriers;
-- output buffers, Dart-posted byte credit, and external-data finalizers;
+- output buffers, one copied Dart message, and explicit delivery credit;
 - reactor registrations or unavoidable platform workers;
 - Dart output, event, and control ports;
 - mode-observer registration and timers.
@@ -72,7 +77,7 @@ identity, not an unchecked numeric PID, controls signal and cleanup decisions.
 
 | From | Event | To | Result |
 |---|---|---|---|
-| running | direct child status is reaped | exited | typed exit status is cached once |
+| running | direct child status is observed | exited | typed exit status is cached once while the owned Unix leader remains unreaped until cleanup |
 | running | wait facility fails | exitObservationFailed | exit future receives a dedicated failure |
 | running | signal races before reap commit | running or exited | delivery result reflects the OS operation |
 | exited | signal request | exited | returns already-exited without an OS signal |
@@ -92,7 +97,7 @@ identity, not an unchecked numeric PID, controls signal and cleanup decisions.
 | pause or cancel versus close | close commits discard and cleanup; a prior cancel also yields discard, and no path delivers late bytes |
 | repeated or concurrent close | atomic installation of one shared close completion makes all callers observe one result |
 | native output post versus port closure | failed post returns credit and commits native shutdown; no Dart acknowledgment is awaited |
-| external-data finalizer versus shutdown | each buffer owns one credit token consumed by either failed-post rollback or its one finalizer |
+| copied output post versus shutdown | a successful post retains one charged message until Dart delivery or discard returns credit; a failed post rolls the same credit back before shutdown |
 | isolate loss versus explicit close | the native session entry accepts the first shutdown cause and merges later causes into the same cleanup |
 | reactor failure versus public operations | the reactor commits affected sub-resources to typed failures, then performs session cleanup without corrupting other sessions |
 | mode timer versus close | generation and observer state are checked at callback commit; a late callback is discarded without touching released state |

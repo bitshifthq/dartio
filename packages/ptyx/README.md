@@ -54,7 +54,8 @@ terminal output. Chunk boundaries have no semantic meaning.
 ## Backpressure
 
 Input and output memory are bounded per session. `tryWrite` accepts a complete
-buffer or rejects it without accepting any bytes. `write` waits for capacity,
+buffer, returns `false` only for temporary capacity pressure, and throws
+`PtyInputException` after permanent input failure. `write` waits for capacity,
 and `flush` completes after all earlier accepted bytes have reached the PTY
 master:
 
@@ -68,11 +69,11 @@ unmodified:
 
 ```dart
 final outputDone = session.output.forEach(stdout.add);
-final line = stdin.readLineSync();
-if (line != null) {
-  await session.write(Uint8List.fromList('$line\n'.codeUnits));
+await for (final bytes in stdin) {
+  await session.write(Uint8List.fromList(bytes));
   await session.flush();
 }
+await outputDone;
 ```
 
 An output-heavy child can block normally when `output` has no listener or its

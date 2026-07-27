@@ -177,7 +177,7 @@ jobs:
       - run: cargo fmt --manifest-path packages/ptyx/native/Cargo.toml -- --check
       - if: runner.os != 'Windows'
         run: cargo fmt --manifest-path packages/ptyx/native/broker/Cargo.toml -- --check
-      - run: cargo test --manifest-path packages/ptyx/native/Cargo.toml
+      - run: cargo test --manifest-path packages/ptyx/native/Cargo.toml --all-features
       - run: cargo build --manifest-path packages/ptyx/native/Cargo.toml
       - name: run C ABI harness
         if: runner.os != 'Windows'
@@ -195,6 +195,12 @@ jobs:
             LD_LIBRARY_PATH="$GITHUB_WORKSPACE/packages/ptyx/native/target/debug" \
               "$RUNNER_TEMP/ptyx-abi-harness"
           fi
+          if [[ "$RUNNER_OS" == "macOS" ]]; then
+            LIBRARY="$GITHUB_WORKSPACE/packages/ptyx/native/target/debug/libptyx.dylib"
+          else
+            LIBRARY="$GITHUB_WORKSPACE/packages/ptyx/native/target/debug/libptyx.so"
+          fi
+          dart run packages/ptyx/tool/verify_abi.dart "$LIBRARY"
       - name: run C ABI harness
         if: runner.os == 'Windows'
         shell: pwsh
@@ -206,12 +212,14 @@ jobs:
             /link /LIBPATH:packages/ptyx/native/target/debug ptyx.dll.lib
           $env:PATH = "$env:GITHUB_WORKSPACE/packages/ptyx/native/target/debug;$env:PATH"
           & "$env:RUNNER_TEMP/ptyx-abi-harness.exe"
+          dart run packages/ptyx/tool/verify_abi.dart `
+            "$env:GITHUB_WORKSPACE/packages/ptyx/native/target/debug/ptyx.dll"
       - if: runner.os != 'Windows'
         run: cargo test --manifest-path packages/ptyx/native/broker/Cargo.toml
       - name: run Unix broker ownership harness
         if: runner.os != 'Windows'
         run: cargo run --manifest-path packages/ptyx/native/broker/Cargo.toml
-      - run: cargo clippy --manifest-path packages/ptyx/native/Cargo.toml --all-targets -- -D warnings
+      - run: cargo clippy --manifest-path packages/ptyx/native/Cargo.toml --all-targets --all-features -- -D warnings
       - if: runner.os != 'Windows'
         run: cargo clippy --manifest-path packages/ptyx/native/broker/Cargo.toml --all-targets -- -D warnings
       - run: cargo doc --manifest-path packages/ptyx/native/Cargo.toml --no-deps

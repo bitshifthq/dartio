@@ -14,7 +14,7 @@ source revisions; unresolved comparisons remain explicit.
 | Flush | accepted sequence reaches PTY master | write completion | comparison pending |
 | Output backpressure | one credited Dart message; bounded queue | readiness disabled at bound | comparison pending |
 | Resize | cells and portable pixel metadata | `TIOCSWINSZ` / ConPTY cells | broadly available |
-| Exit status | typed Unix signal; full Windows DWORD | broker `waitpid` / process handle | semantics vary |
+| Exit status | typed Unix signal; full Windows DWORD | broker `waitid` observation plus exact cleanup reap / process handle | semantics vary |
 | Signals | explicit Unix capability | process-group signal | Windows packages generally terminate jobs/processes |
 | Descendant cleanup | original Unix process group; Windows Job Object | broker / Job Object | implementation-dependent |
 | Terminal name | explicit Unix capability | slave PTY name | implementation-dependent |

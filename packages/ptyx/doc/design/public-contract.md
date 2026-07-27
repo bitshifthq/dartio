@@ -55,7 +55,8 @@ await session.flush();
 
 `tryWrite` performs bounded work. It returns `true` only when the complete byte
 list is reserved and accepted in call order. It returns `false` only for
-temporary capacity exhaustion. It never reports partial acceptance.
+temporary capacity exhaustion. It throws the cached `PtyInputException` when
+the session can never accept more input. It never reports partial acceptance.
 
 `write` waits asynchronously for enough capacity and then accepts the complete
 byte list. A byte list larger than the configured maximum is rejected as an
@@ -92,10 +93,10 @@ exactly once and in PTY read order.
 - A read failure is emitted after every byte that can still be delivered
   safely, then the stream closes.
 
-Native output credit is released only after a Dart event is delivered to the
-subscription or explicitly discarded. Data in a Dart controller, native-port
-message, external typed-data object, or finalizer race remains charged to the
-same session budget.
+Native output credit is released only after a copied Dart event is delivered
+to the subscription or explicitly discarded. Data in a Dart controller or its
+single in-flight native-port message remains charged to the same session
+budget.
 
 Awaiting child exit without consuming or discarding output can legitimately
 block the child on PTY backpressure.
