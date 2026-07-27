@@ -34,3 +34,19 @@ class PtyUnsupportedException extends PtyException {
   @override
   String get _name => 'PtyUnsupportedException';
 }
+
+/// Thrown when accepted input fails or input capacity can never be provided.
+class PtyInputException extends PtyException {
+  const PtyInputException(super.message);
+
+  @override
+  String get _name => 'PtyInputException';
+}
+
+/// Thrown when the native controller or Unix broker becomes unavailable.
+class PtyInfrastructureException extends PtyException {
+  const PtyInfrastructureException(super.message);
+
+  @override
+  String get _name => 'PtyInfrastructureException';
+}

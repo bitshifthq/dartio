@@ -112,6 +112,49 @@ final class CompileFromSource extends LibraryProvider {
       ..['PTYX_DART_SDK'] = dartSdk.path;
     env.addAll(androidToolchainEnvironment(input, environment: env));
 
+    if (targetOS != .windows) {
+      final brokerTargetDir = Directory.fromUri(
+        targetDir.uri.resolve('broker/'),
+      );
+      final brokerArgs = <String>[
+        'build',
+        '--manifest-path',
+        File.fromUri(crateDir.uri.resolve('broker/Cargo.toml')).path,
+        '--release',
+        '--target-dir',
+        brokerTargetDir.path,
+        if (!isHost && cargoTarget != null) ...['--target', cargoTarget],
+      ];
+      final brokerResult = Process.runSync(
+        'cargo',
+        brokerArgs,
+        environment: env,
+      );
+      if (brokerResult.exitCode != 0) {
+        throw Exception(
+          'Cargo broker build failed (exit ${brokerResult.exitCode}):\n'
+          'stdout: ${brokerResult.stdout}\n'
+          'stderr: ${brokerResult.stderr}',
+        );
+      }
+      final brokerRelease = isHost || cargoTarget == null
+          ? Directory.fromUri(brokerTargetDir.uri.resolve('release/'))
+          : Directory.fromUri(
+              brokerTargetDir.uri.resolve('$cargoTarget/release/'),
+            );
+      final broker = File.fromUri(
+        brokerRelease.uri.resolve(
+          targetOS == .windows ? 'ptyx-broker.exe' : 'ptyx-broker',
+        ),
+      );
+      if (!broker.existsSync()) {
+        throw StateError(
+          'Cargo reported success but ${broker.path} was not found.',
+        );
+      }
+      env['PTYX_BROKER_BINARY'] = broker.path;
+    }
+
     final result = Process.runSync('cargo', args, environment: env);
     if (result.exitCode != 0) {
       throw Exception(

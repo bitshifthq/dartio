@@ -1,14 +1,8 @@
 [package]
-name = "ptyx"
+name = "ptyx-broker"
 version = "0.0.1"
 edition = "2021"
 publish = false
 
-[lib]
-crate-type = ["cdylib", "rlib"]
-
 [dependencies]
 libc = "0.2"
-
-[build-dependencies]
-cc = "1"

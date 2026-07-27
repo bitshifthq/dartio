@@ -71,6 +71,12 @@ final class PtySpawnOptions {
   /// [PtySession.resize] can change the size after the session starts.
   final PtySize initialSize;
 
+  /// Maximum accepted input bytes retained by this session.
+  final int maxBufferedInput;
+
+  /// Maximum queued and in-flight output bytes retained by this session.
+  final int maxBufferedOutput;
+
   /// Creates spawn options for [PtySession.spawn].
   const PtySpawnOptions({
     required this.executable,
@@ -79,5 +85,14 @@ final class PtySpawnOptions {
     this.environment = const {},
     this.environmentMode = .overlay,
     this.workingDirectory,
-  });
+    this.maxBufferedInput = 1024 * 1024,
+    this.maxBufferedOutput = 256 * 1024,
+  }) : assert(
+         maxBufferedInput > 0 && maxBufferedInput <= 64 * 1024 * 1024,
+         'maxBufferedInput must be between 1 byte and 64 MiB',
+       ),
+       assert(
+         maxBufferedOutput > 0 && maxBufferedOutput <= 64 * 1024 * 1024,
+         'maxBufferedOutput must be between 1 byte and 64 MiB',
+       );
 }

@@ -9,6 +9,7 @@ import 'package:meta/meta.dart';
 import '../impl/session.dart' show NativeSession;
 
 part 'errors.dart';
+part 'capabilities.dart';
 part 'options.dart';
 part 'session.dart';
 part 'size.dart';

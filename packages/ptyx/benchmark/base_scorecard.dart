@@ -39,7 +39,7 @@ Future<void> main(List<String> arguments) async {
   stdout.writeln(const JsonEncoder.withIndent('  ').convert(results));
 }
 
-PtySession _spawn(String script) {
+Future<PtySession> _spawn(String script) {
   return PtySession.spawn(
     PtySpawnOptions(
       executable: '/bin/sh',
@@ -52,7 +52,7 @@ PtySession _spawn(String script) {
 Future<({PtySession session, _ChunkReader bytes})> _readySession(
   String script,
 ) async {
-  final session = _spawn(script);
+  final session = await _spawn(script);
   final bytes = _ChunkReader(session.output);
   for (final expected in ascii.encode('READY')) {
     if (await bytes.readByte().timeout(_timeout) != expected) {
@@ -73,7 +73,7 @@ Future<Map<String, Object?>> _interactiveRoundTrips(int repetitions) async {
     for (var i = 0; i < repetitions; i++) {
       final value = i & 0xff;
       final stopwatch = Stopwatch()..start();
-      session.write(Uint8List.fromList([value]));
+      await session.write(Uint8List.fromList([value]));
       final received = await bytes.readByte().timeout(_timeout);
       stopwatch.stop();
       if (received != value) {
@@ -96,7 +96,7 @@ Future<Map<String, Object?>> _outputThroughput(int byteCount) async {
   );
   var received = 0;
   final stopwatch = Stopwatch()..start();
-  session.write(Uint8List.fromList(const [1]));
+  await session.write(Uint8List.fromList(const [1]));
   try {
     while (received < byteCount) {
       final chunk = await bytes.readChunk().timeout(_timeout);
@@ -133,7 +133,9 @@ Future<Map<String, Object?>> _inputThroughput(int byteCount) async {
     var sent = 0;
     while (sent < byteCount) {
       final count = min(chunk.length, byteCount - sent);
-      session.write(count == chunk.length ? chunk : chunk.sublist(0, count));
+      await session.write(
+        count == chunk.length ? chunk : chunk.sublist(0, count),
+      );
       sent += count;
     }
 
@@ -172,7 +174,7 @@ Future<Map<String, Object?>> _spawnClose(int repetitions) async {
   final samples = <int>[];
   for (var i = 0; i < repetitions; i++) {
     final stopwatch = Stopwatch()..start();
-    final session = _spawn('exit 0');
+    final session = await _spawn('exit 0');
     await session.output.drain<void>();
     await session.exitCode.timeout(_timeout);
     await session.close();
@@ -191,7 +193,7 @@ Future<Map<String, Object?>> _idleSessions(int count) async {
   try {
     for (var i = 0; i < count; i++) {
       try {
-        sessions.add(_spawn('cat'));
+        sessions.add(await _spawn('cat'));
       } on Object catch (error) {
         failure = error;
         break;

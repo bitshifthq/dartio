@@ -15,8 +15,8 @@ void main() {
     const shortTimeout = Duration(seconds: 5);
     const longTimeout = Duration(seconds: 10);
 
-    PtySession spawn(PtySpawnOptions options) {
-      final session = PtySession.spawn(options);
+    Future<PtySession> spawn(PtySpawnOptions options) async {
+      final session = await PtySession.spawn(options);
       addTearDown(session.close);
       return session;
     }
@@ -42,7 +42,7 @@ void main() {
       windows: '[Console]::Write([Console]::In.ReadLine())',
     );
 
-    PtySession spawnCommand(
+    Future<PtySession> spawnCommand(
       ({String executable, List<String> arguments}) command, {
       PtySize initialSize = defaultSize,
       Map<String, String> environment = const {},
@@ -59,7 +59,10 @@ void main() {
       );
     }
 
-    PtySession spawnScript(String script, {PtySize initialSize = defaultSize}) {
+    Future<PtySession> spawnScript(
+      String script, {
+      PtySize initialSize = defaultSize,
+    }) {
       return spawnCommand(shell(script), initialSize: initialSize);
     }
 
@@ -114,7 +117,7 @@ void main() {
 
     group('spawn', () {
       test('streams child output', () async {
-        final session = spawnScript(
+        final session = await spawnScript(
           platformScript(
             posix: 'printf "hello-ptyx"',
             windows: '[Console]::Write("hello-ptyx")',
@@ -130,14 +133,14 @@ void main() {
         expect(utf8.decode(bytes), 'hello-ptyx');
       });
 
-      test('throws PtyException for a missing executable', () {
+      test('throws PtyException for a missing executable', () async {
         const options = PtySpawnOptions(
           executable: 'definitely-not-a-real-ptyx-command',
           initialSize: defaultSize,
         );
 
-        expect(
-          () => PtySession.spawn(options),
+        await expectLater(
+          PtySession.spawn(options),
           throwsA(
             isA<PtyException>().having(
               (error) => error.toString(),
@@ -149,7 +152,7 @@ void main() {
       });
 
       test('applies initial cell size to the child', () async {
-        final session = spawnScript(
+        final session = await spawnScript(
           platformScript(
             posix: 'stty size',
             windows:
@@ -165,14 +168,14 @@ void main() {
         expect(line, '33 101');
       });
 
-      test('exposes initial pixel size', () {
+      test('exposes initial pixel size', () async {
         const initialSize = PtySize(
           rows: 31,
           columns: 97,
           pixelWidth: 1234,
           pixelHeight: 567,
         );
-        final session = spawnScript(inputEcho, initialSize: initialSize);
+        final session = await spawnScript(inputEcho, initialSize: initialSize);
 
         final size = session.size;
 
@@ -182,7 +185,7 @@ void main() {
 
     group('output', () {
       test('closes after native EOF', () async {
-        final session = spawnScript(
+        final session = await spawnScript(
           platformScript(
             posix: 'printf done',
             windows: '[Console]::Write("done")',
@@ -199,7 +202,7 @@ void main() {
 
       test('reads large finite output', () async {
         const byteCount = 2 * 1024 * 1024;
-        final session = spawnCommand(finiteOutputCommand(byteCount));
+        final session = await spawnCommand(finiteOutputCommand(byteCount));
 
         final received = await session.output
             .expand((chunk) => chunk)
@@ -211,7 +214,7 @@ void main() {
       });
 
       test('continues after a paused subscription resumes', () async {
-        final session = spawnCommand(infiniteOutputCommand());
+        final session = await spawnCommand(infiniteOutputCommand());
         final firstChunk = Completer<void>();
         final secondChunk = Completer<void>();
         late final StreamSubscription<Uint8List> subscription;
@@ -234,7 +237,7 @@ void main() {
 
       test('applies backpressure until output is listened to', () async {
         const byteCount = 8 * 1024 * 1024;
-        final session = spawnCommand(finiteOutputCommand(byteCount));
+        final session = await spawnCommand(finiteOutputCommand(byteCount));
 
         final exitBeforeListen = await session.exitCode.timeout(
           const Duration(milliseconds: 500),
@@ -258,7 +261,7 @@ void main() {
 
       test('discards output after the subscription is canceled', () async {
         const byteCount = 8 * 1024 * 1024;
-        final session = spawnCommand(finiteOutputCommand(byteCount));
+        final session = await spawnCommand(finiteOutputCommand(byteCount));
         final firstChunk = Completer<void>();
         late final StreamSubscription<Uint8List> subscription;
         subscription = session.output.listen((_) {
@@ -279,7 +282,7 @@ void main() {
         Map<String, String> environment = const {},
         PtyEnvironmentMode environmentMode = PtyEnvironmentMode.overlay,
       }) async {
-        final session = spawnCommand(
+        final session = await spawnCommand(
           shell(
             platformScript(
               posix: '/usr/bin/env',
@@ -338,8 +341,8 @@ void main() {
         ));
       });
 
-      test('throws PtyException for invalid environment entries', () {
-        PtySession spawnWithEmptyKey() => PtySession.spawn(
+      test('throws PtyException for invalid environment entries', () async {
+        Future<PtySession> spawnWithEmptyKey() => PtySession.spawn(
           const PtySpawnOptions(
             executable: 'env',
             environment: {'': 'value'},
@@ -347,7 +350,7 @@ void main() {
           ),
         );
 
-        PtySession spawnWithNulValue() => PtySession.spawn(
+        Future<PtySession> spawnWithNulValue() => PtySession.spawn(
           const PtySpawnOptions(
             executable: 'env',
             environment: {'PTYX_INVALID': 'bad\u0000value'},
@@ -355,16 +358,16 @@ void main() {
           ),
         );
 
-        expect(spawnWithEmptyKey, throwsA(isA<PtyException>()));
-        expect(spawnWithNulValue, throwsA(isA<PtyException>()));
+        await expectLater(spawnWithEmptyKey(), throwsA(isA<PtyException>()));
+        await expectLater(spawnWithNulValue(), throwsA(isA<PtyException>()));
       });
     });
 
     group('write', () {
       test('sends bytes to child input', () async {
-        final session = spawnScript(inputEcho);
+        final session = await spawnScript(inputEcho);
 
-        session.write(Uint8List.fromList(utf8.encode('ping\n')));
+        await session.write(Uint8List.fromList(utf8.encode('ping\n')));
         final bytes = await session.output
             .expand((chunk) => chunk)
             .take(4)
@@ -376,7 +379,7 @@ void main() {
 
       test('echoes high-volume input', () async {
         const byteCount = 512 * 1024;
-        final session = spawnScript(
+        final session = await spawnScript(
           platformScript(
             posix: 'stty raw -echo; printf READY; cat',
             windows:
@@ -415,18 +418,18 @@ void main() {
         addTearDown(subscription.cancel);
 
         await ready.future.timeout(shortTimeout);
-        session.write(data);
+        await session.write(data);
         final echoedBytes = await echoed.future.timeout(longTimeout);
 
         expect(echoedBytes, greaterThanOrEqualTo(byteCount));
       });
 
       test('throws PtyClosedException after close', () async {
-        final session = spawnScript(inputEcho);
+        final session = await spawnScript(inputEcho);
         await session.close();
 
-        expect(
-          () => session.write(Uint8List.fromList(const [1])),
+        await expectLater(
+          session.write(Uint8List.fromList(const [1])),
           throwsA(isA<PtyClosedException>()),
         );
       });
@@ -434,7 +437,7 @@ void main() {
 
     group('exitCode', () {
       test('completes with the child exit code', () async {
-        final session = spawnScript('exit 7');
+        final session = await spawnScript('exit 7');
 
         final exitCode = await session.exitCode.timeout(shortTimeout);
 
@@ -444,7 +447,9 @@ void main() {
 
     group('modeChanges', () {
       test('emits password-like terminal mode', () async {
-        final session = spawnScript('stty -echo; IFS= read -r _; stty echo');
+        final session = await spawnScript(
+          'stty -echo; IFS= read -r _; stty echo',
+        );
 
         final mode = await session.modeChanges
             .where((mode) => mode.passwordLike ?? false)
@@ -456,8 +461,8 @@ void main() {
     });
 
     group('metadata', () {
-      test('exposes live process and terminal properties', () {
-        final session = spawnScript(inputEcho);
+      test('exposes live process and terminal properties', () async {
+        final session = await spawnScript(inputEcho);
 
         final metadata = (
           hasPid: session.pid != null,
@@ -477,7 +482,7 @@ void main() {
 
     group('resize', () {
       test('reports updated cell size to the child', () async {
-        final session = spawnScript(
+        final session = await spawnScript(
           platformScript(
             posix: 'stty -echo; stty size; IFS= read -r _; stty size',
             windows:
@@ -493,7 +498,7 @@ void main() {
 
         await nextLine(lines);
         session.resize(const PtySize(rows: 42, columns: 120));
-        session.write(Uint8List.fromList(const [10]));
+        await session.write(Uint8List.fromList(const [10]));
         final line = await nextLine(lines);
 
         expect(line, '42 120');
@@ -502,7 +507,7 @@ void main() {
 
     group('kill', () {
       test('terminates a running child', () async {
-        final session = spawnCommand(infiniteOutputCommand());
+        final session = await spawnCommand(infiniteOutputCommand());
 
         await session.output.first.timeout(shortTimeout);
         final killed = session.kill();
@@ -514,7 +519,7 @@ void main() {
 
     group('close', () {
       test('completes while output is active', () async {
-        final session = spawnCommand(infiniteOutputCommand());
+        final session = await spawnCommand(infiniteOutputCommand());
 
         await session.output.first.timeout(shortTimeout);
 
@@ -522,7 +527,7 @@ void main() {
       });
 
       test('is idempotent', () async {
-        final session = spawnScript(inputEcho);
+        final session = await spawnScript(inputEcho);
         await session.close();
 
         await expectLater(session.close(), completes);

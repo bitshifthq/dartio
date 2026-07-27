@@ -32,7 +32,9 @@ abstract interface class PtySession {
   /// Starts a child process attached to a new pseudo terminal.
   ///
   /// Throws a [PtyException] if the process cannot be started.
-  factory PtySession.spawn(PtySpawnOptions options) = NativeSession.spawn;
+  static Future<PtySession> spawn(PtySpawnOptions options) {
+    return NativeSession.spawn(options);
+  }
 
   /// Completes with the child process exit code when the child exits.
   ///
@@ -47,6 +49,15 @@ abstract interface class PtySession {
   /// exit status cannot be observed, this future completes with a
   /// [PtyException].
   Future<int> get exitCode;
+
+  /// Completes when input reaches a terminal state.
+  ///
+  /// It completes normally when input is closed deliberately and with a
+  /// [PtyInputException] when accepted input can no longer be written.
+  Future<void> get inputDone;
+
+  /// Platform-specific features available to this session.
+  PtyCapabilities get capabilities;
 
   /// The most recently observed terminal input mode.
   ///
@@ -116,10 +127,18 @@ abstract interface class PtySession {
   /// Throws [PtyClosedException] after [close].
   void resize(PtySize size);
 
-  /// Writes raw bytes to the child process input.
+  /// Attempts to accept [data] into the bounded input queue.
   ///
-  /// Bytes are sent exactly as provided. Text callers choose the encoding and
-  /// line endings expected by the child. Throws [PtyClosedException] after
-  /// [close].
-  void write(Uint8List data);
+  /// Returns `true` only when the complete buffer was accepted. Returns
+  /// `false` without accepting any bytes when capacity is unavailable.
+  bool tryWrite(Uint8List data);
+
+  /// Waits until [byteCount] bytes can be accepted or input fails.
+  Future<void> waitForInputCapacity(int byteCount);
+
+  /// Accepts all of [data], waiting for bounded input capacity when necessary.
+  Future<void> write(Uint8List data);
+
+  /// Waits until every write accepted before this call reaches the PTY master.
+  Future<void> flush();
 }

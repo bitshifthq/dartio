@@ -5,10 +5,16 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn main() {
+    println!("cargo:rerun-if-changed=src/dart_bridge.c");
     println!("cargo:rerun-if-env-changed=PTYX_DART_SDK");
     println!("cargo:rerun-if-env-changed=DART_SDK");
     println!("cargo:rerun-if-env-changed=PATH");
     println!("cargo:rerun-if-env-changed=PATHEXT");
+    println!("cargo:rerun-if-env-changed=PTYX_BROKER_BINARY");
+
+    if env::var("CARGO_CFG_UNIX").is_ok() {
+        configure_broker();
+    }
 
     let Some(sdk) = resolve_configured_dart_sdk().or_else(resolve_dart_sdk) else {
         missing_dart_sdk();
@@ -21,10 +27,40 @@ fn main() {
 
     let mut build = cc::Build::new();
     build.file(source);
+    build.file("src/dart_bridge.c");
     build.include(include);
     build.warnings(false);
     add_apple_sdk_sysroot(&mut build);
     build.compile("ptyx_dart_api_dl");
+}
+
+fn configure_broker() {
+    let path = env::var_os("PTYX_BROKER_BINARY")
+        .map(PathBuf::from)
+        .or_else(|| {
+            env::current_dir()
+                .ok()
+                .map(|root| root.join("broker/target/release/ptyx-broker"))
+                .filter(|candidate| candidate.is_file())
+        })
+        .unwrap_or_else(|| {
+            fail(
+                "PTYX_BROKER_BINARY must identify the target broker executable; \
+                 build native/broker before building the library",
+            )
+        });
+    require_file(&path, "ptyx broker executable");
+    let bytes = fs::read(&path)
+        .unwrap_or_else(|error| fail(format!("failed to read broker {}: {error}", path.display())));
+    let identity = bytes.iter().fold(0xcbf29ce484222325_u64, |hash, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
+    });
+    println!("cargo:rerun-if-changed={}", path.display());
+    println!(
+        "cargo:rustc-env=PTYX_BROKER_BINARY={}",
+        path.canonicalize().unwrap_or(path).display()
+    );
+    println!("cargo:rustc-env=PTYX_BROKER_ID={identity:016x}");
 }
 
 fn add_apple_sdk_sysroot(build: &mut cc::Build) {
