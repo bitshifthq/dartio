@@ -201,7 +201,8 @@ jobs:
         env:
           SOAK_SECONDS: ${{ inputs.soak_seconds || '1800' }}
         run: |
-          progress="soak-${{ matrix.os }}.progress.jsonl"
+          progress="$RUNNER_TEMP/soak-${{ matrix.os }}.progress.jsonl"
+          retained_progress="soak-${{ matrix.os }}.progress.jsonl"
           printf '{"schema":1,"phase":"runner-started"}\n' > "$progress"
           set +e
           dart run tool/soak.dart "$SOAK_SECONDS" \
@@ -211,12 +212,13 @@ jobs:
           set -e
           printf '{"schema":1,"phase":"command-exited","details":{"exit_code":%s}}\n' \
             "$command_rc" >> "$progress"
+          cp "$progress" "$retained_progress"
           if (( command_rc != 0 )); then
             exit "$command_rc"
           fi
           dart run tool/validate_ci_result.dart \
             soak soak-${{ matrix.os }}.json
-          printf '{"schema":1,"phase":"result-validated"}\n' >> "$progress"
+          printf '{"schema":1,"phase":"result-validated"}\n' >> "$retained_progress"
       - name: capture Windows soak failure evidence
         if: failure() && runner.os == 'Windows'
         shell: pwsh
@@ -285,7 +287,8 @@ jobs:
       - name: run correctness-gated diagnostic scorecard
         working-directory: packages/ptyx
         run: |
-          progress="scorecard-${{ matrix.os }}.progress.jsonl"
+          progress="$RUNNER_TEMP/scorecard-${{ matrix.os }}.progress.jsonl"
+          retained_progress="scorecard-${{ matrix.os }}.progress.jsonl"
           printf '{"schema":1,"phase":"runner-started"}\n' > "$progress"
           set +e
           dart run benchmark/scorecard.dart all \
@@ -298,12 +301,13 @@ jobs:
           set -e
           printf '{"schema":1,"phase":"command-exited","details":{"exit_code":%s}}\n' \
             "$command_rc" >> "$progress"
+          cp "$progress" "$retained_progress"
           if (( command_rc != 0 )); then
             exit "$command_rc"
           fi
           dart run tool/validate_ci_result.dart \
             scorecard scorecard-${{ matrix.os }}.json
-          printf '{"schema":1,"phase":"result-validated"}\n' >> "$progress"
+          printf '{"schema":1,"phase":"result-validated"}\n' >> "$retained_progress"
       - name: capture Windows scorecard failure evidence
         if: failure() && runner.os == 'Windows'
         shell: pwsh
