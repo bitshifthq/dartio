@@ -528,13 +528,6 @@ impl NoticeReceiver {
         let _ = self.iocp.post_command();
         Ok(notice)
     }
-
-    pub(crate) fn recv_timeout(&self, timeout: Duration) -> Result<Notice, mpsc::RecvTimeoutError> {
-        let notice = self.receiver.recv_timeout(timeout)?;
-        self.budget.release();
-        let _ = self.iocp.post_command();
-        Ok(notice)
-    }
 }
 
 struct CloseAdmission {
