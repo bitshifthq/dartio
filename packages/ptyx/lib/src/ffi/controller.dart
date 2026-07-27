@@ -36,7 +36,7 @@ external bool controllerDestroy(int handle);
 )
 external bool controllerExitStatus(int handle, ffi.Pointer<ffi.Int64> status);
 
-/// NativeFinalizer callback. The token is the generation-tagged handle.
+/// Dart finalizer callback. The token is the generation-tagged handle.
 @ffi.Native<ffi.Void Function(ffi.Pointer<ffi.Void>)>(symbol: 'ptyi_finalize')
 external void controllerFinalize(ffi.Pointer<ffi.Void> token);
 

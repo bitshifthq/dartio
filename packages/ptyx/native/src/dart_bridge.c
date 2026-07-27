@@ -37,6 +37,10 @@ PTYX_HIDDEN bool ptyx_dart_post_integer(Dart_Port_DL port, int64_t message) {
   return Dart_PostInteger_DL(port, message);
 }
 
+PTYX_HIDDEN bool ptyx_dart_probe_port(Dart_Port_DL port) {
+  return Dart_PostInteger_DL(port, 0);
+}
+
 PTYX_HIDDEN bool ptyx_dart_post_bytes(
     Dart_Port_DL port,
     int64_t handle,

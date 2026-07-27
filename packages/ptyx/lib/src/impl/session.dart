@@ -1,7 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:ffi';
-import 'dart:io' show Platform, ProcessSignal;
+import 'dart:io' show Directory, Platform, ProcessSignal;
 import 'dart:isolate';
 import 'dart:typed_data';
 
@@ -11,7 +11,9 @@ import 'package:meta/meta.dart';
 import '../api/api.dart';
 import '../ffi/controller.dart';
 
-final _sessionFinalizer = NativeFinalizer(Native.addressOf(controllerFinalize));
+final _sessionFinalizer = Finalizer<int>(
+  (handle) => controllerFinalize(Pointer<Void>.fromAddress(handle)),
+);
 final _sessionRegistryFinalizer = Finalizer<_SessionRegistryToken>(
   (token) => token.runtime._removeSession(token.handle),
 );
@@ -29,7 +31,7 @@ final class _SessionRegistryToken {
 }
 
 @internal
-final class NativeSession implements PtySession, Finalizable {
+final class NativeSession implements PtySession {
   NativeSession._(
     this._runtime,
     this._handle,
@@ -45,12 +47,13 @@ final class NativeSession implements PtySession, Finalizable {
   }
 
   static Future<NativeSession> spawn(PtySpawnOptions options) async {
-    _validateSpawnOptions(options);
+    final workingDirectory = options.workingDirectory ?? Directory.current.path;
+    _validateSpawnOptions(options, workingDirectory);
     final runtime = _ControllerRuntime.instance;
     final outputPort = runtime.outputPort;
     final eventPort = runtime.eventPort;
     final spawnResult = await Isolate.run(
-      () => _spawnNative(options, outputPort, eventPort),
+      () => _spawnNative(options, workingDirectory, outputPort, eventPort),
     );
     final handle = spawnResult.handle;
     if (handle == 0) {
@@ -93,11 +96,7 @@ final class NativeSession implements PtySession, Finalizable {
       modes,
     );
     runtime._addSession(session);
-    _sessionFinalizer.attach(
-      session,
-      Pointer<Void>.fromAddress(handle),
-      detach: session,
-    );
+    _sessionFinalizer.attach(session, handle, detach: session);
     _sessionRegistryFinalizer.attach(
       session,
       _SessionRegistryToken(runtime, handle),
@@ -268,7 +267,7 @@ final class NativeSession implements PtySession, Finalizable {
     _checkOpen(operation);
     final inputFailure = _inputFailure;
     if (inputFailure != null) {
-      throw inputFailure;
+      throw _inputError(operation, inputFailure);
     }
     if (data.isEmpty) {
       throw PtyInvalidArgumentException(
@@ -296,7 +295,7 @@ final class NativeSession implements PtySession, Finalizable {
         nativeCode: nativeCode == 0 ? null : nativeCode,
       );
       _inputFailure ??= failure;
-      throw _inputFailure!;
+      throw _inputError(operation, _inputFailure!);
     }
     if (sequence == 0) {
       return false;
@@ -306,21 +305,25 @@ final class NativeSession implements PtySession, Finalizable {
   }
 
   @override
-  Future<void> waitForInputCapacity(int byteCount) {
-    _checkOpen('waitForInputCapacity');
+  Future<void> waitForInputCapacity(int byteCount) =>
+      _waitForInputCapacity(byteCount, 'waitForInputCapacity');
+
+  Future<void> _waitForInputCapacity(int byteCount, String operation) {
+    _checkOpen(operation);
     final inputFailure = _inputFailure;
     if (inputFailure != null) {
-      throw inputFailure;
+      throw _inputError(operation, inputFailure);
     }
     if (byteCount <= 0 || byteCount > _inputCapacity) {
       throw PtyInvalidArgumentException(
         'requested input capacity is outside this session limit',
-        operation: 'waitForInputCapacity',
+        operation: operation,
         context: '$byteCount bytes requested; limit is $_inputCapacity bytes',
       );
     }
     return _runtime._wait(
       _handle,
+      operation,
       (waiter) => controllerWaitCapacity(_handle, byteCount, waiter),
     );
   }
@@ -328,7 +331,7 @@ final class NativeSession implements PtySession, Finalizable {
   @override
   Future<void> write(Uint8List data) async {
     while (!_tryWrite(data, 'write')) {
-      await waitForInputCapacity(data.length);
+      await _waitForInputCapacity(data.length, 'write');
     }
   }
 
@@ -337,10 +340,11 @@ final class NativeSession implements PtySession, Finalizable {
     _checkOpen('flush');
     final inputFailure = _inputFailure;
     if (inputFailure != null) {
-      throw inputFailure;
+      throw _inputError('flush', inputFailure);
     }
     return _runtime._wait(
       _handle,
+      'flush',
       (waiter) => controllerWaitFlush(_handle, _lastSequence, waiter),
     );
   }
@@ -505,6 +509,24 @@ final class NativeSession implements PtySession, Finalizable {
     }
   }
 
+  PtyException _waitFailure(String operation) {
+    if (_close != null) {
+      return PtyClosedException('session closed', operation: operation);
+    }
+    final failure = _inputFailure;
+    return failure == null
+        ? PtyInputException('terminal input failure', operation: operation)
+        : _inputError(operation, failure);
+  }
+
+  PtyInputException _inputError(String operation, PtyInputException failure) =>
+      PtyInputException(
+        failure.message,
+        operation: operation,
+        nativeCode: failure.nativeCode,
+        context: failure.context,
+      );
+
   void _completeOutput() {
     if (!_outputDone.isCompleted) {
       _outputDone.complete();
@@ -593,7 +615,6 @@ final class NativeSession implements PtySession, Finalizable {
         recordFailure(const PtyCloseException('native cleanup request failed'));
       }
     }
-    _completeExit();
     try {
       await Future.wait<Object?>([
         _exit.future,
@@ -698,9 +719,10 @@ final class NativeSession implements PtySession, Finalizable {
 }
 
 final class _PendingWaiter {
-  const _PendingWaiter(this.handle, this.completion);
+  const _PendingWaiter(this.handle, this.operation, this.completion);
 
   final int handle;
+  final String operation;
   final Completer<void> completion;
 }
 
@@ -747,10 +769,14 @@ final class _ControllerRuntime {
     }
   }
 
-  Future<void> _wait(int handle, int Function(int waiter) register) async {
+  Future<void> _wait(
+    int handle,
+    String operation,
+    int Function(int waiter) register,
+  ) async {
     final waiter = _nextWaiter++;
     final completion = Completer<void>();
-    _waiters[waiter] = _PendingWaiter(handle, completion);
+    _waiters[waiter] = _PendingWaiter(handle, operation, completion);
     switch (register(waiter)) {
       case 1:
         _waiters.remove(waiter);
@@ -758,7 +784,8 @@ final class _ControllerRuntime {
         await completion.future;
       default:
         _waiters.remove(waiter);
-        throw const PtyInputException('terminal input failure');
+        throw _session(handle)?._waitFailure(operation) ??
+            PtyInputException('terminal input failure', operation: operation);
     }
   }
 
@@ -784,10 +811,16 @@ final class _ControllerRuntime {
       case 4:
         _session(payload)?._completeOutput();
       case 5:
-        _waiters
-            .remove(payload)
-            ?.completion
-            .completeError(const PtyInputException('terminal input failure'));
+        final waiter = _waiters.remove(payload);
+        if (waiter != null) {
+          waiter.completion.completeError(
+            _session(waiter.handle)?._waitFailure(waiter.operation) ??
+                PtyInputException(
+                  'terminal input failure',
+                  operation: waiter.operation,
+                ),
+          );
+        }
       case 6:
         _session(payload)?._completeOutputFailure();
       case 7:
@@ -824,6 +857,7 @@ final class _ControllerRuntime {
 
 ({int handle, int? nativeCode}) _spawnNative(
   PtySpawnOptions options,
+  String workingDirectory,
   int outputPort,
   int eventPort,
 ) {
@@ -855,15 +889,7 @@ final class _ControllerRuntime {
     final arguments = nativeStrings(options.arguments);
     final inheritEnvironment =
         options.environmentMode == PtyEnvironmentMode.inherit;
-    final environment = switch (options.environmentMode) {
-      PtyEnvironmentMode.inherit => const <String, String>{},
-      PtyEnvironmentMode.overlay => {
-        ...Platform.environment,
-        ...options.environment,
-      },
-      PtyEnvironmentMode.replace => options.environment,
-      PtyEnvironmentMode.clear => const <String, String>{},
-    };
+    final environment = _effectiveEnvironment(options);
     for (final key in environment.keys) {
       if (key.isEmpty || key.contains('=') || key.contains('\u0000')) {
         throw ArgumentError.value(key, 'environment key', 'is invalid');
@@ -873,9 +899,7 @@ final class _ControllerRuntime {
         .map((entry) => '${entry.key}=${entry.value}')
         .toList(growable: false);
     final nativeEnvironment = nativeStrings(environmentValues);
-    final cwd = options.workingDirectory == null
-        ? nullptr
-        : nativeString(options.workingDirectory!);
+    final cwd = nativeString(workingDirectory);
     final handle = controllerSpawn(
       executable,
       arguments,
@@ -898,8 +922,15 @@ final class _ControllerRuntime {
   });
 }
 
-void _validateSpawnOptions(PtySpawnOptions options) {
+void _validateSpawnOptions(PtySpawnOptions options, String workingDirectory) {
   _validateSize(options.initialSize, operation: 'spawn');
+  if (options.arguments.length > 256) {
+    throw PtyInvalidArgumentException(
+      'process spawn accepts at most 256 arguments',
+      operation: 'spawn',
+      context: '${options.arguments.length} arguments',
+    );
+  }
   if (options.maxBufferedInput <= 0 ||
       options.maxBufferedInput > 64 * 1024 * 1024) {
     throw PtyInvalidArgumentException(
@@ -943,7 +974,15 @@ void _validateSpawnOptions(PtySpawnOptions options) {
       operation: 'spawn',
     );
   }
-  for (final entry in options.environment.entries) {
+  final environment = _effectiveEnvironment(options);
+  if (environment.length > 4096) {
+    throw PtyInvalidArgumentException(
+      'process spawn accepts at most 4096 environment entries',
+      operation: 'spawn',
+      context: '${environment.length} entries',
+    );
+  }
+  for (final entry in environment.entries) {
     if (entry.key.isEmpty ||
         entry.key.contains('=') ||
         entry.key.contains('\u0000') ||
@@ -954,13 +993,31 @@ void _validateSpawnOptions(PtySpawnOptions options) {
       );
     }
   }
+  var encodedPayloadBytes =
+      36 + 4 * (1 + options.arguments.length + environment.length);
+  encodedPayloadBytes += utf8.encode(options.executable).length;
+  for (final argument in options.arguments) {
+    encodedPayloadBytes += utf8.encode(argument).length;
+  }
+  for (final entry in environment.entries) {
+    encodedPayloadBytes += utf8.encode('${entry.key}=${entry.value}').length;
+  }
+  encodedPayloadBytes += utf8.encode(workingDirectory).length;
+  if (encodedPayloadBytes > 64 * 1024) {
+    throw PtyInvalidArgumentException(
+      'encoded process spawn payload exceeds 64 KiB',
+      operation: 'spawn',
+      context: '$encodedPayloadBytes bytes',
+    );
+  }
 }
 
 void _validateSize(PtySize size, {required String operation}) {
+  final maximumCells = Platform.isWindows ? 32767 : 65535;
   if (size.rows <= 0 ||
-      size.rows > 65535 ||
+      size.rows > maximumCells ||
       size.columns <= 0 ||
-      size.columns > 65535 ||
+      size.columns > maximumCells ||
       size.pixelWidth < 0 ||
       size.pixelWidth > 65535 ||
       size.pixelHeight < 0 ||
@@ -971,3 +1028,13 @@ void _validateSize(PtySize size, {required String operation}) {
     );
   }
 }
+
+Map<String, String> _effectiveEnvironment(PtySpawnOptions options) =>
+    switch (options.environmentMode) {
+      PtyEnvironmentMode.inherit || PtyEnvironmentMode.clear => const {},
+      PtyEnvironmentMode.overlay => {
+        ...Platform.environment,
+        ...options.environment,
+      },
+      PtyEnvironmentMode.replace => options.environment,
+    };

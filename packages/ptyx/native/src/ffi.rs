@@ -11,7 +11,7 @@ use std::mem::size_of;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::mpsc::{self, Sender};
+use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::sync::{Mutex, OnceLock};
 
 #[derive(Clone, Copy)]
@@ -207,9 +207,11 @@ pub unsafe extern "C" fn ptyi_init(api_data: *mut c_void) -> bool {
         };
         let notifier = std::thread::Builder::new()
             .name("ptyx-dart-notifier".to_owned())
-            .spawn(move || {
-                while let Ok(notice) = notifications.recv() {
-                    dispatch_notice(notice);
+            .spawn(move || loop {
+                match notifications.recv_timeout(std::time::Duration::from_millis(250)) {
+                    Ok(notice) => dispatch_notice(notice),
+                    Err(RecvTimeoutError::Timeout) => probe_event_ports(),
+                    Err(RecvTimeoutError::Disconnected) => break,
                 }
             });
         if notifier.is_err() {
@@ -297,7 +299,22 @@ pub unsafe extern "C" fn ptyi_spawn(
             set_last_error_code(libc::EINVAL);
             return 0;
         }
-        let mut remaining = MAX_SPAWN_PAYLOAD;
+        let environment_payload_count = if inherit_environment {
+            0
+        } else {
+            environment_count
+        };
+        let overhead = 36_usize.saturating_add(
+            4_usize.saturating_mul(
+                1_usize
+                    .saturating_add(argument_count)
+                    .saturating_add(environment_payload_count),
+            ),
+        );
+        let Some(mut remaining) = MAX_SPAWN_PAYLOAD.checked_sub(overhead) else {
+            set_last_error_code(libc::E2BIG);
+            return 0;
+        };
         let executable = match bounded_c_string(executable, &mut remaining) {
             Ok(value) if !value.is_empty() => value,
             Ok(_) => {
@@ -682,6 +699,44 @@ fn dispatch_notice(notice: Notice) {
     }
 }
 
+fn probe_event_ports() {
+    let event_ports = ports()
+        .lock()
+        .ok()
+        .map(|entries| {
+            entries
+                .values()
+                .map(|entry| entry.event)
+                .collect::<HashSet<_>>()
+        })
+        .unwrap_or_default();
+    for event_port in event_ports {
+        if unsafe { ptyx_dart_probe_port(event_port) } {
+            continue;
+        }
+        let handles = ports()
+            .lock()
+            .ok()
+            .map(|mut entries| {
+                let handles = entries
+                    .iter()
+                    .filter_map(|(handle, entry)| (entry.event == event_port).then_some(*handle))
+                    .collect::<Vec<_>>();
+                for handle in &handles {
+                    entries.remove(handle);
+                }
+                handles
+            })
+            .unwrap_or_default();
+        for handle in handles {
+            if let Ok(mut lost) = lost_ports().lock() {
+                lost.insert(handle);
+            }
+            abandon_lost(handle);
+        }
+    }
+}
+
 fn abandon_lost(handle: u64) -> bool {
     let queued = lost_ports()
         .lock()
@@ -704,6 +759,7 @@ fn abandon_lost(handle: u64) -> bool {
 unsafe extern "C" {
     fn Dart_InitializeApiDL(data: *mut c_void) -> libc::intptr_t;
     fn ptyx_dart_post_integer(port: i64, message: i64) -> bool;
+    fn ptyx_dart_probe_port(port: i64) -> bool;
     fn ptyx_dart_post_bytes(port: i64, handle: i64, bytes: *const u8, length: usize) -> bool;
     #[cfg(feature = "test-controls")]
     fn ptyx_dart_fail_next_post();

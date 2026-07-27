@@ -178,14 +178,13 @@ impl AttributeList {
         Ok(Self { storage, raw })
     }
 
-    pub(crate) fn set_pseudoconsole(&mut self, pseudoconsole: HPCON) -> io::Result<()> {
-        let mut value = pseudoconsole;
+    pub(crate) fn set_pseudoconsole(&mut self, value: &mut HPCON) -> io::Result<()> {
         if unsafe {
             UpdateProcThreadAttribute(
                 self.raw,
                 0,
                 PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE as usize,
-                (&mut value as *mut HPCON).cast(),
+                (value as *mut HPCON).cast(),
                 size_of::<HPCON>(),
                 null_mut(),
                 null(),
@@ -197,8 +196,7 @@ impl AttributeList {
         Ok(())
     }
 
-    pub(crate) fn set_job(&mut self, job: HANDLE) -> io::Result<()> {
-        let mut jobs = [job];
+    pub(crate) fn set_job(&mut self, jobs: &mut [HANDLE; 1]) -> io::Result<()> {
         if unsafe {
             UpdateProcThreadAttribute(
                 self.raw,

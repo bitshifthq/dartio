@@ -29,7 +29,7 @@ PTYX_EXPORT uint32_t ptyi_capabilities(void);
 /** Returns the calling thread's last synchronous native error, or zero. */
 PTYX_EXPORT int32_t ptyi_last_error_code(void);
 PTYX_EXPORT bool ptyi_init(void* dart_initialize_api_dl_data);
-/** NativeFinalizer callback. The token is the generation-tagged handle. */
+/** Dart finalizer callback. The token is the generation-tagged handle. */
 PTYX_EXPORT void ptyi_finalize(void* token);
 
 PTYX_EXPORT uint64_t ptyi_spawn(

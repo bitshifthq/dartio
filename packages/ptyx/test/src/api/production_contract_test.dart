@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
@@ -126,6 +127,47 @@ void main() {
   });
 
   test(
+    'close fails pending input operations with their public identity',
+    () async {
+      const capacity = 1024 * 1024;
+      final session = await PtySession.spawn(
+        shell(
+          r'stty raw -echo; printf ready; kill -STOP $$; sleep 10',
+          inputCapacity: capacity,
+        ),
+      );
+      await session.output.first;
+      expect(session.tryWrite(Uint8List(capacity)), isTrue);
+
+      Future<void> expectClosed(Future<void> future, String operation) =>
+          expectLater(
+            future,
+            throwsA(
+              isA<PtyClosedException>().having(
+                (error) => error.operation,
+                'operation',
+                operation,
+              ),
+            ),
+          );
+
+      final capacityFailure = expectClosed(
+        session.waitForInputCapacity(capacity),
+        'waitForInputCapacity',
+      );
+      final flushFailure = expectClosed(session.flush(), 'flush');
+      final writeFailure = expectClosed(
+        session.write(Uint8List(capacity)),
+        'write',
+      );
+
+      await session.close();
+      await Future.wait([capacityFailure, flushFailure, writeFailure]);
+    },
+    testOn: 'posix',
+  );
+
+  test(
     'spawn validation is typed and stable with assertions enabled',
     () async {
       await expectLater(
@@ -147,6 +189,133 @@ void main() {
     },
   );
 
+  group('spawn boundary validation', () {
+    final missingExecutable = Platform.isWindows
+        ? r'C:\definitely\missing\ptyx.exe'
+        : '/definitely/missing/ptyx';
+
+    PtySpawnOptions missing({
+      List<String> arguments = const [],
+      Map<String, String> environment = const {},
+      PtyEnvironmentMode environmentMode = PtyEnvironmentMode.overlay,
+      PtySize initialSize = size,
+    }) => PtySpawnOptions(
+      executable: missingExecutable,
+      arguments: arguments,
+      environment: environment,
+      environmentMode: environmentMode,
+      initialSize: initialSize,
+    );
+
+    test('accepts 256 arguments and rejects 257 before native spawn', () async {
+      await expectLater(
+        PtySession.spawn(missing(arguments: List.filled(256, 'x'))),
+        throwsA(isA<PtySpawnException>()),
+      );
+      await expectLater(
+        PtySession.spawn(missing(arguments: List.filled(257, 'x'))),
+        throwsA(isA<PtyInvalidArgumentException>()),
+      );
+    });
+
+    test(
+      'accepts 4096 environment entries and rejects 4097 before native spawn',
+      () async {
+        Map<String, String> entries(int count) => {
+          for (var index = 0; index < count; index++) 'K$index': '',
+        };
+
+        await expectLater(
+          PtySession.spawn(
+            missing(
+              environment: entries(4096),
+              environmentMode: PtyEnvironmentMode.replace,
+            ),
+          ),
+          throwsA(isA<PtySpawnException>()),
+        );
+        await expectLater(
+          PtySession.spawn(
+            missing(
+              environment: entries(4097),
+              environmentMode: PtyEnvironmentMode.replace,
+            ),
+          ),
+          throwsA(isA<PtyInvalidArgumentException>()),
+        );
+      },
+    );
+
+    test('enforces the exact 64 KiB encoded spawn payload', () async {
+      final executableBytes = utf8.encode(missingExecutable).length;
+      final workingDirectoryBytes = utf8.encode(Directory.current.path).length;
+      const framingBytes = 36 + 4 * 2;
+      final atLimit =
+          'x' *
+          (64 * 1024 - framingBytes - executableBytes - workingDirectoryBytes);
+
+      await expectLater(
+        PtySession.spawn(
+          missing(
+            arguments: [atLimit],
+            environmentMode: PtyEnvironmentMode.replace,
+          ),
+        ),
+        throwsA(isA<PtySpawnException>()),
+      );
+      await expectLater(
+        PtySession.spawn(
+          missing(
+            arguments: ['$atLimit!'],
+            environmentMode: PtyEnvironmentMode.replace,
+          ),
+        ),
+        throwsA(isA<PtyInvalidArgumentException>()),
+      );
+    });
+
+    test('uses platform cell bounds before native spawn', () async {
+      final maximum = Platform.isWindows ? 32767 : 65535;
+      await expectLater(
+        PtySession.spawn(
+          missing(
+            initialSize: PtySize(rows: maximum, columns: maximum),
+          ),
+        ),
+        throwsA(isA<PtySpawnException>()),
+      );
+      await expectLater(
+        PtySession.spawn(
+          missing(initialSize: PtySize(rows: maximum + 1, columns: 80)),
+        ),
+        throwsA(isA<PtyInvalidArgumentException>()),
+      );
+    });
+
+    test('ignored environment maps are not validated', () async {
+      for (final mode in [
+        PtyEnvironmentMode.inherit,
+        PtyEnvironmentMode.clear,
+      ]) {
+        final base = shell('exit 0');
+        final session = await PtySession.spawn(
+          PtySpawnOptions(
+            executable: base.executable,
+            arguments: base.arguments,
+            environment: const {'invalid=key': '\u0000'},
+            environmentMode: mode,
+            initialSize: base.initialSize,
+            maxBufferedInput: base.maxBufferedInput,
+            maxBufferedOutput: base.maxBufferedOutput,
+            gracefulCloseTimeout: base.gracefulCloseTimeout,
+          ),
+        );
+        await session.exitCode;
+        await session.close();
+      }
+    });
+  });
+
   test('capabilities describe platform-specific behavior', () async {
     final session = await PtySession.spawn(shell('exit 0'));
     addTearDown(session.close);
@@ -156,4 +325,22 @@ void main() {
     expect(session.capabilities.terminalModes, !Platform.isWindows);
     expect(session.capabilities.conPty, Platform.isWindows);
   });
+
+  test(
+    'null working directory snapshots the parent cwd for every spawn',
+    () async {
+      final result = await Process.run(Platform.resolvedExecutable, [
+        'run',
+        'test/support/current_directory_probe.dart',
+      ]).timeout(const Duration(seconds: 30));
+
+      expect(
+        result.exitCode,
+        0,
+        reason:
+            'probe stdout:\n${result.stdout}\n'
+            'probe stderr:\n${result.stderr}',
+      );
+    },
+  );
 }

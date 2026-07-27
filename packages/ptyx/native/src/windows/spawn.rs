@@ -130,8 +130,12 @@ pub(crate) fn spawn(config: BrokerSpawn) -> io::Result<SpawnedSession> {
 
     let job = create_job()?;
     let mut attributes = AttributeList::new(2)?;
-    attributes.set_pseudoconsole(pseudoconsole.raw())?;
-    attributes.set_job(job.raw())?;
+    // UpdateProcThreadAttribute retains pointers to these values until
+    // CreateProcessW consumes the attribute list.
+    let mut pseudoconsole_attribute = pseudoconsole.raw();
+    let mut job_attribute = [job.raw()];
+    attributes.set_pseudoconsole(&mut pseudoconsole_attribute)?;
+    attributes.set_job(&mut job_attribute)?;
 
     let application = nul_terminated(&executable)?;
     let application_pointer = if uses_search_path(&executable) {

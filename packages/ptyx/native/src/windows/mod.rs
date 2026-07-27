@@ -522,8 +522,8 @@ pub(crate) struct NoticeReceiver {
 }
 
 impl NoticeReceiver {
-    pub(crate) fn recv(&self) -> Result<Notice, mpsc::RecvError> {
-        let notice = self.receiver.recv()?;
+    pub(crate) fn recv_timeout(&self, timeout: Duration) -> Result<Notice, mpsc::RecvTimeoutError> {
+        let notice = self.receiver.recv_timeout(timeout)?;
         self.budget.release();
         let _ = self.iocp.post_command();
         Ok(notice)
@@ -1024,18 +1024,27 @@ fn process_commands(
                 let result = sessions
                     .get_mut(handle)
                     .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "stale session"))
-                    .map(|session| {
+                    .and_then(|session| {
+                        if session.abandoned || session.close_started {
+                            return Err(io::Error::new(
+                                io::ErrorKind::BrokenPipe,
+                                "session activation was abandoned",
+                            ));
+                        }
                         session.active = true;
                         session.activation_deadline = None;
                         if session.exit_status.is_some() && !session.exit_notified {
                             session.exit_notified = true;
                             send_lifecycle_notice(session, notices, Notice::Exit(handle), counters);
                         }
+                        Ok(())
                     });
-                if let Some(session) = sessions.get_mut(handle) {
-                    ensure_read(iocp, handle, session, notices, counters);
-                    ensure_write(iocp, handle, session, notices, counters);
-                    refresh_output(handle, session, notices, counters);
+                if result.is_ok() {
+                    if let Some(session) = sessions.get_mut(handle) {
+                        ensure_read(iocp, handle, session, notices, counters);
+                        ensure_write(iocp, handle, session, notices, counters);
+                        refresh_output(handle, session, notices, counters);
+                    }
                 }
                 let _ = reply.send(result);
             }

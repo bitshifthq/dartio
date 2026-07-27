@@ -98,7 +98,7 @@ identity, not an unchecked numeric PID, controls signal and cleanup decisions.
 | repeated or concurrent close | atomic installation of one shared close completion makes all callers observe one result |
 | native output post versus port closure | failed post returns credit and commits native shutdown; no Dart acknowledgment is awaited |
 | copied output post versus shutdown | a successful post retains one charged message until Dart delivery or discard returns credit; a failed post rolls the same credit back before shutdown |
-| isolate loss versus explicit close | the native session entry accepts the first shutdown cause and merges later causes into the same cleanup |
+| isolate loss versus explicit close | a Dart finalizer, failed operational post, or failed quiet-port probe reaches the same native abandonment entry; the first shutdown cause commits and later causes merge into the same cleanup |
 | reactor failure versus public operations | the reactor commits affected sub-resources to typed failures, then performs session cleanup without corrupting other sessions |
 | mode timer versus close | generation and observer state are checked at callback commit; a late callback is discarded without touching released state |
 | handle reuse versus late ABI call | registry index and generation must both match a live entry; retired generations are never dereferenced |

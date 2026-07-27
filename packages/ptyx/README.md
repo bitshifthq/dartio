@@ -14,9 +14,9 @@ provide SSH. Arguments are passed directly to the executable.
 dart pub add ptyx
 ```
 
-Source builds require Dart 3.11 or newer, a stable Rust toolchain, and a C11
-compiler. See [building from source](doc/building.md) for target-specific
-requirements.
+Version `0.0.1` has no prebuilt artifacts and always builds from source. It
+requires Dart 3.11 or newer, a stable Rust toolchain, and a C11 compiler. See
+[building from source](doc/building.md) for target-specific requirements.
 
 ## Quick start
 

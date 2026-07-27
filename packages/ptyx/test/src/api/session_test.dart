@@ -135,6 +135,29 @@ void main() {
         expect(utf8.decode(bytes), 'hello-ptyx');
       });
 
+      test(
+        'resolves a bare executable with a cleared child environment',
+        () async {
+          final session = await spawn(
+            PtySpawnOptions(
+              executable: Platform.isWindows ? 'cmd.exe' : 'sh',
+              arguments: Platform.isWindows
+                  ? const ['/d', '/c', '<nul set /p =bare']
+                  : const ['-c', 'printf bare'],
+              environmentMode: PtyEnvironmentMode.clear,
+              initialSize: defaultSize,
+            ),
+          );
+
+          final output = await session.output
+              .expand((chunk) => chunk)
+              .toList()
+              .timeout(shortTimeout);
+
+          expect(utf8.decode(output), 'bare');
+        },
+      );
+
       test('throws PtyException for a missing executable', () async {
         const options = PtySpawnOptions(
           executable: 'definitely-not-a-real-ptyx-command',
@@ -572,6 +595,52 @@ void main() {
 
         await expectLater(session.close(), completes);
       });
+
+      test('forced close waits for native child termination', () async {
+        final session = await PtySession.spawn(
+          const PtySpawnOptions(
+            executable: '/bin/sh',
+            arguments: [
+              '-c',
+              "trap '' HUP TERM; printf ready; while :; do sleep 1; done",
+            ],
+            initialSize: PtySize(rows: 24, columns: 80),
+            gracefulCloseTimeout: Duration.zero,
+          ),
+        );
+        await session.output.first.timeout(shortTimeout);
+
+        await session.close().timeout(shortTimeout);
+
+        await expectLater(session.exitCode, completes);
+      }, testOn: 'posix');
+
+      test(
+        'broker processes close bursts beyond one fairness quantum',
+        () async {
+          final sessions = await Future.wait(
+            List.generate(
+              24,
+              (_) => PtySession.spawn(
+                const PtySpawnOptions(
+                  executable: '/bin/sh',
+                  arguments: ['-c', "trap '' HUP TERM; exec sleep 30"],
+                  initialSize: PtySize(rows: 24, columns: 80),
+                  gracefulCloseTimeout: Duration.zero,
+                ),
+              ),
+            ),
+          );
+
+          await Future.wait(
+            sessions.map((session) => session.close()),
+          ).timeout(const Duration(seconds: 10));
+          await Future.wait(
+            sessions.map((session) => session.exitCode),
+          ).timeout(shortTimeout);
+        },
+        testOn: 'posix',
+      );
 
       test(
         'reclaims the terminal process group after its leader exits',

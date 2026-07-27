@@ -702,6 +702,13 @@ impl BrokerOwner {
         set_cloexec(wake_write.as_raw_fd())?;
         set_nonblocking(wake_read.as_raw_fd())?;
         set_nonblocking(wake_write.as_raw_fd())?;
+        let worker_wake_fd = unsafe { libc::dup(wake_write.as_raw_fd()) };
+        if worker_wake_fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let worker_wake_write = unsafe { OwnedFd::from_raw_fd(worker_wake_fd) };
+        set_cloexec(worker_wake_write.as_raw_fd())?;
+        set_nonblocking(worker_wake_write.as_raw_fd())?;
         let (request_sender, request_receiver) = mpsc::sync_channel(REQUEST_CAPACITY);
         let shared = Arc::new(Shared {
             requests: request_sender,
@@ -714,6 +721,7 @@ impl BrokerOwner {
                     control,
                     broker_pid,
                     wake_read,
+                    worker_wake_write,
                     request_receiver,
                     reactor_commands,
                     reactor_wake,
@@ -970,6 +978,7 @@ impl Worker {
         let (response, passed) = self.receive_for(request, RELEASE_RESULT)?;
         drop(passed);
         if response.aux == 1 {
+            self.exits.remove(&session);
             Ok(())
         } else {
             Err(io::Error::new(
@@ -1025,6 +1034,7 @@ fn run_worker(
     control: OwnedFd,
     broker_pid: libc::pid_t,
     wake: OwnedFd,
+    worker_wake: OwnedFd,
     requests: Receiver<Request>,
     reactor_commands: SyncSender<Command>,
     reactor_wake: OwnedFd,
@@ -1070,10 +1080,12 @@ fn run_worker(
         }
         if poll[0].revents & libc::POLLIN != 0 {
             drain(wake.as_raw_fd());
+            let mut processed = 0;
             for _ in 0..REQUEST_QUANTUM {
                 let Ok(request) = requests.try_recv() else {
                     break;
                 };
+                processed += 1;
                 match request {
                     Request::Spawn { config, reply } => {
                         let _ = reply.send(worker.spawn(config));
@@ -1103,6 +1115,9 @@ fn run_worker(
                     }
                 }
             }
+            if processed == REQUEST_QUANTUM {
+                wake_worker(worker_wake.as_raw_fd());
+            }
         }
     }
     unsafe {
@@ -1120,6 +1135,13 @@ fn run_worker(
                 byte.len(),
             );
         }
+    }
+}
+
+fn wake_worker(fd: RawFd) {
+    let byte = [1_u8];
+    unsafe {
+        libc::write(fd, byte.as_ptr().cast(), byte.len());
     }
 }
 

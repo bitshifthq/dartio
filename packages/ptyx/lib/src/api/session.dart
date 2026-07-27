@@ -64,8 +64,9 @@ abstract interface class PtySession {
 
   /// Completes when input reaches a terminal state.
   ///
-  /// It completes normally when input is closed deliberately and with a
-  /// [PtyInputException] when accepted input can no longer be written.
+  /// It completes normally when input is closed deliberately, or when session
+  /// shutdown or direct-child exit resolves every accepted byte. It completes
+  /// with [PtyInputException] when accepted input can no longer be written.
   Future<void> get inputDone;
 
   /// Platform-specific features available to this session.

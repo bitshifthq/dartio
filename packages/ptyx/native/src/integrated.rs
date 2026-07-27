@@ -798,7 +798,14 @@ fn process_commands(
             }
             Command::Activate { handle, reply } => {
                 let result = if let Some(session) = sessions.get_mut(handle) {
-                    register_session(kqueue, handle, session)
+                    if session.abandoned || session.close_started {
+                        Err(io::Error::new(
+                            io::ErrorKind::BrokenPipe,
+                            "session activation was abandoned",
+                        ))
+                    } else {
+                        register_session(kqueue, handle, session)
+                    }
                 } else {
                     Err(io::Error::new(io::ErrorKind::NotFound, "stale session"))
                 };
@@ -1592,7 +1599,12 @@ fn session_tty_name(session: &Session) -> Option<Vec<u8>> {
         return None;
     }
     let length = name.iter().position(|byte| *byte == 0)?;
-    Some(name[..length].iter().map(|byte| *byte as u8).collect())
+    Some(
+        name[..length]
+            .iter()
+            .map(|byte| byte.to_ne_bytes()[0])
+            .collect(),
+    )
 }
 
 unsafe extern "C" {

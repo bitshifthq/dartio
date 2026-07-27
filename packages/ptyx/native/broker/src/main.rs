@@ -3,6 +3,7 @@ use std::ffi::{CStr, CString};
 use std::io;
 use std::mem::{size_of, MaybeUninit};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::os::unix::ffi::OsStrExt;
 use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -1379,6 +1380,7 @@ fn spawn_target(request: &SpawnRequest) -> io::Result<Spawned> {
                 .chain(std::iter::once(ptr::null()))
                 .collect()
         });
+    let executable_candidates = executable_candidates(request.argv[0].as_c_str())?;
     let descriptor_limit = unsafe { libc::getdtablesize() };
     let pid = unsafe { libc::fork() };
     if pid < 0 {
@@ -1388,7 +1390,7 @@ fn spawn_target(request: &SpawnRequest) -> io::Result<Spawned> {
         unsafe {
             libc::close(error_read.as_raw_fd());
             exec_target(
-                request.argv[0].as_c_str(),
+                &executable_candidates,
                 &pointers,
                 environment.as_deref(),
                 request.cwd.as_deref(),
@@ -1413,8 +1415,34 @@ fn spawn_target(request: &SpawnRequest) -> io::Result<Spawned> {
     }
 }
 
+fn executable_candidates(executable: &CStr) -> io::Result<Vec<CString>> {
+    if executable.to_bytes().contains(&b'/') {
+        return Ok(vec![executable.to_owned()]);
+    }
+    let path = std::env::var_os("PATH")
+        .map(|value| value.as_os_str().as_bytes().to_vec())
+        .unwrap_or_else(|| b"/usr/bin:/bin".to_vec());
+    path.split(|byte| *byte == b':')
+        .map(|directory| {
+            let mut candidate = Vec::with_capacity(
+                directory
+                    .len()
+                    .saturating_add(1)
+                    .saturating_add(executable.to_bytes().len()),
+            );
+            if !directory.is_empty() {
+                candidate.extend_from_slice(directory);
+                candidate.push(b'/');
+            }
+            candidate.extend_from_slice(executable.to_bytes());
+            CString::new(candidate)
+                .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "PATH contains NUL"))
+        })
+        .collect()
+}
+
 unsafe fn exec_target(
-    executable: &CStr,
+    executable_candidates: &[CString],
     argv: &[*const libc::c_char],
     environment: Option<&[*const libc::c_char]>,
     cwd: Option<&CStr>,
@@ -1470,13 +1498,23 @@ unsafe fn exec_target(
     if close_child_descriptors_after(error_fd, descriptor_limit) < 0 {
         child_fail(error_fd);
     }
-    libc::execve(
-        executable.as_ptr(),
-        argv.as_ptr(),
-        environment.map_or(environ as *const *const libc::c_char, |entries| {
-            entries.as_ptr()
-        }),
-    );
+    let environment = environment.map_or(environ as *const *const libc::c_char, |entries| {
+        entries.as_ptr()
+    });
+    let mut permission_denied = false;
+    for executable in executable_candidates {
+        libc::execve(executable.as_ptr(), argv.as_ptr(), environment);
+        match current_errno() {
+            libc::EACCES => permission_denied = true,
+            libc::ENOENT | libc::ENOTDIR => {}
+            _ => child_fail(error_fd),
+        }
+    }
+    set_current_errno(if permission_denied {
+        libc::EACCES
+    } else {
+        libc::ENOENT
+    });
     child_fail(error_fd)
 }
 
@@ -1535,9 +1573,19 @@ unsafe fn current_errno() -> libc::c_int {
     *libc::__error()
 }
 
+#[cfg(target_os = "macos")]
+unsafe fn set_current_errno(code: libc::c_int) {
+    *libc::__error() = code;
+}
+
 #[cfg(target_os = "linux")]
 unsafe fn current_errno() -> libc::c_int {
     *libc::__errno_location()
+}
+
+#[cfg(target_os = "linux")]
+unsafe fn set_current_errno(code: libc::c_int) {
+    *libc::__errno_location() = code;
 }
 
 fn read_exec_result(fd: RawFd) -> io::Result<Option<i32>> {
@@ -1642,7 +1690,8 @@ fn decode_spawn_v2(inject: bool, payload: &[u8]) -> io::Result<SpawnRequest> {
     let pixel_width = read_u32(payload, 24)?;
     let pixel_height = read_u32(payload, 28)?;
     let cwd_length = read_u32(payload, 32)? as usize;
-    if argc == 0 || argc > 256 {
+    // The public limit is 256 arguments in addition to argv[0].
+    if argc == 0 || argc > 257 {
         return Err(io::Error::new(io::ErrorKind::InvalidData, "bad argc"));
     }
     if environment_count != u32::MAX && environment_count > 4096 {

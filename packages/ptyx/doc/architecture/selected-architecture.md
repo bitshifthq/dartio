@@ -43,6 +43,10 @@ equivalent language comparison.
   recursively close the stream or silently terminate the process.
 - Loss of a Dart port is a terminal typed failure. It starts native cleanup,
   fails all waiters, and never leaves a session waiting for another Dart call.
+- The notifier probes each distinct event port every 250 milliseconds while
+  it is otherwise idle. A failed probe commits every session routed to that
+  isolate to native abandonment, including quiet sessions that produce no
+  ordinary notification. The probe bypasses operational post fault injection.
 
 ### Native controller
 
@@ -51,6 +55,10 @@ equivalent language comparison.
 - The native module is pinned before controller threads start. The controller
   intentionally lives for the host process, so library unloading cannot race
   a reactor, notifier, broker-controller, closer, or TLS destructor.
+- Dart object collection uses a Dart `Finalizer` that calls the idempotent
+  native abandonment entry point while its isolate is live. VM shutdown never
+  invokes a native finalizer callback; quiet isolate loss is covered by the
+  independent event-port probe.
 - Controller initialization is transactional. The registry, reactor,
   notifier, broker or IOCP owner, and failure route either become observable
   together or are all torn down before initialization reports failure.
