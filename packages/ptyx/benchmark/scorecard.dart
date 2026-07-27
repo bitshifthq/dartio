@@ -277,7 +277,7 @@ Future<({PtySession session, _ChunkReader bytes})> _readySession(
   List<String> arguments = const [],
 ]) async {
   final session = await _spawnFixture(operation, arguments);
-  final bytes = _ChunkReader(session.output);
+  final bytes = _ChunkReader(session.output, acknowledgementSession: session);
   const marker = [82, 69, 65, 68, 89];
   var matched = 0;
   for (var consumed = 0; consumed < 64 * 1024; consumed++) {
@@ -641,7 +641,7 @@ Future<Map<String, Object?>> _pauseResume(int byteCount) async {
 }
 
 Future<Map<String, Object?>> _discardOutput(int byteCount) async {
-  final (:session, :bytes) = await _readySession('output', ['$byteCount']);
+  final (:session, :bytes) = await _readySession('output-raw', ['$byteCount']);
   final stopwatch = Stopwatch()..start();
   try {
     await bytes.cancel();
@@ -660,7 +660,7 @@ Future<Map<String, Object?>> _discardOutput(int byteCount) async {
 }
 
 Future<Map<String, Object?>> _noListener(int byteCount) async {
-  final session = await _spawnFixture('output', ['$byteCount']);
+  final session = await _spawnFixture('output-raw', ['$byteCount']);
   final before = await _resourceSnapshot();
   try {
     await session.write(Uint8List.fromList(const [1]));
@@ -1379,9 +1379,19 @@ final class _ChunkReader {
   Uint8List? _current;
   var _offset = 0;
 
-  _ChunkReader(Stream<Uint8List> stream)
+  _ChunkReader(Stream<Uint8List> stream, {PtySession? acknowledgementSession})
     : _chunks = StreamIterator(
-        Platform.isWindows ? fixturePayload(stream, discardC0: true) : stream,
+        Platform.isWindows
+            ? fixturePayload(
+                stream,
+                discardC0: true,
+                acknowledgePage: acknowledgementSession == null
+                    ? null
+                    : (sequence) => acknowledgementSession.write(
+                        fixturePageAcknowledgement(sequence),
+                      ),
+              )
+            : stream,
       );
 
   Future<int?> readByte() async {

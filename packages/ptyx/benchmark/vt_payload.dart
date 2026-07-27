@@ -2,6 +2,10 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
 
+/// Encodes the acknowledgement for a fully observed ConPTY fixture page.
+Uint8List fixturePageAcknowledgement(int sequence) =>
+    Uint8List.fromList([0, ...ascii.encode(sequence.toRadixString(36)), 10]);
+
 /// Removes terminal-control sequences from fixture output.
 ///
 /// ConPTY transports UTF-8 text interleaved with VT sequences. Benchmark
@@ -11,6 +15,7 @@ import 'dart:typed_data';
 Stream<Uint8List> fixturePayload(
   Stream<Uint8List> source, {
   bool discardC0 = false,
+  FutureOr<void> Function(int sequence)? acknowledgePage,
 }) async* {
   var state = _VtState.ground;
   final frames = _FixtureFrames();
@@ -55,13 +60,19 @@ Stream<Uint8List> fixturePayload(
       }
     }
     if (output.length != 0) {
-      for (final bytes in frames.add(output.takeBytes())) {
-        yield bytes;
+      for (final event in frames.add(output.takeBytes())) {
+        if (event.bytes case final bytes?) yield bytes;
+        if (event.page case final page?) {
+          await acknowledgePage?.call(page);
+        }
       }
     }
   }
-  for (final bytes in frames.close()) {
-    yield bytes;
+  for (final event in frames.close()) {
+    if (event.bytes case final bytes?) yield bytes;
+    if (event.page case final page?) {
+      await acknowledgePage?.call(page);
+    }
   }
 }
 
@@ -72,7 +83,7 @@ final class _FixtureFrames {
   var _framed = false;
   var _nextSequence = 0;
 
-  Iterable<Uint8List> add(Uint8List bytes) sync* {
+  Iterable<({Uint8List? bytes, int? page})> add(Uint8List bytes) sync* {
     _buffer.addAll(bytes);
     if (!_framed) {
       final marker = _indexOf(_buffer, _framePreamble);
@@ -80,13 +91,19 @@ final class _FixtureFrames {
         final retained = _matchingSuffix(_buffer, _framePreamble);
         final emitted = _buffer.length - retained;
         if (emitted != 0) {
-          yield Uint8List.fromList(_buffer.sublist(0, emitted));
+          yield (
+            bytes: Uint8List.fromList(_buffer.sublist(0, emitted)),
+            page: null,
+          );
           _buffer.removeRange(0, emitted);
         }
         return;
       }
       if (marker != 0) {
-        yield Uint8List.fromList(_buffer.sublist(0, marker));
+        yield (
+          bytes: Uint8List.fromList(_buffer.sublist(0, marker)),
+          page: null,
+        );
       }
       _buffer.removeRange(0, marker + _framePreamble.length);
       _framed = true;
@@ -103,11 +120,21 @@ final class _FixtureFrames {
 
       final end = _buffer.indexOf(_frameBoundary, 1);
       if (end < 0) return;
-      final frame = _decodeFrame(_buffer.sublist(1, end));
+      final record = _decodeRecord(_buffer.sublist(1, end));
       _buffer.removeRange(0, end + 1);
-      if (frame == null) {
+      if (record == null) {
         continue;
       }
+      if (record.page case final page?) {
+        if (page >= _nextSequence) {
+          throw StateError(
+            'fixture page ended at $page before frame $_nextSequence',
+          );
+        }
+        yield (bytes: null, page: page);
+        continue;
+      }
+      final frame = record.frame!;
 
       if (frame.sequence < _nextSequence) {
         continue;
@@ -118,13 +145,13 @@ final class _FixtureFrames {
         );
       }
       _nextSequence++;
-      yield frame.bytes;
+      yield (bytes: frame.bytes, page: null);
     }
   }
 
-  Iterable<Uint8List> close() sync* {
+  Iterable<({Uint8List? bytes, int? page})> close() sync* {
     if (!_framed && _buffer.isNotEmpty) {
-      yield Uint8List.fromList(_buffer);
+      yield (bytes: Uint8List.fromList(_buffer), page: null);
     }
     _buffer.clear();
   }
@@ -161,21 +188,45 @@ int _matchingSuffix(List<int> bytes, List<int> pattern) {
   return 0;
 }
 
-({int sequence, Uint8List bytes})? _decodeFrame(List<int> frame) {
-  final separator = frame.indexOf(_frameSeparator);
-  if (separator <= 0 || separator == frame.length - 1) return null;
+({({int sequence, Uint8List bytes})? frame, int? page})? _decodeRecord(
+  List<int> record,
+) {
+  if (record.length > _pagePrefix.length && _startsWith(record, _pagePrefix)) {
+    try {
+      return (
+        frame: null,
+        page: int.parse(
+          ascii.decode(record.sublist(_pagePrefix.length)),
+          radix: 36,
+        ),
+      );
+    } on FormatException {
+      return null;
+    }
+  }
+  final separator = record.indexOf(_frameSeparator);
+  if (separator <= 0 || separator == record.length - 1) return null;
   try {
     final sequence = int.parse(
-      ascii.decode(frame.sublist(0, separator)),
+      ascii.decode(record.sublist(0, separator)),
       radix: 36,
     );
-    final bytes = base64.decode(ascii.decode(frame.sublist(separator + 1)));
-    return (sequence: sequence, bytes: bytes);
+    final bytes = base64.decode(ascii.decode(record.sublist(separator + 1)));
+    return (frame: (sequence: sequence, bytes: bytes), page: null);
   } on FormatException {
     return null;
   }
 }
 
+bool _startsWith(List<int> bytes, List<int> prefix) {
+  if (bytes.length < prefix.length) return false;
+  for (var index = 0; index < prefix.length; index++) {
+    if (bytes[index] != prefix[index]) return false;
+  }
+  return true;
+}
+
 const _frameBoundary = 0x7e;
 const _frameSeparator = 0x3a;
 const _framePreamble = [0x7e, 0x50, 0x46, 0x7e];
+const _pagePrefix = [0x50, 0x41, 0x3a];

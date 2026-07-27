@@ -13,8 +13,14 @@ const _operationTimeout = Duration(seconds: 30);
 const _ready = [82, 69, 65, 68, 89];
 const _maximumReadinessPrelude = 64 * 1024;
 
-Stream<Uint8List> _fixturePayload(Stream<Uint8List> output) =>
-    Platform.isWindows ? fixturePayload(output, discardC0: true) : output;
+Stream<Uint8List> _fixturePayload(PtySession session) => Platform.isWindows
+    ? fixturePayload(
+        session.output,
+        discardC0: true,
+        acknowledgePage: (sequence) =>
+            session.write(fixturePageAcknowledgement(sequence)),
+      )
+    : session.output;
 
 Future<void> main(List<String> arguments) async {
   final durationArgument = arguments
@@ -48,7 +54,7 @@ Future<void> main(List<String> arguments) async {
   var longLivedBytes = 0;
   final longSession = await _spawnFixture('ready-cat', 0);
   final longOutput = StreamIterator(
-    _fixturePayload(longSession.output).expand((chunk) => chunk),
+    _fixturePayload(longSession).expand((chunk) => chunk),
   );
   await _expectReady(longOutput);
   final deadline = DateTime.now().add(duration);
@@ -160,7 +166,7 @@ Future<void> main(List<String> arguments) async {
 Future<void> _warmLongLivedSession() async {
   final session = await _spawnFixture('ready-cat', 0);
   final output = StreamIterator(
-    _fixturePayload(session.output).expand((chunk) => chunk),
+    _fixturePayload(session).expand((chunk) => chunk),
   );
   try {
     await _expectReady(output);
@@ -180,7 +186,7 @@ Future<int> _runCycle(int cycle) async {
   const byteCount = 64 * 1024;
   final session = await _spawnFixture('echo-count', byteCount);
   final iterator = StreamIterator(
-    _fixturePayload(session.output).expand((chunk) => chunk),
+    _fixturePayload(session).expand((chunk) => chunk),
   );
   try {
     await _expectReady(iterator);

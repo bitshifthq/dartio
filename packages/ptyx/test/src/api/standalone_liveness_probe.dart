@@ -23,7 +23,13 @@ Future<void> main() async {
     ),
   );
   final output =
-      (Platform.isWindows ? fixturePayload(session.output) : session.output)
+      (Platform.isWindows
+              ? fixturePayload(
+                  session.output,
+                  acknowledgePage: (sequence) =>
+                      session.write(fixturePageAcknowledgement(sequence)),
+                )
+              : session.output)
           .expand((chunk) => chunk)
           .toList();
   final exitCode = await session.exitCode;

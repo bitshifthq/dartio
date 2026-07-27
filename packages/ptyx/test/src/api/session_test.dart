@@ -24,8 +24,13 @@ void main() {
       return Platform.isWindows ? windows : posix;
     }
 
-    Stream<Uint8List> fixtureOutput(PtySession session) =>
-        Platform.isWindows ? fixturePayload(session.output) : session.output;
+    Stream<Uint8List> fixtureOutput(PtySession session) => Platform.isWindows
+        ? fixturePayload(
+            session.output,
+            acknowledgePage: (sequence) =>
+                session.write(fixturePageAcknowledgement(sequence)),
+          )
+        : session.output;
 
     ({String executable, List<String> arguments}) shell(String script) {
       if (Platform.isWindows) {

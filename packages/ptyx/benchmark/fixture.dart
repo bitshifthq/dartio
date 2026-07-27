@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:collection';
 import 'dart:convert';
 import 'dart:ffi';
 import 'dart:io';
@@ -9,6 +10,7 @@ import 'package:ffi/ffi.dart';
 const _ready = [82, 69, 65, 68, 89];
 const _outputFlushBytes = 1024 * 1024;
 const _conptyFrameBytes = 48;
+const _conptyPageFrames = 16;
 const _conptyEraseLine = [0x1b, 0x5b, 0x32, 0x4b, 13];
 var _conptyFrameSequence = 0;
 
@@ -22,64 +24,91 @@ Future<void> main(List<String> arguments) async {
     stdin.echoMode = false;
     stdin.lineMode = false;
   }
-  switch (arguments.first) {
-    case 'exit':
-      exit(int.parse(arguments[1]));
-    case 'output':
-      await _writeReady();
-      await _waitForGate();
-      await _writePattern(int.parse(arguments[1]));
-    case 'output-constant':
-      await _writeReady();
-      await _waitForGate();
-      await _writeConstant(int.parse(arguments[1]), 120);
-    case 'input-verify':
-      await _writeReady();
-      final result = await _readPattern(int.parse(arguments[1]), echo: false);
-      stdout.writeln(result);
-      await stdout.flush();
-    case 'gated-input-verify':
-      await _writeReady();
-      final gate = File(arguments[2]);
-      while (!gate.existsSync()) {
-        await Future<void>.delayed(const Duration(milliseconds: 1));
-      }
-      final result = await _readPattern(int.parse(arguments[1]), echo: false);
-      stdout.writeln(result);
-      await stdout.flush();
-    case 'echo-count':
-      await _writeReady();
-      final result = await _readPattern(int.parse(arguments[1]), echo: true);
-      if (result != 'OK ${arguments[1]}') {
-        stderr.writeln(result);
-        exitCode = 65;
-      }
-    case 'ready-cat':
-      await _writeReady();
-      await for (final chunk in stdin) {
-        _writePayload(chunk);
+  final input = _FixtureInput();
+  try {
+    switch (arguments.first) {
+      case 'exit':
+        exit(int.parse(arguments[1]));
+      case 'output':
+        await _writeReady();
+        await _waitForGate(input);
+        await _writePattern(int.parse(arguments[1]), input);
+      case 'output-constant':
+        await _writeReady();
+        await _waitForGate(input);
+        await _writeConstant(int.parse(arguments[1]), 120, input);
+      case 'output-raw':
+        await _writeReady();
+        await _waitForGate(input);
+        await _writePattern(int.parse(arguments[1]), input, framed: false);
+      case 'input-verify':
+        await _writeReady();
+        final result = await _readPattern(
+          int.parse(arguments[1]),
+          input,
+          echo: false,
+        );
+        stdout.writeln(result);
         await stdout.flush();
-      }
-    case 'environment':
-      stdout.write(
-        '${Platform.environment[arguments[1]] ?? ''}|'
-        '${Platform.environment['PATH'] ?? ''}',
-      );
-      await stdout.flush();
-    case 'size':
-      final initialSize = _terminalSize();
-      await _writeSize(initialSize);
-      await stdin.first;
-      await _writeSize(
-        Platform.isWindows
-            ? await _waitForTerminalSizeChange(initialSize)
-            : _terminalSize(),
-      );
-    case 'idle':
-      await stdin.drain<void>();
-    default:
-      stderr.writeln('unknown fixture operation: ${arguments.first}');
-      exitCode = 64;
+      case 'gated-input-verify':
+        await _writeReady();
+        final gate = File(arguments[2]);
+        while (!gate.existsSync()) {
+          await Future<void>.delayed(const Duration(milliseconds: 1));
+        }
+        final result = await _readPattern(
+          int.parse(arguments[1]),
+          input,
+          echo: false,
+        );
+        stdout.writeln(result);
+        await stdout.flush();
+      case 'echo-count':
+        await _writeReady();
+        final result = await _readPattern(
+          int.parse(arguments[1]),
+          input,
+          echo: true,
+        );
+        if (result != 'OK ${arguments[1]}') {
+          stderr.writeln(result);
+          exitCode = 65;
+        }
+      case 'ready-cat':
+        await _writeReady();
+        while (true) {
+          final chunk = await input.readApplication(
+            maxBytes: Platform.isWindows
+                ? _conptyFrameBytes * _conptyPageFrames
+                : 64 * 1024,
+          );
+          if (chunk == null) break;
+          await _writePayload(chunk, input);
+          if (!Platform.isWindows) await stdout.flush();
+        }
+      case 'environment':
+        stdout.write(
+          '${Platform.environment[arguments[1]] ?? ''}|'
+          '${Platform.environment['PATH'] ?? ''}',
+        );
+        await stdout.flush();
+      case 'size':
+        final initialSize = _terminalSize();
+        await _writeSize(initialSize);
+        await input.readApplication(maxBytes: 1);
+        await _writeSize(
+          Platform.isWindows
+              ? await _waitForTerminalSizeChange(initialSize)
+              : _terminalSize(),
+        );
+      case 'idle':
+        while (await input.readApplication() != null) {}
+      default:
+        stderr.writeln('unknown fixture operation: ${arguments.first}');
+        exitCode = 64;
+    }
+  } finally {
+    await input.close();
   }
 }
 
@@ -88,16 +117,18 @@ Future<void> _writeReady() async {
   await stdout.flush();
 }
 
-Future<void> _waitForGate() async {
-  await for (final chunk in stdin) {
-    if (chunk.isNotEmpty) return;
-  }
+Future<void> _waitForGate(_FixtureInput input) async {
+  if (await input.readApplication(maxBytes: 1) != null) return;
   throw StateError('output gate reached EOF');
 }
 
 int _pattern(int offset) => 32 + ((offset * 31 + 17) % 95);
 
-Future<void> _writePattern(int byteCount) async {
+Future<void> _writePattern(
+  int byteCount,
+  _FixtureInput input, {
+  bool framed = true,
+}) async {
   final chunk = Uint8List(64 * 1024);
   var offset = 0;
   while (offset != byteCount) {
@@ -107,7 +138,12 @@ Future<void> _writePattern(int byteCount) async {
     for (var index = 0; index < count; index++) {
       chunk[index] = _pattern(offset + index);
     }
-    _writePayload(count == chunk.length ? chunk : chunk.sublist(0, count));
+    final bytes = count == chunk.length ? chunk : chunk.sublist(0, count);
+    if (framed) {
+      await _writePayload(bytes, input);
+    } else {
+      stdout.add(bytes);
+    }
     offset += count;
     if (offset % _outputFlushBytes == 0 || offset == byteCount) {
       await stdout.flush();
@@ -115,14 +151,21 @@ Future<void> _writePattern(int byteCount) async {
   }
 }
 
-Future<void> _writeConstant(int byteCount, int byte) async {
+Future<void> _writeConstant(
+  int byteCount,
+  int byte,
+  _FixtureInput input,
+) async {
   final chunk = Uint8List(64 * 1024)..fillRange(0, 64 * 1024, byte);
   var offset = 0;
   while (offset != byteCount) {
     final count = byteCount - offset < chunk.length
         ? byteCount - offset
         : chunk.length;
-    _writePayload(count == chunk.length ? chunk : chunk.sublist(0, count));
+    await _writePayload(
+      count == chunk.length ? chunk : chunk.sublist(0, count),
+      input,
+    );
     offset += count;
     if (offset % _outputFlushBytes == 0 || offset == byteCount) {
       await stdout.flush();
@@ -130,9 +173,19 @@ Future<void> _writeConstant(int byteCount, int byte) async {
   }
 }
 
-Future<String> _readPattern(int byteCount, {required bool echo}) async {
+Future<String> _readPattern(
+  int byteCount,
+  _FixtureInput input, {
+  required bool echo,
+}) async {
   var received = 0;
-  await for (final chunk in stdin) {
+  while (true) {
+    final chunk = await input.readApplication(
+      maxBytes: echo && Platform.isWindows
+          ? _conptyFrameBytes * _conptyPageFrames
+          : 64 * 1024,
+    );
+    if (chunk == null) break;
     final count = byteCount - received < chunk.length
         ? byteCount - received
         : chunk.length;
@@ -143,8 +196,11 @@ Future<String> _readPattern(int byteCount, {required bool echo}) async {
       }
     }
     if (echo) {
-      _writePayload(count == chunk.length ? chunk : chunk.sublist(0, count));
-      await stdout.flush();
+      await _writePayload(
+        count == chunk.length ? chunk : chunk.sublist(0, count),
+        input,
+      );
+      if (!Platform.isWindows) await stdout.flush();
     }
     received += count;
     if (received == byteCount) break;
@@ -174,7 +230,7 @@ Future<(int, int)> _waitForTerminalSizeChange((int, int) initial) async {
   }
   // Dart 3.11 caches Stdout's Windows terminal dimensions. Querying the
   // screen buffer directly makes this resize fixture observe ConPTY's current
-  // viewport instead of its initial size.
+  // internal buffer instead of Dart's cached initial viewport.
   final kernel32 = DynamicLibrary.open('kernel32.dll');
   final getStdHandle = kernel32
       .lookupFunction<
@@ -192,31 +248,112 @@ Future<(int, int)> _waitForTerminalSizeChange((int, int) initial) async {
     if (getConsoleScreenBufferInfo(handle, information) == 0) {
       throw StateError('GetConsoleScreenBufferInfo failed');
     }
-    final window = information.ref.window;
-    return (window.bottom - window.top + 1, window.right - window.left + 1);
+    final size = information.ref.size;
+    return (size.y, size.x);
   } finally {
     calloc.free(information);
   }
 }
 
-void _writePayload(List<int> bytes) {
+Future<void> _writePayload(List<int> bytes, _FixtureInput input) async {
   if (!Platform.isWindows) {
     stdout.add(bytes);
     return;
   }
   // ConPTY transports screen differences rather than application writes.
-  // Sequence frames let the benchmark decoder reject redraw duplicates while
-  // still verifying every original byte. The base64 alphabet excludes '~',
-  // so frame boundaries remain unambiguous after VT controls are removed.
+  // A page fits in the visible buffer and is acknowledged before it can be
+  // scrolled away. Sequence frames reject redraw duplicates while still
+  // verifying every original byte. The base64 alphabet excludes '~', so frame
+  // boundaries remain unambiguous after VT controls are removed.
+  var pageFrames = 0;
+  var lastSequence = -1;
   for (var offset = 0; offset < bytes.length; offset += _conptyFrameBytes) {
     final end = offset + _conptyFrameBytes < bytes.length
         ? offset + _conptyFrameBytes
         : bytes.length;
     final payload = base64.encode(bytes.sublist(offset, end));
-    final sequence = (_conptyFrameSequence++).toRadixString(36);
+    lastSequence = _conptyFrameSequence++;
+    final sequence = lastSequence.toRadixString(36);
     stdout.add(_conptyEraseLine);
     stdout.write('~PF~~$sequence:$payload~');
-    stdout.add(const [13]);
+    stdout.add(const [13, 10]);
+    pageFrames++;
+    if (pageFrames == _conptyPageFrames || end == bytes.length) {
+      stdout.add(_conptyEraseLine);
+      stdout.write('~PA:${lastSequence.toRadixString(36)}~');
+      stdout.add(const [13, 10]);
+      await stdout.flush();
+      await input.waitForAcknowledgement(lastSequence);
+      pageFrames = 0;
+    }
+  }
+}
+
+final class _FixtureInput {
+  final _chunks = StreamIterator<List<int>>(stdin);
+  final _application = ListQueue<int>();
+  final _acknowledgements = ListQueue<int>();
+  final _acknowledgementBytes = <int>[];
+  var _readingAcknowledgement = false;
+  var _done = false;
+
+  Future<void> close() => _chunks.cancel();
+
+  Future<Uint8List?> readApplication({int maxBytes = 64 * 1024}) async {
+    while (_application.isEmpty && !_done) {
+      await _readChunk();
+    }
+    if (_application.isEmpty) return null;
+    final count = _application.length < maxBytes
+        ? _application.length
+        : maxBytes;
+    return Uint8List.fromList([
+      for (var index = 0; index < count; index++) _application.removeFirst(),
+    ]);
+  }
+
+  Future<void> waitForAcknowledgement(int expected) async {
+    while (true) {
+      while (_acknowledgements.isNotEmpty) {
+        final sequence = _acknowledgements.removeFirst();
+        if (sequence < expected) continue;
+        if (sequence != expected) {
+          throw StateError(
+            'fixture acknowledgement $expected was skipped before $sequence',
+          );
+        }
+        return;
+      }
+      if (_done) {
+        throw StateError('fixture acknowledgement $expected reached EOF');
+      }
+      await _readChunk();
+    }
+  }
+
+  Future<void> _readChunk() async {
+    if (!await _chunks.moveNext()) {
+      _done = true;
+      return;
+    }
+    for (final byte in _chunks.current) {
+      if (!_readingAcknowledgement) {
+        if (byte == 0) {
+          _readingAcknowledgement = true;
+          _acknowledgementBytes.clear();
+        } else {
+          _application.add(byte);
+        }
+        continue;
+      }
+      if (byte == 10) {
+        final encoded = ascii.decode(_acknowledgementBytes);
+        _acknowledgements.add(int.parse(encoded, radix: 36));
+        _readingAcknowledgement = false;
+      } else {
+        _acknowledgementBytes.add(byte);
+      }
+    }
   }
 }
 
