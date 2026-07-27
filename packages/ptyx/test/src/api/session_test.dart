@@ -450,6 +450,7 @@ void main() {
         final exitCode = await session.exitCode.timeout(shortTimeout);
 
         expect(exitCode, 7);
+        expect(await session.exitStatus, const PtyExited(7));
       });
     });
 
@@ -522,6 +523,10 @@ void main() {
         await session.exitCode.timeout(shortTimeout);
 
         expect(killed, isTrue);
+        expect(
+          await session.exitStatus,
+          Platform.isWindows ? isA<PtyExited>() : const PtySignaled(15),
+        );
       });
 
       test('preserves the requested Unix signal', () async {
@@ -535,6 +540,7 @@ void main() {
 
         expect(killed, isTrue);
         expect(exitCode, 42);
+        expect(await session.exitStatus, const PtyExited(42));
         expect(session.kill(), isFalse);
       }, testOn: 'posix');
     });

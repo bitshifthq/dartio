@@ -30,6 +30,7 @@ pub enum Notice {
     Flush { handle: u64, waiter: u64 },
     WaitFailed { handle: u64, waiter: u64 },
     InputFailed(u64),
+    OutputFailed(u64),
     BrokerLost(u64),
     OutputDone(u64),
     Exit(u64),
@@ -84,6 +85,7 @@ struct Session {
     output_deadline: Option<Instant>,
     output_notified: bool,
     output_done_notified: bool,
+    output_failed: bool,
     paused: bool,
     output_eof: bool,
     exit_status: Option<i32>,
@@ -116,6 +118,7 @@ impl Session {
             output_deadline: None,
             output_notified: false,
             output_done_notified: false,
+            output_failed: false,
             paused: true,
             output_eof: false,
             exit_status: None,
@@ -1262,6 +1265,9 @@ fn read_ready(
         if error.raw_os_error() == Some(libc::EIO) {
             session.output_eof = true;
             fail_input_waiters(handle, session, notices, counters);
+        } else {
+            session.output_eof = true;
+            session.output_failed = true;
         }
         break;
     }
@@ -1423,7 +1429,15 @@ fn refresh_output(
         && !session.output_done_notified
     {
         session.output_done_notified = true;
-        send_notice(notices, Notice::OutputDone(handle), counters);
+        send_notice(
+            notices,
+            if session.output_failed {
+                Notice::OutputFailed(handle)
+            } else {
+                Notice::OutputDone(handle)
+            },
+            counters,
+        );
     }
 }
 
@@ -1536,7 +1550,7 @@ fn session_mode(session: &Session) -> Option<[bool; 3]> {
 }
 
 fn session_tty_name(session: &Session) -> Option<Vec<u8>> {
-    let mut name = vec![0_i8; 1024];
+    let mut name = vec![0 as libc::c_char; 1024];
     if unsafe { ptsname_r(session.master.as_raw_fd(), name.as_mut_ptr(), name.len()) } != 0 {
         return None;
     }
@@ -1584,8 +1598,12 @@ fn submit(kqueue: RawFd, change: &libc::kevent) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{fail_input_waiters, notify_waiters, Notice, RuntimeCounters, Session, WaitResult};
+    use super::{
+        fail_input_waiters, notify_waiters, Notice, QueuedOutput, RuntimeCounters, Session,
+        WaitResult,
+    };
     use crate::broker_client::BrokerSession;
+    use std::collections::VecDeque;
     use std::fs::File;
     use std::sync::mpsc;
 
@@ -1692,6 +1710,87 @@ mod tests {
         waiters.sort_unstable();
         assert_eq!(waiters, vec![11, 12, 21, 22]);
         assert!(input_failed);
+        assert!(session.try_write(vec![1]).is_err());
+    }
+
+    #[test]
+    fn arbitrary_output_chunking_preserves_every_byte_and_credit() {
+        let mut session = session(4096);
+        let mut expected = Vec::new();
+        let mut state = 0x193a_6c8d_e42f_b751_u64;
+        for chunk_index in 0..512 {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            let length = 1 + state as usize % 97;
+            let bytes: Vec<_> = (0..length)
+                .map(|index| (chunk_index + index) as u8)
+                .collect();
+            expected.extend_from_slice(&bytes);
+            session.output_bytes += bytes.len();
+            session.output.push_back(QueuedOutput { bytes, offset: 0 });
+        }
+
+        let mut actual = Vec::new();
+        while session.output_bytes != 0 {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            let maximum = 1 + state as usize % 193;
+            let bytes = session.pull(maximum);
+            actual.extend_from_slice(&bytes);
+            assert!(session.output_total() <= expected.len());
+            assert!(session.credit(bytes.len()));
+        }
+
+        assert_eq!(actual, expected);
+        assert_eq!(session.output_total(), 0);
+        assert!(!session.credit(1));
+    }
+
+    #[test]
+    fn generated_input_sequences_are_all_or_reject_and_ordered() {
+        let mut session = session(257);
+        let mut expected = VecDeque::new();
+        let mut accepted_sequences = Vec::new();
+        let mut state = 0xa841_3f69_7c2d_50be_u64;
+
+        for step in 0..10_000 {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            if state & 3 == 0 && !session.input.is_empty() {
+                let queued = session.input.pop_front().unwrap();
+                session.input_bytes -= queued.bytes.len();
+                assert_eq!(queued.offset, 0);
+                assert_eq!(Some(&queued.bytes), expected.pop_front().as_ref());
+                continue;
+            }
+
+            let length = 1 + state as usize % 64;
+            let bytes: Vec<_> = (0..length).map(|index| (step + index) as u8).collect();
+            let before = session.input_bytes;
+            match session.try_write(bytes.clone()) {
+                Ok(sequence) => {
+                    assert_eq!(session.input_bytes, before + bytes.len());
+                    expected.push_back(bytes);
+                    accepted_sequences.push(sequence);
+                }
+                Err(rejected) => {
+                    assert_eq!(rejected, bytes);
+                    assert_eq!(session.input_bytes, before);
+                }
+            }
+            assert!(session.input_bytes <= session.input_capacity);
+        }
+
+        assert!(accepted_sequences.windows(2).all(|pair| pair[0] < pair[1]));
+        for queued in &session.input {
+            assert_eq!(Some(&queued.bytes), expected.pop_front().as_ref());
+        }
+        assert!(expected.is_empty());
+
+        session.close_started = true;
         assert!(session.try_write(vec![1]).is_err());
     }
 }

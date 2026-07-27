@@ -21,7 +21,12 @@ final class NativeSession implements PtySession {
     this._gracefulCloseTimeout,
     this._outputController,
     this._modeController,
-  );
+  ) {
+    // These completion channels are optional to observe. Retain their error
+    // for callers without reporting it as an unhandled zone error first.
+    _exit.future.ignore();
+    _inputDone.future.ignore();
+  }
 
   static Future<NativeSession> spawn(PtySpawnOptions options) async {
     _validateSpawnOptions(options);
@@ -32,7 +37,7 @@ final class NativeSession implements PtySession {
       () => _spawnNative(options, outputPort, eventPort),
     );
     if (handle == 0) {
-      throw const PtyException('native process spawn failed');
+      throw const PtySpawnException('native process spawn failed');
     }
 
     late final NativeSession session;
@@ -61,9 +66,9 @@ final class NativeSession implements PtySession {
       output,
       modes,
     );
-    runtime._sessions[handle] = session;
+    runtime._addSession(session);
     if (!controllerActivate(handle)) {
-      runtime._sessions.remove(handle);
+      runtime._removeSession(handle);
       controllerClose(handle);
       throw const PtyInfrastructureException(
         'native session activation failed',
@@ -88,8 +93,8 @@ final class NativeSession implements PtySession {
   Uint8List? _pendingOutput;
   var _paused = true;
   var _outputCancelled = false;
-  var _portLost = false;
   var _infrastructureLost = false;
+  Object? _terminalFailure;
   var _creditScheduled = false;
   Timer? _modeTimer;
   PtyTermMode? _lastMode;
@@ -108,6 +113,14 @@ final class NativeSession implements PtySession {
 
   @override
   Future<int> get exitCode => _exit.future;
+
+  @override
+  Future<PtyExitStatus> get exitStatus async {
+    final code = await _exit.future;
+    return capabilities.conPty || code >= 0
+        ? PtyExited(code)
+        : PtySignaled(-code);
+  }
 
   @override
   Future<void> get inputDone => _inputDone.future;
@@ -162,14 +175,16 @@ final class NativeSession implements PtySession {
       final bytes = arena<Uint8>(length);
       final written = controllerTtyName(_handle, bytes, length);
       if (written != length) {
-        throw const PtyException('native terminal name changed during read');
+        throw const PtyMetadataException(
+          'native terminal name changed during read',
+          operation: 'ttyName',
+        );
       }
       return utf8.decode(bytes.asTypedList(length));
     });
   }
 
-  bool get _isTerminal =>
-      _portLost || _infrastructureLost || (_close?.isCompleted ?? false);
+  bool get _isTerminal => _infrastructureLost || (_close?.isCompleted ?? false);
 
   void _checkOpen() {
     if (_close != null) {
@@ -233,7 +248,7 @@ final class NativeSession implements PtySession {
     }
     final result = controllerSignal(_handle, signal.signalNumber);
     if (result < 0) {
-      throw const PtyException('native signal delivery failed');
+      throw const PtySignalException('native signal delivery failed');
     }
     return result == 1;
   }
@@ -249,7 +264,7 @@ final class NativeSession implements PtySession {
       size.pixelWidth,
       size.pixelHeight,
     )) {
-      throw const PtyException('native terminal resize failed');
+      throw const PtyResizeException('native terminal resize failed');
     }
     _size = size;
   }
@@ -364,6 +379,10 @@ final class NativeSession implements PtySession {
       if (!_inputDone.isCompleted) {
         _inputDone.complete();
       }
+    } else {
+      _exit.completeError(
+        const PtyExitException('native child status was unavailable'),
+      );
     }
   }
 
@@ -384,7 +403,20 @@ final class NativeSession implements PtySession {
     }
   }
 
+  void _completeOutputFailure() {
+    if (!_outputDone.isCompleted) {
+      _outputDone.complete();
+    }
+    if (!_outputController.isClosed) {
+      _outputController.addError(
+        const PtyOutputException('native terminal output read failed'),
+      );
+      unawaited(_outputController.close());
+    }
+  }
+
   void _fail(Object error) {
+    _terminalFailure ??= error;
     _runtime._failWaiters(_handle, error);
     if (!_exit.isCompleted) {
       _exit.completeError(error);
@@ -399,32 +431,87 @@ final class NativeSession implements PtySession {
       _outputController.addError(error);
       unawaited(_outputController.close());
     }
-    _runtime._sessions.remove(_handle);
+    _runtime._removeSession(_handle);
   }
 
   Future<void> _closeNative(Completer<void> completion) async {
     _cancelOutput();
-    controllerSignal(_handle, ProcessSignal.sigterm.signalNumber);
+    Object? failure;
+    StackTrace? failureStack;
+    void recordFailure(Object error, [StackTrace? stackTrace]) {
+      failure ??= error;
+      failureStack ??= stackTrace ?? StackTrace.current;
+    }
+
+    final terminalFailure = _terminalFailure;
+    if (terminalFailure != null) {
+      recordFailure(terminalFailure);
+    }
+    if (!_infrastructureLost) {
+      final signal = controllerSignal(
+        _handle,
+        ProcessSignal.sigterm.signalNumber,
+      );
+      if (signal < 0) {
+        recordFailure(
+          const PtyCloseException('graceful termination request failed'),
+        );
+      }
+    }
     try {
       await _exit.future.timeout(_gracefulCloseTimeout);
     } on TimeoutException {
-      controllerClose(_handle);
-    } on Object {
-      controllerClose(_handle);
+      if (!controllerClose(_handle)) {
+        recordFailure(
+          const PtyCloseException('forced native cleanup request failed'),
+        );
+      }
+    } on Object catch (error, stackTrace) {
+      recordFailure(error, stackTrace);
+      if (!controllerClose(_handle)) {
+        recordFailure(
+          const PtyCloseException('forced native cleanup request failed'),
+        );
+      }
     }
     _completeExit();
     try {
-      await Future.wait<Object?>([_exit.future, _outputDone.future]);
+      await Future.wait<Object?>([
+        _exit.future,
+        _outputDone.future,
+      ]).timeout(const Duration(seconds: 5));
+    } on Object catch (error, stackTrace) {
+      recordFailure(error, stackTrace);
+      controllerClose(_handle);
+    }
+
+    var destroyed = controllerDestroy(_handle);
+    for (var retry = 0; !destroyed && retry < 100; retry++) {
+      await Future<void>.delayed(const Duration(milliseconds: 2));
+      destroyed = controllerDestroy(_handle);
+    }
+    if (!destroyed) {
+      recordFailure(
+        const PtyCloseException(
+          'native resources did not reach a terminal state',
+        ),
+      );
+    }
+
+    try {
       if (!_inputDone.isCompleted) {
         _inputDone.complete();
       }
-      controllerDestroy(_handle);
-      _runtime._sessions.remove(_handle);
+      _runtime._removeSession(_handle);
       _stopModeObservation();
       await _modeController.close();
-      completion.complete();
     } on Object catch (error, stackTrace) {
-      completion.completeError(error, stackTrace);
+      recordFailure(error, stackTrace);
+    }
+    if (failure case final Object error) {
+      completion.completeError(error, failureStack);
+    } else {
+      completion.complete();
     }
   }
 
@@ -513,6 +600,20 @@ final class _ControllerRuntime {
   int get outputPort => _output.sendPort.nativePort;
   int get eventPort => _events.sendPort.nativePort;
 
+  void _addSession(NativeSession session) {
+    _sessions[session._handle] = session;
+    _output.keepIsolateAlive = true;
+    _events.keepIsolateAlive = true;
+  }
+
+  void _removeSession(int handle) {
+    _sessions.remove(handle);
+    if (_sessions.isEmpty) {
+      _output.keepIsolateAlive = false;
+      _events.keepIsolateAlive = false;
+    }
+  }
+
   Future<void> _wait(int handle, int Function(int waiter) register) async {
     final waiter = _nextWaiter++;
     final completion = Completer<void>();
@@ -555,13 +656,7 @@ final class _ControllerRuntime {
             ?.completion
             .completeError(const PtyInputException('terminal input failure'));
       case 6:
-        final session = _sessions[payload];
-        if (session != null) {
-          session._portLost = true;
-          session._fail(
-            const PtyInfrastructureException('Dart native port closed'),
-          );
-        }
+        _sessions[payload]?._completeOutputFailure();
       case 7:
         final session = _sessions[payload];
         if (session != null) {
@@ -683,16 +778,23 @@ void _validateSpawnOptions(PtySpawnOptions options) {
     );
   }
   if (options.executable.isEmpty || options.executable.contains('\u0000')) {
-    throw const PtyException('invalid executable in process spawn options');
+    throw const PtyInvalidArgumentException(
+      'invalid executable in process spawn options',
+      operation: 'spawn',
+    );
   }
   for (final argument in options.arguments) {
     if (argument.contains('\u0000')) {
-      throw const PtyException('invalid argument in process spawn options');
+      throw const PtyInvalidArgumentException(
+        'invalid argument in process spawn options',
+        operation: 'spawn',
+      );
     }
   }
   if (options.workingDirectory?.contains('\u0000') ?? false) {
-    throw const PtyException(
+    throw const PtyInvalidArgumentException(
       'invalid working directory in process spawn options',
+      operation: 'spawn',
     );
   }
   for (final entry in options.environment.entries) {
@@ -700,8 +802,9 @@ void _validateSpawnOptions(PtySpawnOptions options) {
         entry.key.contains('=') ||
         entry.key.contains('\u0000') ||
         entry.value.contains('\u0000')) {
-      throw const PtyException(
+      throw const PtyInvalidArgumentException(
         'invalid environment entry in process spawn options',
+        operation: 'spawn',
       );
     }
   }

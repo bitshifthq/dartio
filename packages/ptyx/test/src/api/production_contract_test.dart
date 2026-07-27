@@ -24,8 +24,19 @@ void main() {
     );
   }
 
+  String platformScript({required String posix, required String windows}) {
+    return Platform.isWindows ? windows : posix;
+  }
+
   test('spawn is asynchronous and publishes a fully routed session', () async {
-    final Future<PtySession> pending = PtySession.spawn(shell('printf ready'));
+    final Future<PtySession> pending = PtySession.spawn(
+      shell(
+        platformScript(
+          posix: 'printf ready',
+          windows: '[Console]::Write("ready")',
+        ),
+      ),
+    );
     final session = await pending;
     addTearDown(session.close);
 
@@ -46,7 +57,14 @@ void main() {
     'input exposes all-or-reject, capacity, flush, and terminal state',
     () async {
       final session = await PtySession.spawn(
-        shell('sleep 0.1; cat >/dev/null'),
+        shell(
+          platformScript(
+            posix: 'sleep 0.1; cat >/dev/null',
+            windows:
+                'Start-Sleep -Milliseconds 100; '
+                r'$null = [Console]::In.ReadToEnd()',
+          ),
+        ),
       );
       addTearDown(session.close);
       final bytes = Uint8List(4096);
@@ -63,7 +81,11 @@ void main() {
   );
 
   test('impossible capacity waits fail without hanging', () async {
-    final session = await PtySession.spawn(shell('sleep 10'));
+    final session = await PtySession.spawn(
+      shell(
+        platformScript(posix: 'sleep 10', windows: 'Start-Sleep -Seconds 10'),
+      ),
+    );
     addTearDown(session.close);
 
     await expectLater(

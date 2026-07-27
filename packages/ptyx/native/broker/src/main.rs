@@ -1281,7 +1281,7 @@ fn allocate_pty(mut size: libc::winsize) -> io::Result<(OwnedFd, OwnedFd)> {
             &mut slave,
             ptr::null_mut(),
             ptr::null_mut(),
-            &mut size,
+            &raw mut size,
         )
     } < 0
     {
@@ -2121,5 +2121,43 @@ mod tests {
             session.flush_result(sequence),
             Err(InputFailure::SessionClosing)
         );
+    }
+
+    #[test]
+    fn spawn_decoder_rejects_arbitrary_bytes_without_panicking() {
+        let mut state = 0x70f4_5a9d_c2b3_1187_u64;
+        for length in 0..=1024 {
+            let mut payload = vec![0_u8; length];
+            for byte in &mut payload {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                *byte = state as u8;
+            }
+            assert!(std::panic::catch_unwind(|| decode_spawn(&payload)).is_ok());
+        }
+    }
+
+    #[test]
+    fn spawn_v2_decoder_round_trips_all_owned_fields() {
+        let mut payload = Vec::new();
+        for value in [1, SPAWN_V2, 2, 1, 30, 100, 800, 600, 4] {
+            payload.extend_from_slice(&value.to_ne_bytes());
+        }
+        for value in [b"/bin/sh".as_slice(), b"-c", b"TERM=xterm"] {
+            payload.extend_from_slice(&(value.len() as u32).to_ne_bytes());
+            payload.extend_from_slice(value);
+        }
+        payload.extend_from_slice(b"/tmp");
+        let request = decode_spawn(&payload).unwrap();
+        assert!(request.inject);
+        assert_eq!(request.argv[0].as_bytes(), b"/bin/sh");
+        assert_eq!(request.argv[1].as_bytes(), b"-c");
+        assert_eq!(request.environment.unwrap()[0].as_bytes(), b"TERM=xterm");
+        assert_eq!(request.cwd.unwrap().as_bytes(), b"/tmp");
+        assert_eq!(request.size.ws_row, 30);
+        assert_eq!(request.size.ws_col, 100);
+        assert_eq!(request.size.ws_xpixel, 800);
+        assert_eq!(request.size.ws_ypixel, 600);
     }
 }

@@ -485,6 +485,7 @@ fn dispatch_notice(notice: Notice) {
     let handle = match &notice {
         Notice::Output { handle, .. }
         | Notice::InputFailed(handle)
+        | Notice::OutputFailed(handle)
         | Notice::BrokerLost(handle)
         | Notice::OutputDone(handle)
         | Notice::Exit(handle) => *handle,
@@ -515,6 +516,9 @@ fn dispatch_notice(notice: Notice) {
                 ptyx_dart_post_integer(entry.event, ((waiter << 3) | 5) as i64)
             }
             Notice::InputFailed(_) => ptyx_dart_post_integer(entry.event, (handle << 3) as i64),
+            Notice::OutputFailed(_) => {
+                ptyx_dart_post_integer(entry.event, ((handle << 3) | 6) as i64)
+            }
             Notice::BrokerLost(_) => {
                 ptyx_dart_post_integer(entry.event, ((handle << 3) | 7) as i64)
             }
@@ -531,7 +535,7 @@ fn dispatch_notice(notice: Notice) {
     }
     if !posted {
         unsafe {
-            ptyx_dart_post_integer(entry.event, ((handle << 3) | 6) as i64);
+            ptyx_dart_post_integer(entry.event, ((handle << 3) | 7) as i64);
         }
         if let Ok(mut entries) = ports().lock() {
             entries.remove(&handle);

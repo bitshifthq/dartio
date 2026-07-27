@@ -50,6 +50,13 @@ abstract interface class PtySession {
   /// [PtyException].
   Future<int> get exitCode;
 
+  /// Completes with a typed direct-child termination status.
+  ///
+  /// Unix signal termination produces [PtySignaled]. Normal Unix exits and
+  /// every Windows native exit code produce [PtyExited]. Like [exitCode], this
+  /// can complete before trailing [output].
+  Future<PtyExitStatus> get exitStatus;
+
   /// Completes when input reaches a terminal state.
   ///
   /// It completes normally when input is closed deliberately and with a

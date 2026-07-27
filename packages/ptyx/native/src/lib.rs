@@ -130,3 +130,57 @@ pub(crate) fn dup_cloexec(fd: RawFd) -> io::Result<std::os::fd::OwnedFd> {
     }
     Ok(unsafe { std::os::fd::OwnedFd::from_raw_fd(duplicate) })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{GenerationRegistry, MAX_NOTICE_GENERATION};
+
+    #[test]
+    fn generation_registry_model_rejects_every_retired_handle() {
+        let mut registry = GenerationRegistry::new();
+        let mut live = Vec::new();
+        let mut retired = Vec::new();
+        let mut state = 0xd1b5_4a32_8f07_c6e9_u64;
+
+        for value in 1..=20_000_u64 {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            if !live.is_empty() && (live.len() >= 64 || state & 3 == 0) {
+                let index = state as usize % live.len();
+                let (handle, expected) = live.swap_remove(index);
+                assert_eq!(registry.remove(handle), Some(expected));
+                assert!(registry.get(handle).is_none());
+                assert!(registry.get_mut(handle).is_none());
+                assert_eq!(registry.remove(handle), None);
+                retired.push(handle);
+            } else {
+                let handle = registry.insert(value);
+                assert_eq!(registry.get(handle), Some(&value));
+                live.push((handle, value));
+            }
+
+            for &(handle, expected) in &live {
+                assert_eq!(registry.get(handle), Some(&expected));
+            }
+            for &handle in retired.iter().rev().take(64) {
+                assert!(registry.get(handle).is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn exhausted_generations_retire_the_slot_instead_of_wrapping() {
+        let mut registry = GenerationRegistry::new();
+        let handle = registry.insert(1_u8);
+        registry.slots[0].generation = MAX_NOTICE_GENERATION;
+        let exhausted = (u64::from(MAX_NOTICE_GENERATION) << 32) | (handle as u32 as u64);
+
+        assert_eq!(registry.remove(exhausted), Some(1));
+        let replacement = registry.insert(2);
+
+        assert_eq!(replacement as u32, 2);
+        assert!(registry.get(exhausted).is_none());
+        assert_eq!(registry.get(replacement), Some(&2));
+    }
+}
