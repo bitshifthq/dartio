@@ -1,12 +1,12 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
-import 'dart:math';
 import 'dart:typed_data';
 
 import 'package:crypto/crypto.dart';
 import 'package:ptyx/ptyx.dart';
 
+import '../benchmark/progress.dart';
 import '../benchmark/vt_payload.dart';
 
 const _size = PtySize(rows: 24, columns: 80);
@@ -15,12 +15,7 @@ const _ready = [82, 69, 65, 68, 89];
 const _maximumReadinessPrelude = 64 * 1024;
 
 Stream<Uint8List> _fixturePayload(PtySession session) => Platform.isWindows
-    ? fixturePayload(
-        session.output,
-        discardC0: true,
-        acknowledgePage: (sequence) =>
-            session.write(fixturePageAcknowledgement(sequence)),
-      )
+    ? fixturePayload(session.output, discardC0: true)
     : session.output;
 
 Future<void> main(List<String> arguments) async {
@@ -31,6 +26,15 @@ Future<void> main(List<String> arguments) async {
       .where((argument) => argument.startsWith('--output='))
       .map((argument) => argument.substring('--output='.length))
       .singleOrNull;
+  final progressPath = arguments
+      .where((argument) => argument.startsWith('--progress='))
+      .map((argument) => argument.substring('--progress='.length))
+      .singleOrNull;
+  final progress = DiagnosticProgressReporter(path: progressPath);
+  await progress.record(
+    'process-started',
+    details: {'platform': Platform.operatingSystem, 'arguments': arguments},
+  );
   final duration = durationArgument == null
       ? const Duration(minutes: 5)
       : Duration(seconds: int.parse(durationArgument));
@@ -44,11 +48,17 @@ Future<void> main(List<String> arguments) async {
   if (revision == null || status == null) {
     throw StateError('soak retention requires a readable Git revision');
   }
+  await progress.record('provenance-read');
   final dirty = status.isNotEmpty;
   final fixtureExecutable = Platform.environment['PTYX_FIXTURE_EXECUTABLE'];
+  await progress.record('warm-cycle-started');
   await _runCycle(-1);
+  await progress.record('warm-cycle-completed');
+  await progress.record('long-lived-warmup-started');
   await _warmLongLivedSession();
+  await progress.record('long-lived-warmup-completed');
   final resourceBefore = await _resourceSnapshot();
+  await progress.record('baseline-captured');
   final resourceSamples = <Map<String, Object?>>[];
   var cycles = 0;
   var bytes = 0;
@@ -58,11 +68,13 @@ Future<void> main(List<String> arguments) async {
     _fixturePayload(longSession).expand((chunk) => chunk),
   );
   await _expectReady(longOutput);
+  await progress.record('long-lived-session-ready');
   final deadline = DateTime.now().add(duration);
+  await progress.record('cycle-loop-started');
   try {
     while (DateTime.now().isBefore(deadline)) {
       bytes += await _runCycle(cycles);
-      final interactive = Uint8List(1024)
+      final interactive = Uint8List(Platform.isWindows ? 1 : 1024)
         ..setAll(
           0,
           List<int>.generate(
@@ -94,13 +106,23 @@ Future<void> main(List<String> arguments) async {
           'elapsed_seconds': DateTime.now().difference(startedAt).inSeconds,
           ...await _resourceSnapshot(),
         });
+        await progress.record(
+          'cycle-checkpoint',
+          details: {'cycles': cycles, 'verified_bytes': bytes},
+        );
       }
     }
   } finally {
     await longOutput.cancel();
     await longSession.close().timeout(_operationTimeout);
   }
+  await progress.record(
+    'cycle-loop-completed',
+    details: {'cycles': cycles, 'verified_bytes': bytes},
+  );
+  await progress.record('resource-stabilization-started');
   final stabilization = await _waitForResourceStability(resourceBefore);
+  await progress.record('resource-stabilization-completed');
   final resourceAfter = stabilization.snapshot;
   const cleanupRssGrowthBudget = 32 * 1024 * 1024;
   final cleanupRssWithinBudget =
@@ -155,10 +177,13 @@ Future<void> main(List<String> arguments) async {
     'cleanup_rss_within_growth_budget': cleanupRssWithinBudget,
     'cleanup_passed': cleanupPassed,
   });
+  await progress.record('final-artifact-writing');
   if (outputPath != null) {
     await File(outputPath).writeAsString('$encoded\n', flush: true);
   }
   stdout.writeln(encoded);
+  await stdout.flush();
+  await progress.record('completed');
   if (!cleanupPassed) {
     exitCode = 1;
   }
@@ -185,7 +210,10 @@ Future<void> _warmLongLivedSession() async {
 
 Future<int> _runCycle(int cycle) async {
   const byteCount = 64 * 1024;
-  final session = await _spawnFixture('echo-count', byteCount);
+  final session = await _spawnFixture(
+    Platform.isWindows ? 'input-verify' : 'echo-count',
+    byteCount,
+  );
   final iterator = StreamIterator(
     _fixturePayload(session).expand((chunk) => chunk),
   );
@@ -196,16 +224,18 @@ Future<int> _runCycle(int cycle) async {
         0,
         List<int>.generate(byteCount, (index) => 32 + ((index * 31 + 17) % 95)),
       );
-    final outputDone = Future<void>(() async {
-      for (var index = 0; index < input.length; index++) {
-        if (!await iterator.moveNext().timeout(_operationTimeout)) {
-          throw StateError('cycle $cycle ended at $index');
-        }
-        if (iterator.current != input[index]) {
-          throw StateError('cycle $cycle byte mismatch at $index');
-        }
-      }
-    });
+    final outputDone = Platform.isWindows
+        ? _expectReport(iterator, 'OK $byteCount', cycle)
+        : Future<void>(() async {
+            for (var index = 0; index < input.length; index++) {
+              if (!await iterator.moveNext().timeout(_operationTimeout)) {
+                throw StateError('cycle $cycle ended at $index');
+              }
+              if (iterator.current != input[index]) {
+                throw StateError('cycle $cycle byte mismatch at $index');
+              }
+            }
+          });
     await _writeFixtureInput(session, input);
     await Future.wait([
       session.flush().timeout(_operationTimeout),
@@ -222,15 +252,27 @@ Future<int> _runCycle(int cycle) async {
   }
 }
 
-Future<void> _writeFixtureInput(PtySession session, Uint8List bytes) async {
-  final chunkSize = Platform.isWindows ? fixturePagePayloadBytes : bytes.length;
-  for (var offset = 0; offset < bytes.length; offset += chunkSize) {
-    final end = min(offset + chunkSize, bytes.length);
-    await session
-        .write(Uint8List.sublistView(bytes, offset, end))
-        .timeout(_operationTimeout);
+Future<void> _expectReport(
+  StreamIterator<int> iterator,
+  String report,
+  int cycle,
+) async {
+  final expected = utf8.encode(report);
+  var matched = 0;
+  while (await iterator.moveNext().timeout(_operationTimeout)) {
+    final byte = iterator.current;
+    if (byte == expected[matched]) {
+      matched++;
+      if (matched == expected.length) return;
+    } else {
+      matched = byte == expected.first ? 1 : 0;
+    }
   }
+  throw StateError('cycle $cycle ended before child report $report');
 }
+
+Future<void> _writeFixtureInput(PtySession session, Uint8List bytes) =>
+    session.write(bytes).timeout(_operationTimeout);
 
 Future<PtySession> _spawnFixture(String operation, int byteCount) async {
   final fixture = Platform.environment['PTYX_FIXTURE_EXECUTABLE'];

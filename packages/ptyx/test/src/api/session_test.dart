@@ -25,13 +25,8 @@ void main() {
       return Platform.isWindows ? windows : posix;
     }
 
-    Stream<Uint8List> fixtureOutput(PtySession session) => Platform.isWindows
-        ? fixturePayload(
-            session.output,
-            acknowledgePage: (sequence) =>
-                session.write(fixturePageAcknowledgement(sequence)),
-          )
-        : session.output;
+    Stream<Uint8List> fixtureOutput(PtySession session) =>
+        Platform.isWindows ? fixturePayload(session.output) : session.output;
 
     ({String executable, List<String> arguments}) shell(String script) {
       if (Platform.isWindows) {
@@ -265,7 +260,7 @@ void main() {
         expect(utf8.decode(bytes), 'done');
       });
 
-      test('reads large finite output', () async {
+      test('reads every byte of large finite output', () async {
         const byteCount = 2 * 1024 * 1024;
         final session = await spawnCommand(finiteOutputCommand(byteCount));
 
@@ -274,7 +269,23 @@ void main() {
         ).expand((chunk) => chunk).take(byteCount).length.timeout(longTimeout);
 
         expect(received, byteCount);
-      });
+      }, testOn: 'posix');
+
+      test('observes the final state of large ConPTY output', () async {
+        const byteCount = 2 * 1024 * 1024;
+        final session = await spawnFixture(
+          'output',
+          arguments: const ['$byteCount'],
+        );
+        final output = fixtureOutput(
+          session,
+        ).map<List<int>>((chunk) => chunk).transform(utf8.decoder).join();
+
+        await session.write(Uint8List.fromList(const [1]));
+        final text = await output.timeout(longTimeout);
+
+        expect(text, contains('PTYX-OUTPUT-OK $byteCount'));
+      }, testOn: 'windows');
 
       test('continues after a paused subscription resumes', () async {
         final session = await spawnCommand(infiniteOutputCommand());
@@ -318,7 +329,38 @@ void main() {
           (received: received, exitCode: exitCode),
           (received: byteCount, exitCode: 0),
         );
-      });
+      }, testOn: 'posix');
+
+      test(
+        'resumes ConPTY output through its final terminal state',
+        () async {
+          const byteCount = 8 * 1024 * 1024;
+          final session = await spawnFixture(
+            'output',
+            arguments: const ['$byteCount'],
+          );
+          await session.write(Uint8List.fromList(const [1]));
+
+          final exitBeforeListen = await session.exitCode.timeout(
+            const Duration(milliseconds: 500),
+            onTimeout: () => -1,
+          );
+          final text = await fixtureOutput(session)
+              .map<List<int>>((chunk) => chunk)
+              .transform(utf8.decoder)
+              .join()
+              .timeout(longTimeout);
+
+          expect(
+            (
+              exitBeforeListen: exitBeforeListen,
+              finalStateVisible: text.contains('PTYX-OUTPUT-OK $byteCount'),
+            ),
+            (exitBeforeListen: -1, finalStateVisible: true),
+          );
+        },
+        testOn: 'windows',
+      );
 
       test('discards output after the subscription is canceled', () async {
         const byteCount = 8 * 1024 * 1024;

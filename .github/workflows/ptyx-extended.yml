@@ -200,14 +200,48 @@ jobs:
         working-directory: packages/ptyx
         env:
           SOAK_SECONDS: ${{ inputs.soak_seconds || '1800' }}
-        run: >-
-          dart run tool/soak.dart "$SOAK_SECONDS"
-          --output=soak-${{ matrix.os }}.json
+        run: |
+          progress="soak-${{ matrix.os }}.progress.jsonl"
+          printf '{"schema":1,"phase":"runner-started"}\n' > "$progress"
+          set +e
+          dart run tool/soak.dart "$SOAK_SECONDS" \
+            --output=soak-${{ matrix.os }}.json \
+            --progress="$progress"
+          command_rc=$?
+          set -e
+          printf '{"schema":1,"phase":"command-exited","details":{"exit_code":%s}}\n' \
+            "$command_rc" >> "$progress"
+          if (( command_rc != 0 )); then
+            exit "$command_rc"
+          fi
+          dart run tool/validate_ci_result.dart \
+            soak soak-${{ matrix.os }}.json
+          printf '{"schema":1,"phase":"result-validated"}\n' >> "$progress"
+      - name: capture Windows soak failure evidence
+        if: failure() && runner.os == 'Windows'
+        shell: pwsh
+        working-directory: packages/ptyx
+        run: |
+          $path = "windows-events-${{ matrix.os }}.txt"
+          "Application events relevant to the failed ptyx soak" |
+            Set-Content -Path $path
+          Get-WinEvent -FilterHashtable @{
+            LogName = "Application"
+            StartTime = (Get-Date).AddMinutes(-50)
+          } -ErrorAction SilentlyContinue |
+            Where-Object {
+              $_.Message -match "dart|ptyx|conhost|OpenConsole"
+            } |
+            Format-List TimeCreated, Id, ProviderName, LevelDisplayName, Message |
+            Out-File -FilePath $path -Append
       - if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: ptyx-soak-${{ matrix.os }}-${{ github.sha }}
-          path: packages/ptyx/soak-${{ matrix.os }}.json
+          path: |
+            packages/ptyx/soak-${{ matrix.os }}.json
+            packages/ptyx/soak-${{ matrix.os }}.progress.jsonl
+            packages/ptyx/windows-events-${{ matrix.os }}.txt
           if-no-files-found: error
           retention-days: 90
 
@@ -250,17 +284,51 @@ jobs:
           printf "PTYX_FIXTURE_EXECUTABLE=%s\n" "$FIXTURE" >> "$GITHUB_ENV"
       - name: run correctness-gated diagnostic scorecard
         working-directory: packages/ptyx
-        run: >-
-          dart run benchmark/scorecard.dart all
-          --warmups=0
-          --repetitions=1
-          --bytes=8388608
-          --output=scorecard-${{ matrix.os }}.json
+        run: |
+          progress="scorecard-${{ matrix.os }}.progress.jsonl"
+          printf '{"schema":1,"phase":"runner-started"}\n' > "$progress"
+          set +e
+          dart run benchmark/scorecard.dart all \
+            --warmups=0 \
+            --repetitions=1 \
+            --bytes=8388608 \
+            --output=scorecard-${{ matrix.os }}.json \
+            --progress="$progress"
+          command_rc=$?
+          set -e
+          printf '{"schema":1,"phase":"command-exited","details":{"exit_code":%s}}\n' \
+            "$command_rc" >> "$progress"
+          if (( command_rc != 0 )); then
+            exit "$command_rc"
+          fi
+          dart run tool/validate_ci_result.dart \
+            scorecard scorecard-${{ matrix.os }}.json
+          printf '{"schema":1,"phase":"result-validated"}\n' >> "$progress"
+      - name: capture Windows scorecard failure evidence
+        if: failure() && runner.os == 'Windows'
+        shell: pwsh
+        working-directory: packages/ptyx
+        run: |
+          $path = "windows-events-${{ matrix.os }}.txt"
+          "Application events relevant to the failed ptyx scorecard" |
+            Set-Content -Path $path
+          Get-WinEvent -FilterHashtable @{
+            LogName = "Application"
+            StartTime = (Get-Date).AddMinutes(-35)
+          } -ErrorAction SilentlyContinue |
+            Where-Object {
+              $_.Message -match "dart|ptyx|conhost|OpenConsole"
+            } |
+            Format-List TimeCreated, Id, ProviderName, LevelDisplayName, Message |
+            Out-File -FilePath $path -Append
       - if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: ptyx-scorecard-${{ matrix.os }}-${{ github.sha }}
-          path: packages/ptyx/scorecard-${{ matrix.os }}.json
+          path: |
+            packages/ptyx/scorecard-${{ matrix.os }}.json
+            packages/ptyx/scorecard-${{ matrix.os }}.progress.jsonl
+            packages/ptyx/windows-events-${{ matrix.os }}.txt
           if-no-files-found: error
           retention-days: 90
 

@@ -11,13 +11,8 @@ import '../../../benchmark/vt_payload.dart';
 void main() {
   const size = PtySize(rows: 24, columns: 80);
 
-  Stream<Uint8List> fixtureOutput(PtySession session) => Platform.isWindows
-      ? fixturePayload(
-          session.output,
-          acknowledgePage: (sequence) =>
-              session.write(fixturePageAcknowledgement(sequence)),
-        )
-      : session.output;
+  Stream<Uint8List> fixtureOutput(PtySession session) =>
+      Platform.isWindows ? fixturePayload(session.output) : session.output;
 
   PtySpawnOptions shell(String script, {int inputCapacity = 4096}) {
     final executable = Platform.isWindows

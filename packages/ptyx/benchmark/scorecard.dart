@@ -7,6 +7,7 @@ import 'dart:typed_data';
 import 'package:crypto/crypto.dart';
 import 'package:ptyx/ptyx.dart';
 
+import 'progress.dart';
 import 'vt_payload.dart';
 
 const _size = PtySize(rows: 24, columns: 80);
@@ -20,6 +21,15 @@ Future<void> main(List<String> arguments) async {
       .where((argument) => argument.startsWith('--output='))
       .map((argument) => argument.substring('--output='.length))
       .singleOrNull;
+  final progressPath = arguments
+      .where((argument) => argument.startsWith('--progress='))
+      .map((argument) => argument.substring('--progress='.length))
+      .singleOrNull;
+  final progress = DiagnosticProgressReporter(path: progressPath);
+  await progress.record(
+    'process-started',
+    details: {'platform': Platform.operatingSystem, 'arguments': arguments},
+  );
   final repetitions = _integerOption(arguments, 'repetitions', 5);
   final warmups = _integerOption(arguments, 'warmups', 1);
   final integrityBytes = _integerOption(
@@ -41,6 +51,7 @@ Future<void> main(List<String> arguments) async {
   if (revision == null || status == null) {
     throw StateError('benchmark retention requires a readable Git revision');
   }
+  await progress.record('provenance-read');
   final dirty = status.isNotEmpty;
   if (outputPath != null && dirty && !allowDirty) {
     throw StateError(
@@ -84,86 +95,147 @@ Future<void> main(List<String> arguments) async {
     'pid': pid,
     'rss_before_bytes': ProcessInfo.currentRss,
   };
+  await progress.record('metadata-ready');
 
   if (selected == null || selected == 'all' || selected == 'interactive') {
-    results['interactive'] = await _interactiveRoundTrips(400);
+    results['interactive'] = await _runPhase(
+      progress,
+      'interactive',
+      () => _interactiveRoundTrips(400),
+    );
   }
   if (selected == null || selected == 'all' || selected == 'output') {
-    results['output'] = await _repeated(
-      repetitions: repetitions,
-      warmups: warmups,
-      metric: 'mib_per_second',
-      run: () => _outputThroughput(benchmarkBytes),
+    results['output'] = await _runPhase(
+      progress,
+      'output',
+      () => _repeated(
+        repetitions: repetitions,
+        warmups: warmups,
+        metric: 'mib_per_second',
+        run: () => _outputThroughput(benchmarkBytes),
+      ),
     );
   }
   if (selected == null || selected == 'all' || selected == 'transport_output') {
-    results['transport_output'] = await _repeated(
-      repetitions: repetitions,
-      warmups: warmups,
-      metric: 'mib_per_second',
-      run: () => _transportOutput(benchmarkBytes),
+    results['transport_output'] = await _runPhase(
+      progress,
+      'transport-output',
+      () => _repeated(
+        repetitions: repetitions,
+        warmups: warmups,
+        metric: 'mib_per_second',
+        run: () => _transportOutput(benchmarkBytes),
+      ),
     );
   }
   if (selected == null || selected == 'all' || selected == 'input') {
-    results['input'] = await _repeated(
-      repetitions: repetitions,
-      warmups: warmups,
-      metric: 'mib_per_second',
-      run: () => _inputThroughput(benchmarkBytes),
+    results['input'] = await _runPhase(
+      progress,
+      'input',
+      () => _repeated(
+        repetitions: repetitions,
+        warmups: warmups,
+        metric: 'mib_per_second',
+        run: () => _inputThroughput(benchmarkBytes),
+      ),
     );
   }
   if (selected == null || selected == 'all' || selected == 'transport_input') {
-    results['transport_input'] = await _repeated(
-      repetitions: repetitions,
-      warmups: warmups,
-      metric: 'mib_per_second',
-      run: () => _transportInput(benchmarkBytes),
+    results['transport_input'] = await _runPhase(
+      progress,
+      'transport-input',
+      () => _repeated(
+        repetitions: repetitions,
+        warmups: warmups,
+        metric: 'mib_per_second',
+        run: () => _transportInput(benchmarkBytes),
+      ),
     );
   }
   if (selected == null || selected == 'all' || selected == 'bidirectional') {
-    results['bidirectional'] = await _repeated(
-      repetitions: repetitions,
-      warmups: warmups,
-      metric: 'aggregate_mib_per_second',
-      run: () => _bidirectionalThroughput(16 * 1024 * 1024),
+    results['bidirectional'] = await _runPhase(
+      progress,
+      'bidirectional',
+      () => _repeated(
+        repetitions: repetitions,
+        warmups: warmups,
+        metric: 'aggregate_mib_per_second',
+        run: () => _bidirectionalThroughput(16 * 1024 * 1024),
+      ),
     );
   }
   if (selected == null || selected == 'all' || selected == 'pause_resume') {
-    results['pause_resume'] = await _repeated(
-      repetitions: repetitions,
-      warmups: warmups,
-      metric: 'resume_to_eof_us',
-      run: () => _pauseResume(8 * 1024 * 1024),
+    results['pause_resume'] = await _runPhase(
+      progress,
+      'pause-resume',
+      () => _repeated(
+        repetitions: repetitions,
+        warmups: warmups,
+        metric: 'resume_to_eof_us',
+        run: () => _pauseResume(8 * 1024 * 1024),
+      ),
     );
   }
   if (selected == null || selected == 'all' || selected == 'discard') {
-    results['discard'] = await _repeated(
-      repetitions: repetitions,
-      warmups: warmups,
-      metric: 'elapsed_us',
-      run: () => _discardOutput(32 * 1024 * 1024),
+    results['discard'] = await _runPhase(
+      progress,
+      'discard',
+      () => _repeated(
+        repetitions: repetitions,
+        warmups: warmups,
+        metric: 'elapsed_us',
+        run: () => _discardOutput(32 * 1024 * 1024),
+      ),
     );
   }
   if (selected == null || selected == 'all' || selected == 'no_listener') {
-    results['no_listener'] = await _noListener(8 * 1024 * 1024);
+    results['no_listener'] = await _runPhase(
+      progress,
+      'no-listener',
+      () => _noListener(8 * 1024 * 1024),
+    );
   }
   if (selected == null || selected == 'all' || selected == 'saturation') {
-    results['saturation'] = await _inputSaturation(1024 * 1024);
+    results['saturation'] = await _runPhase(
+      progress,
+      'saturation',
+      () => _inputSaturation(1024 * 1024),
+    );
   }
   if (selected == null || selected == 'all' || selected == 'fairness') {
-    results['fairness'] = await _fairness(16, 100);
+    results['fairness'] = await _runPhase(
+      progress,
+      'fairness',
+      () => _fairness(16, 100),
+    );
   }
   if (selected == null || selected == 'all' || selected == 'active_output') {
-    results['active_output'] = await _activeOutputFairness(16, 8 * 1024 * 1024);
+    results['active_output'] = await _runPhase(
+      progress,
+      'active-output',
+      () => _activeOutputFairness(16, 8 * 1024 * 1024),
+    );
   }
   if (selected == null || selected == 'all' || selected == 'spawn_close') {
-    results['spawn_close'] = await _spawnClose(50);
+    results['spawn_close'] = await _runPhase(
+      progress,
+      'spawn-close',
+      () => _spawnClose(50),
+    );
   }
   if (selected == null || selected == 'all' || selected == 'observation') {
-    results['observation'] = await _observationOverhead(1000);
+    results['observation'] = await _runPhase(
+      progress,
+      'observation',
+      () => _observationOverhead(1000),
+    );
   }
   if (selected == null || selected == 'all' || selected == 'forced_close') {
-    results['forced_close'] = await _forcedClose();
+    results['forced_close'] = await _runPhase(
+      progress,
+      'forced-close',
+      _forcedClose,
+    );
   }
   if (selected == null || selected == 'all' || selected.startsWith('idle')) {
     for (final count in const [1, 10, 100]) {
@@ -171,25 +243,45 @@ Future<void> main(List<String> arguments) async {
           selected == 'all' ||
           selected == 'idle' ||
           selected == 'idle_$count') {
-        results['idle_$count'] = await _idleSessions(count);
+        results['idle_$count'] = await _runPhase(
+          progress,
+          'idle-$count',
+          () => _idleSessions(count),
+        );
       }
     }
   }
   if (selected == 'integrity') {
-    results['integrity'] = {
-      'byte_count': integrityBytes,
-      'output': await _outputThroughput(integrityBytes),
-      'input': await _inputThroughput(integrityBytes),
-      'bidirectional': await _bidirectionalThroughput(integrityBytes),
-    };
+    results['integrity'] = await _runPhase(progress, 'integrity', () async {
+      return {
+        'byte_count': integrityBytes,
+        'output': await _outputThroughput(integrityBytes),
+        'input': await _inputThroughput(integrityBytes),
+        'bidirectional': await _bidirectionalThroughput(integrityBytes),
+      };
+    });
   }
   results['rss_after_bytes'] = ProcessInfo.currentRss;
 
+  await progress.record('final-artifact-writing');
   final json = const JsonEncoder.withIndent('  ').convert(results);
   if (outputPath != null) {
     await File(outputPath).writeAsString('$json\n', flush: true);
   }
   stdout.writeln(json);
+  await stdout.flush();
+  await progress.record('completed');
+}
+
+Future<T> _runPhase<T>(
+  DiagnosticProgressReporter progress,
+  String name,
+  Future<T> Function() operation,
+) async {
+  await progress.record('$name-started');
+  final result = await operation();
+  await progress.record('$name-completed');
+  return result;
 }
 
 int _integerOption(List<String> arguments, String name, int fallback) {
@@ -277,7 +369,7 @@ Future<({PtySession session, _ChunkReader bytes})> _readySession(
   List<String> arguments = const [],
 ]) async {
   final session = await _spawnFixture(operation, arguments);
-  final bytes = _ChunkReader(session.output, acknowledgementSession: session);
+  final bytes = _ChunkReader(session.output);
   const marker = [82, 69, 65, 68, 89];
   var matched = 0;
   for (var consumed = 0; consumed < 64 * 1024; consumed++) {
@@ -320,6 +412,9 @@ Future<Map<String, Object?>> _interactiveRoundTrips(int repetitions) async {
 }
 
 Future<Map<String, Object?>> _outputThroughput(int byteCount) async {
+  if (Platform.isWindows) {
+    return _windowsTerminalOutput('output', byteCount);
+  }
   final (:session, :bytes) = await _readySession('output', ['$byteCount']);
   var received = 0;
   final stopwatch = Stopwatch()..start();
@@ -358,35 +453,7 @@ Future<Map<String, Object?>> _outputThroughput(int byteCount) async {
 
 Future<Map<String, Object?>> _transportOutput(int byteCount) async {
   if (Platform.isWindows) {
-    final (:session, :bytes) = await _readySession('output-constant', [
-      '$byteCount',
-    ]);
-    try {
-      await session.write(Uint8List.fromList(const [1]));
-      final stopwatch = Stopwatch()..start();
-      var received = 0;
-      while (received < byteCount) {
-        final chunk = await bytes.readChunk().timeout(_timeout);
-        if (chunk == null) {
-          throw StateError('transport output reached EOF at $received');
-        }
-        if (chunk.any((byte) => byte != 120)) {
-          throw StateError('transport output mismatch at $received');
-        }
-        received += chunk.length;
-      }
-      stopwatch.stop();
-      return {
-        'bytes': received,
-        'elapsed_us': stopwatch.elapsedMicroseconds,
-        'mib_per_second':
-            received / (1024 * 1024) / (stopwatch.elapsedMicroseconds / 1e6),
-        'exit_code': await session.exitCode.timeout(_timeout),
-      };
-    } finally {
-      await bytes.cancel();
-      await session.close();
-    }
+    return _windowsTerminalOutput('output-constant', byteCount);
   }
 
   final posixScript =
@@ -541,10 +608,20 @@ while ($received -lt {bytes}) {
 }
 
 Future<Map<String, Object?>> _bidirectionalThroughput(int byteCount) async {
+  if (Platform.isWindows) {
+    final result = await _inputThroughput(byteCount);
+    return {
+      'sent_bytes': result['bytes'],
+      'received_bytes': 0,
+      'elapsed_us': result['elapsed_us'],
+      'aggregate_mib_per_second': result['mib_per_second'],
+      'exit_code': result['exit_code'],
+      'exact_output_history_supported': false,
+      'integrity_scope': 'child-verified input with compact terminal report',
+    };
+  }
   final (:session, :bytes) = await _readySession('echo-count', ['$byteCount']);
-  final chunk = Uint8List(
-    Platform.isWindows ? fixturePagePayloadBytes : 64 * 1024,
-  );
+  final chunk = Uint8List(64 * 1024);
   var sent = 0;
   var received = 0;
   final stopwatch = Stopwatch()..start();
@@ -598,6 +675,9 @@ Future<Map<String, Object?>> _bidirectionalThroughput(int byteCount) async {
 }
 
 Future<Map<String, Object?>> _pauseResume(int byteCount) async {
+  if (Platform.isWindows) {
+    return _windowsPauseResume(byteCount);
+  }
   final (:session, :bytes) = await _readySession('output', ['$byteCount']);
   var received = 0;
   var invalid = false;
@@ -635,6 +715,93 @@ Future<Map<String, Object?>> _pauseResume(int byteCount) async {
       'paused_rss_delta_bytes': rssWhilePaused - rssBefore,
       'resume_to_eof_us': stopwatch.elapsedMicroseconds,
       'exit_code': exitCode,
+    };
+  } finally {
+    await subscription.cancel();
+    await session.close();
+  }
+}
+
+Future<Map<String, Object?>> _windowsTerminalOutput(
+  String operation,
+  int byteCount,
+) async {
+  final (:session, :bytes) = await _readySession(operation, ['$byteCount']);
+  final marker = _MarkerTracker('PTYX-OUTPUT-OK $byteCount');
+  var observed = 0;
+  final stopwatch = Stopwatch()..start();
+  try {
+    await session.write(Uint8List.fromList(const [1]));
+    await session.flush();
+    while (true) {
+      final chunk = await bytes.readChunk().timeout(_timeout);
+      if (chunk == null) break;
+      observed += chunk.length;
+      marker.add(chunk);
+    }
+    stopwatch.stop();
+    if (!marker.matched) {
+      throw StateError(
+        'ConPTY output ended without the terminal-state report '
+        'PTYX-OUTPUT-OK $byteCount',
+      );
+    }
+    final exitCode = await session.exitCode.timeout(_timeout);
+    return {
+      'bytes': byteCount,
+      'observed_transport_bytes': observed,
+      'elapsed_us': stopwatch.elapsedMicroseconds,
+      'mib_per_second':
+          byteCount / (1024 * 1024) / (stopwatch.elapsedMicroseconds / 1e6),
+      'exit_code': exitCode,
+      'exact_output_history_supported': false,
+      'integrity_scope': 'child-reported generation and terminal final state',
+    };
+  } finally {
+    await bytes.cancel();
+    await session.close();
+  }
+}
+
+Future<Map<String, Object?>> _windowsPauseResume(int byteCount) async {
+  final (:session, :bytes) = await _readySession('output', ['$byteCount']);
+  final marker = _MarkerTracker('PTYX-OUTPUT-OK $byteCount');
+  final done = Completer<void>();
+  var observed = 0;
+  late final StreamSubscription<Uint8List> subscription;
+  subscription = bytes.remaining.listen(
+    (chunk) {
+      observed += chunk.length;
+      marker.add(chunk);
+    },
+    onError: done.completeError,
+    onDone: done.complete,
+  );
+  subscription.pause();
+  await session.write(Uint8List.fromList(const [1]));
+  await session.flush();
+  final rssBefore = ProcessInfo.currentRss;
+  await Future<void>.delayed(const Duration(milliseconds: 250));
+  final rssWhilePaused = ProcessInfo.currentRss;
+  final stopwatch = Stopwatch()..start();
+  subscription.resume();
+  try {
+    await done.future.timeout(_timeout);
+    stopwatch.stop();
+    if (!marker.matched) {
+      throw StateError(
+        'paused ConPTY output omitted its terminal-state report',
+      );
+    }
+    return {
+      'bytes': byteCount,
+      'observed_transport_bytes': observed,
+      'pause_ms': 250,
+      'paused_rss_delta_bytes': rssWhilePaused - rssBefore,
+      'resume_to_eof_us': stopwatch.elapsedMicroseconds,
+      'exit_code': await session.exitCode.timeout(_timeout),
+      'exact_output_history_supported': false,
+      'integrity_scope': 'terminal final-state report after resume',
     };
   } finally {
     await subscription.cancel();
@@ -792,6 +959,31 @@ Future<Map<String, Object?>> _activeOutputFairness(
   int sessionCount,
   int byteCount,
 ) async {
+  if (Platform.isWindows) {
+    final resourcesBefore = await _resourceSnapshot();
+    final results = await Future.wait([
+      for (var index = 0; index < sessionCount; index++)
+        _windowsTerminalOutput('output', byteCount),
+    ]);
+    final throughputs = [
+      for (final result in results) result['mib_per_second']! as double,
+    ];
+    final sortedThroughputs = [...throughputs]..sort();
+    return {
+      'sessions': sessionCount,
+      'application_bytes_per_session': byteCount,
+      'aggregate_mib_per_second': throughputs.reduce((a, b) => a + b),
+      'slowest_to_fastest_ratio':
+          sortedThroughputs.first / sortedThroughputs.last,
+      'resource_before': resourcesBefore,
+      'resource_busy': null,
+      'integrity_scope': 'terminal final-state reports',
+      'per_session': [
+        for (var index = 0; index < results.length; index++)
+          {'session': index, ...results[index]},
+      ],
+    };
+  }
   final pairs = <({PtySession session, _ChunkReader bytes})>[];
   try {
     for (var index = 0; index < sessionCount; index++) {
@@ -1325,6 +1517,27 @@ Iterable<String> _nulSeparated(List<int> bytes) sync* {
   }
 }
 
+final class _MarkerTracker {
+  final List<int> _marker;
+  var _matchedBytes = 0;
+
+  _MarkerTracker(String marker) : _marker = ascii.encode(marker);
+
+  bool get matched => _matchedBytes == _marker.length;
+
+  void add(List<int> bytes) {
+    if (matched) return;
+    for (final byte in bytes) {
+      if (byte == _marker[_matchedBytes]) {
+        _matchedBytes++;
+        if (matched) return;
+      } else {
+        _matchedBytes = byte == _marker.first ? 1 : 0;
+      }
+    }
+  }
+}
+
 int _pattern(int offset) => 32 + ((offset * 31 + 17) % 95);
 
 int _acceptPatternByte(int byte, int offset) {
@@ -1381,19 +1594,9 @@ final class _ChunkReader {
   Uint8List? _current;
   var _offset = 0;
 
-  _ChunkReader(Stream<Uint8List> stream, {PtySession? acknowledgementSession})
+  _ChunkReader(Stream<Uint8List> stream)
     : _chunks = StreamIterator(
-        Platform.isWindows
-            ? fixturePayload(
-                stream,
-                discardC0: true,
-                acknowledgePage: acknowledgementSession == null
-                    ? null
-                    : (sequence) => acknowledgementSession.write(
-                        fixturePageAcknowledgement(sequence),
-                      ),
-              )
-            : stream,
+        Platform.isWindows ? fixturePayload(stream, discardC0: true) : stream,
       );
 
   Future<int?> readByte() async {

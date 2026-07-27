@@ -54,29 +54,22 @@ void main() {
       ]);
     });
 
-    test('decodes ordered ConPTY fixture frames and ignores redraws', () async {
-      final acknowledged = <int>[];
+    test('filters C0 controls from terminal output when requested', () async {
       final chunks = Stream.fromIterable([
-        Uint8List.fromList('READY\u001b[2K\r~P'.codeUnits),
-        Uint8List.fromList(
-          'F~~0:QUJD~\r\n   \u001b[2K\r~0:QUJD~\r\n'
-                  '~1:REU=~\r\n~PA:1~'
-              .codeUnits,
-        ),
+        Uint8List.fromList('READY\u001b[2K\r'.codeUnits),
+        Uint8List.fromList('terminal\nstate'.codeUnits),
       ]);
 
       expect(
         await fixturePayload(
           chunks,
           discardC0: true,
-          acknowledgePage: acknowledged.add,
         ).expand((chunk) => chunk).toList(),
-        [...'READY'.codeUnits, ...'ABCDE'.codeUnits],
+        'READYterminalstate'.codeUnits,
       );
-      expect(acknowledged, [1]);
     });
 
-    test('preserves ordinary output containing frame delimiters', () async {
+    test('preserves ordinary output containing tildes', () async {
       final chunks = Stream.fromIterable([
         Uint8List.fromList('left~not-a-frame~right'.codeUnits),
       ]);

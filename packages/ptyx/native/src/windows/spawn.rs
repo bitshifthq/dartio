@@ -518,7 +518,289 @@ unsafe extern "system" {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_command_line, build_environment_block, conpty_size, uses_search_path};
+    use std::ffi::CString;
+    use std::io::{self, Read, Write};
+    use std::mem::zeroed;
+    use std::ptr::null;
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    use windows_sys::Win32::Foundation::{
+        GetLastError, ERROR_BROKEN_PIPE, ERROR_IO_PENDING, WAIT_OBJECT_0, WAIT_TIMEOUT,
+    };
+    use windows_sys::Win32::Storage::FileSystem::{ReadFile, WriteFile};
+    use windows_sys::Win32::System::Console::{
+        GetConsoleScreenBufferInfo, GetStdHandle, ResizePseudoConsole, CONSOLE_SCREEN_BUFFER_INFO,
+        STD_OUTPUT_HANDLE,
+    };
+    use windows_sys::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
+    use windows_sys::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
+
+    use super::{
+        build_command_line, build_environment_block, conpty_size, spawn, uses_search_path,
+        BrokerSpawn, OwnedHandle, COORD,
+    };
+
+    const RESIZE_PROBE_ENVIRONMENT: &str = "PTYX_CONPTY_RESIZE_PROBE_CHILD";
+    const RESIZE_PROBE_TEST: &str = "windows::spawn::tests::conpty_resize_probe_child";
+    const RESIZE_PROBE_BEFORE: &str = "PTYX_RESIZE_BEFORE";
+    const RESIZE_PROBE_AFTER: &str = "PTYX_RESIZE_AFTER";
+    const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    struct ConsoleDimensions {
+        buffer_columns: i16,
+        buffer_rows: i16,
+        window_columns: i16,
+        window_rows: i16,
+    }
+
+    impl ConsoleDimensions {
+        fn report(self, marker: &str) {
+            println!(
+                "{marker} dw={}x{} window={}x{}",
+                self.buffer_columns, self.buffer_rows, self.window_columns, self.window_rows
+            );
+            io::stdout().flush().expect("flush ConPTY resize probe");
+        }
+
+        fn matches(self, rows: i16, columns: i16) -> bool {
+            self.buffer_columns == columns
+                && self.buffer_rows == rows
+                && self.window_columns == columns
+                && self.window_rows == rows
+        }
+    }
+
+    #[test]
+    fn conpty_resize_probe_child() {
+        if std::env::var_os(RESIZE_PROBE_ENVIRONMENT).is_none() {
+            return;
+        }
+
+        query_console_dimensions()
+            .expect("query initial child console dimensions")
+            .report(RESIZE_PROBE_BEFORE);
+        let mut trigger = [0_u8; 1];
+        io::stdin()
+            .read_exact(&mut trigger)
+            .expect("read parent resize trigger");
+
+        let deadline = Instant::now() + PROBE_TIMEOUT;
+        let observed = loop {
+            let dimensions =
+                query_console_dimensions().expect("query resized child console dimensions");
+            if dimensions.matches(42, 120) || Instant::now() >= deadline {
+                break dimensions;
+            }
+            thread::sleep(Duration::from_millis(25));
+        };
+        observed.report(RESIZE_PROBE_AFTER);
+    }
+
+    #[test]
+    fn conpty_resize_updates_child_buffer_and_viewport() {
+        if std::env::var_os(RESIZE_PROBE_ENVIRONMENT).is_some() {
+            return;
+        }
+
+        let executable = std::env::current_exe().expect("resolve native test executable");
+        let executable = CString::new(executable.to_string_lossy().as_bytes())
+            .expect("test executable path contains no NUL");
+        let arguments = [
+            CString::new("--exact").unwrap(),
+            CString::new(RESIZE_PROBE_TEST).unwrap(),
+            CString::new("--nocapture").unwrap(),
+        ];
+        let mut environment = std::env::vars()
+            .map(|(key, value)| CString::new(format!("{key}={value}")).unwrap())
+            .collect::<Vec<_>>();
+        environment.push(CString::new(format!("{RESIZE_PROBE_ENVIRONMENT}=1")).unwrap());
+        let session = spawn(BrokerSpawn {
+            executable,
+            arguments: arguments.into(),
+            environment: Some(environment),
+            cwd: None,
+            rows: 18,
+            columns: 70,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("spawn ConPTY resize probe child");
+
+        let mut transcript = Vec::new();
+        let before =
+            read_through_marker(session.output.raw(), &mut transcript, RESIZE_PROBE_BEFORE)
+                .expect("read initial child console dimensions");
+        eprintln!("ConPTY resize probe before: {before}");
+
+        let result =
+            unsafe { ResizePseudoConsole(session.pseudoconsole.raw(), COORD { X: 120, Y: 42 }) };
+        eprintln!("ConPTY resize probe ResizePseudoConsole HRESULT: {result:#010x} ({result})");
+        assert!(
+            result >= 0,
+            "ResizePseudoConsole failed with HRESULT {result:#010x}; transcript: {}",
+            String::from_utf8_lossy(&transcript)
+        );
+        write_overlapped(session.input.raw(), b"\r").expect("trigger child resize query");
+
+        let after = read_through_marker(session.output.raw(), &mut transcript, RESIZE_PROBE_AFTER)
+            .expect("read resized child console dimensions");
+        eprintln!("ConPTY resize probe after: {after}");
+        assert!(
+            after.contains("dw=120x42") && after.contains("window=120x42"),
+            "successful ResizePseudoConsole did not propagate 120x42 to the child; \
+             HRESULT={result:#010x}; transcript: {}",
+            String::from_utf8_lossy(&transcript)
+        );
+        assert_eq!(
+            unsafe {
+                WaitForSingleObject(
+                    session.process.raw(),
+                    PROBE_TIMEOUT.as_millis().try_into().unwrap(),
+                )
+            },
+            WAIT_OBJECT_0,
+            "ConPTY resize probe child did not exit; transcript: {}",
+            String::from_utf8_lossy(&transcript)
+        );
+    }
+
+    fn query_console_dimensions() -> io::Result<ConsoleDimensions> {
+        let mut information: CONSOLE_SCREEN_BUFFER_INFO = unsafe { zeroed() };
+        let output = unsafe { GetStdHandle(STD_OUTPUT_HANDLE) };
+        if unsafe { GetConsoleScreenBufferInfo(output, &mut information) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(ConsoleDimensions {
+            buffer_columns: information.dwSize.X,
+            buffer_rows: information.dwSize.Y,
+            window_columns: information.srWindow.Right - information.srWindow.Left + 1,
+            window_rows: information.srWindow.Bottom - information.srWindow.Top + 1,
+        })
+    }
+
+    fn read_through_marker(
+        handle: windows_sys::Win32::Foundation::HANDLE,
+        transcript: &mut Vec<u8>,
+        marker: &str,
+    ) -> io::Result<String> {
+        loop {
+            if let Some(offset) = find_bytes(transcript, marker.as_bytes()) {
+                let end = transcript[offset..]
+                    .iter()
+                    .position(|byte| *byte == b'\n')
+                    .map_or(transcript.len(), |length| offset + length);
+                return Ok(String::from_utf8_lossy(&transcript[offset..end]).into_owned());
+            }
+            transcript.extend(read_overlapped(handle)?);
+            if transcript.len() > 64 * 1024 {
+                return Err(io::Error::other(
+                    "ConPTY resize probe exceeded transcript limit",
+                ));
+            }
+        }
+    }
+
+    fn find_bytes(bytes: &[u8], pattern: &[u8]) -> Option<usize> {
+        bytes
+            .windows(pattern.len())
+            .position(|candidate| candidate == pattern)
+    }
+
+    fn read_overlapped(handle: windows_sys::Win32::Foundation::HANDLE) -> io::Result<Vec<u8>> {
+        let event = OwnedHandle::new(unsafe { CreateEventW(null(), 0, 0, null()) })?;
+        let mut operation: OVERLAPPED = unsafe { zeroed() };
+        operation.hEvent = event.raw();
+        let mut bytes = vec![0_u8; 4096];
+        let mut transferred = 0;
+        let started = unsafe {
+            ReadFile(
+                handle,
+                bytes.as_mut_ptr().cast(),
+                bytes.len().try_into().unwrap(),
+                &mut transferred,
+                &mut operation,
+            )
+        };
+        if started == 0 {
+            let error = unsafe { GetLastError() };
+            if error == ERROR_BROKEN_PIPE {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "ConPTY resize probe output closed",
+                ));
+            }
+            if error != ERROR_IO_PENDING {
+                return Err(io::Error::from_raw_os_error(error as i32));
+            }
+            wait_overlapped(handle, &mut operation, &mut transferred)?;
+        }
+        bytes.truncate(transferred as usize);
+        Ok(bytes)
+    }
+
+    fn write_overlapped(
+        handle: windows_sys::Win32::Foundation::HANDLE,
+        bytes: &[u8],
+    ) -> io::Result<()> {
+        let event = OwnedHandle::new(unsafe { CreateEventW(null(), 0, 0, null()) })?;
+        let mut operation: OVERLAPPED = unsafe { zeroed() };
+        operation.hEvent = event.raw();
+        let mut transferred = 0;
+        let started = unsafe {
+            WriteFile(
+                handle,
+                bytes.as_ptr().cast(),
+                bytes.len().try_into().unwrap(),
+                &mut transferred,
+                &mut operation,
+            )
+        };
+        if started == 0 {
+            let error = unsafe { GetLastError() };
+            if error != ERROR_IO_PENDING {
+                return Err(io::Error::from_raw_os_error(error as i32));
+            }
+            wait_overlapped(handle, &mut operation, &mut transferred)?;
+        }
+        if transferred as usize != bytes.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::WriteZero,
+                "partial ConPTY resize probe trigger",
+            ));
+        }
+        Ok(())
+    }
+
+    fn wait_overlapped(
+        handle: windows_sys::Win32::Foundation::HANDLE,
+        operation: &mut OVERLAPPED,
+        transferred: &mut u32,
+    ) -> io::Result<()> {
+        let status = unsafe {
+            WaitForSingleObject(
+                operation.hEvent,
+                PROBE_TIMEOUT.as_millis().try_into().unwrap(),
+            )
+        };
+        if status == WAIT_TIMEOUT {
+            unsafe {
+                CancelIoEx(handle, operation);
+                GetOverlappedResult(handle, operation, transferred, 1);
+            }
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "ConPTY resize probe I/O timed out",
+            ));
+        }
+        if status != WAIT_OBJECT_0
+            || unsafe { GetOverlappedResult(handle, operation, transferred, 0) } == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
 
     #[test]
     fn command_line_preserves_empty_argument() {
