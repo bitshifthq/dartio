@@ -30,7 +30,7 @@ use windows_sys::Win32::System::Threading::{
     CreateEventW, CreateProcessW, WaitForSingleObject, CREATE_UNICODE_ENVIRONMENT,
     EXTENDED_STARTUPINFO_PRESENT, INFINITE, PROCESS_INFORMATION, STARTUPINFOEXW, STARTUPINFOW,
 };
-use windows_sys::Win32::System::IO::OVERLAPPED;
+use windows_sys::Win32::System::IO::{GetOverlappedResult, OVERLAPPED};
 
 use super::handles::{AttributeList, OwnedHandle, OwnedPseudoConsole, PipeSecurity};
 
@@ -434,6 +434,13 @@ impl NamedPipePair {
             let error = unsafe { GetLastError() };
             if error == ERROR_IO_PENDING {
                 if unsafe { WaitForSingleObject(connected.raw(), INFINITE) } != WAIT_OBJECT_0 {
+                    return Err(io::Error::last_os_error());
+                }
+                let mut transferred = 0;
+                if unsafe {
+                    GetOverlappedResult(controller.raw(), &overlapped, &mut transferred, 0)
+                } == 0
+                {
                     return Err(io::Error::last_os_error());
                 }
             } else if error != ERROR_PIPE_CONNECTED {

@@ -13,10 +13,24 @@ fn main() {
     println!("cargo:rerun-if-env-changed=PTYX_BROKER_BINARY");
     println!("cargo:rerun-if-env-changed=PTYX_SKIP_DART_BRIDGE");
 
+    match env::var("CARGO_CFG_TARGET_OS").as_deref() {
+        Ok("linux" | "macos" | "windows") => {}
+        Ok(target) => fail(format!(
+            "ptyx has no native backend for target operating system {target}"
+        )),
+        Err(_) => fail("Cargo did not provide CARGO_CFG_TARGET_OS"),
+    }
+
     if env::var("CARGO_CFG_UNIX").is_ok() {
         configure_broker();
     }
     if env::var_os("PTYX_SKIP_DART_BRIDGE").is_some() {
+        if env::var("PROFILE").is_ok_and(|profile| profile == "release") {
+            fail("PTYX_SKIP_DART_BRIDGE is diagnostic-only and cannot be used for release builds");
+        }
+        println!(
+            "cargo:warning=PTYX_SKIP_DART_BRIDGE omits the Dart C bridge; this build cannot produce a usable ptyx library"
+        );
         return;
     }
 
@@ -34,6 +48,9 @@ fn main() {
     build.file("src/dart_bridge.c");
     build.include(include);
     build.warnings(false);
+    if env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
+        build.flag("/std:c11");
+    }
     add_apple_sdk_sysroot(&mut build);
     build.compile("ptyx_dart_api_dl");
 }

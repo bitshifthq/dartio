@@ -3,6 +3,7 @@ use std::io;
 use std::mem::{size_of, zeroed};
 use std::pin::Pin;
 use std::ptr::{null, null_mut};
+use std::sync::Arc;
 
 use windows_sys::Win32::Foundation::{CloseHandle, LocalFree, HANDLE, INVALID_HANDLE_VALUE};
 use windows_sys::Win32::Security::Authorization::{
@@ -52,7 +53,7 @@ impl Drop for OwnedHandle {
 }
 
 struct ProcessWaitContext {
-    completion_port: HANDLE,
+    completion_port: Arc<OwnedHandle>,
     completion_key: usize,
 }
 
@@ -68,7 +69,7 @@ unsafe impl Send for OwnedProcessWait {}
 impl OwnedProcessWait {
     pub(crate) fn register(
         process: HANDLE,
-        completion_port: HANDLE,
+        completion_port: Arc<OwnedHandle>,
         completion_key: usize,
     ) -> io::Result<Self> {
         let context = Box::into_raw(Box::new(ProcessWaitContext {
@@ -113,7 +114,7 @@ unsafe extern "system" fn post_process_exit(context: *mut c_void, _timed_out: bo
     let context = unsafe { &*context.cast::<ProcessWaitContext>() };
     unsafe {
         PostQueuedCompletionStatus(
-            context.completion_port,
+            context.completion_port.raw(),
             0,
             context.completion_key,
             null_mut(),
