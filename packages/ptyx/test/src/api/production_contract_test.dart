@@ -1,6 +1,3 @@
-@TestOn('!windows')
-library;
-
 import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
@@ -12,9 +9,15 @@ void main() {
   const size = PtySize(rows: 24, columns: 80);
 
   PtySpawnOptions shell(String script, {int inputCapacity = 4096}) {
+    final executable = Platform.isWindows
+        ? r'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe'
+        : '/bin/sh';
+    final arguments = Platform.isWindows
+        ? ['-NoProfile', '-NonInteractive', '-Command', script]
+        : ['-c', script];
     return PtySpawnOptions(
-      executable: '/bin/sh',
-      arguments: ['-c', script],
+      executable: executable,
+      arguments: arguments,
       initialSize: size,
       maxBufferedInput: inputCapacity,
       maxBufferedOutput: 64 * 1024,
@@ -73,7 +76,9 @@ void main() {
     const capacity = 1024 * 1024;
     final session = await PtySession.spawn(
       shell(
-        r'stty raw -echo; printf ready; kill -STOP $$; sleep 10',
+        Platform.isWindows
+            ? '[Console]::Write("ready"); Start-Sleep -Seconds 10'
+            : r'stty raw -echo; printf ready; kill -STOP $$; sleep 10',
         inputCapacity: capacity,
       ),
     );
@@ -95,9 +100,9 @@ void main() {
     final session = await PtySession.spawn(shell('exit 0'));
     addTearDown(session.close);
 
-    expect(session.capabilities.processGroups, isTrue);
-    expect(session.capabilities.signals, isTrue);
-    expect(session.capabilities.terminalModes, isTrue);
-    expect(session.capabilities.conPty, isFalse);
+    expect(session.capabilities.processGroups, !Platform.isWindows);
+    expect(session.capabilities.signals, !Platform.isWindows);
+    expect(session.capabilities.terminalModes, !Platform.isWindows);
+    expect(session.capabilities.conPty, Platform.isWindows);
   });
 }

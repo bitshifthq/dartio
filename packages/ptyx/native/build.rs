@@ -11,9 +11,13 @@ fn main() {
     println!("cargo:rerun-if-env-changed=PATH");
     println!("cargo:rerun-if-env-changed=PATHEXT");
     println!("cargo:rerun-if-env-changed=PTYX_BROKER_BINARY");
+    println!("cargo:rerun-if-env-changed=PTYX_SKIP_DART_BRIDGE");
 
     if env::var("CARGO_CFG_UNIX").is_ok() {
         configure_broker();
+    }
+    if env::var_os("PTYX_SKIP_DART_BRIDGE").is_some() {
+        return;
     }
 
     let Some(sdk) = resolve_configured_dart_sdk().or_else(resolve_dart_sdk) else {

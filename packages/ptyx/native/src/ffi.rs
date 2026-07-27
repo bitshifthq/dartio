@@ -1,5 +1,8 @@
 use super::{IntegratedRuntime, Notice, WaitResult};
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use crate::broker_client::BrokerSpawn;
+#[cfg(windows)]
+use crate::windows::BrokerSpawn;
 use std::collections::{HashMap, HashSet};
 use std::ffi::{c_void, CStr, CString};
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -48,7 +51,14 @@ pub extern "C" fn ptyi_abi_version() -> u32 {
 
 #[no_mangle]
 pub extern "C" fn ptyi_capabilities() -> u32 {
-    1 | 2 | 4
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        1 | 2 | 4
+    }
+    #[cfg(windows)]
+    {
+        8
+    }
 }
 
 fn runtime() -> Option<&'static Mutex<IntegratedRuntime>> {
@@ -77,6 +87,7 @@ pub extern "C" fn ptyi_test_fail_next_post() {
 
 #[no_mangle]
 pub extern "C" fn ptyi_test_kill_broker() {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     let _ = with_runtime(IntegratedRuntime::kill_broker_for_test);
 }
 

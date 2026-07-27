@@ -1,16 +1,26 @@
-#![cfg(any(target_os = "linux", target_os = "macos"))]
+#![cfg(any(target_os = "linux", target_os = "macos", windows))]
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::io;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::os::fd::RawFd;
 
 const MAX_NOTICE_GENERATION: u32 = ((i64::MAX as u64 >> 3) >> 32) as u32;
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod broker_client;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod broker_materializer;
 mod ffi;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod integrated;
+#[cfg(windows)]
+mod windows;
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) use integrated::{IntegratedRuntime, Notice, WaitResult};
+#[cfg(windows)]
+pub(crate) use windows::{IntegratedRuntime, Notice, WaitResult};
 
 struct Slot<T> {
     generation: u32,
@@ -92,6 +102,7 @@ fn decode_handle(handle: u64) -> Option<(usize, u32)> {
     (generation != 0).then_some((index, generation))
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) fn set_cloexec(fd: RawFd) -> io::Result<()> {
     let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
     if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) } < 0 {
@@ -100,6 +111,7 @@ pub(crate) fn set_cloexec(fd: RawFd) -> io::Result<()> {
     Ok(())
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) fn set_nonblocking(fd: RawFd) -> io::Result<()> {
     let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
     if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
@@ -108,6 +120,7 @@ pub(crate) fn set_nonblocking(fd: RawFd) -> io::Result<()> {
     Ok(())
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) fn dup_cloexec(fd: RawFd) -> io::Result<std::os::fd::OwnedFd> {
     use std::os::fd::FromRawFd;
 

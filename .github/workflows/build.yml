@@ -40,16 +40,11 @@ jobs:
             runner: macos-15
             rust_target: aarch64-apple-darwin
           - target: x86_64-macos
-            runner: macos-15
+            runner: macos-15-intel
             rust_target: x86_64-apple-darwin
           - target: aarch64-linux-gnu
-            runner: ubuntu-latest
+            runner: ubuntu-24.04-arm
             rust_target: aarch64-unknown-linux-gnu
-            apt: true
-            apt_packages: gcc-aarch64-linux-gnu
-            linker: aarch64-linux-gnu-gcc
-            cargo_linker_env: CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER
-            cc_env: CC_aarch64_unknown_linux_gnu
           - target: x86_64-linux-gnu
             runner: ubuntu-latest
             rust_target: x86_64-unknown-linux-gnu
@@ -57,7 +52,7 @@ jobs:
             runner: windows-latest
             rust_target: x86_64-pc-windows-msvc
           - target: aarch64-windows
-            runner: windows-latest
+            runner: windows-11-arm
             rust_target: aarch64-pc-windows-msvc
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

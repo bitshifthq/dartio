@@ -485,7 +485,9 @@ final class _PendingWaiter {
 }
 
 final class _ControllerRuntime {
-  _ControllerRuntime._() : _output = ReceivePort(), _events = ReceivePort() {
+  _ControllerRuntime._() {
+    _output = RawReceivePort(_onOutput)..keepIsolateAlive = false;
+    _events = RawReceivePort(_onEvent)..keepIsolateAlive = false;
     final abi = controllerAbiVersion();
     if (abi != controllerAbiVersionExpected) {
       throw PtyInfrastructureException(
@@ -497,14 +499,12 @@ final class _ControllerRuntime {
         'native controller initialization failed',
       );
     }
-    _output.listen(_onOutput);
-    _events.listen(_onEvent);
   }
 
   static final instance = _ControllerRuntime._();
 
-  final ReceivePort _output;
-  final ReceivePort _events;
+  late final RawReceivePort _output;
+  late final RawReceivePort _events;
   final Map<int, NativeSession> _sessions = {};
   final Map<int, _PendingWaiter> _waiters = {};
   final Map<int, int> _credit = {};
@@ -567,7 +567,9 @@ final class _ControllerRuntime {
         if (session != null) {
           session._infrastructureLost = true;
           session._fail(
-            const PtyInfrastructureException('Unix PTY broker terminated'),
+            const PtyInfrastructureException(
+              'native PTY infrastructure terminated',
+            ),
           );
         }
     }

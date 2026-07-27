@@ -72,10 +72,16 @@ jobs:
         include:
           - os: linux-x64
             runner: ubuntu-latest
+          - os: linux-arm64
+            runner: ubuntu-24.04-arm
           - os: macos-arm64
             runner: macos-15
+          - os: macos-x64
+            runner: macos-15-intel
           - os: windows-x64
-            runner: windows-latest
+            runner: windows-2022
+          - os: windows-arm64
+            runner: windows-11-arm
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -90,8 +96,8 @@ jobs:
             ~/.cargo/git
             ~/.cargo/registry
             packages/ptyx/native/target
-          key: ptyx-tests-${{ runner.os }}-${{ hashFiles('packages/ptyx/native/Cargo.lock', '**/pubspec.yaml') }}
-          restore-keys: ptyx-tests-${{ runner.os }}-
+          key: ptyx-tests-${{ matrix.os }}-${{ hashFiles('packages/ptyx/native/Cargo.lock', '**/pubspec.yaml') }}
+          restore-keys: ptyx-tests-${{ matrix.os }}-
       - name: install Rust
         run: |
           rustup toolchain install stable --profile minimal
@@ -124,10 +130,16 @@ jobs:
         include:
           - os: linux-x64
             runner: ubuntu-latest
+          - os: linux-arm64
+            runner: ubuntu-24.04-arm
           - os: macos-arm64
             runner: macos-15
+          - os: macos-x64
+            runner: macos-15-intel
           - os: windows-x64
-            runner: windows-latest
+            runner: windows-2022
+          - os: windows-arm64
+            runner: windows-11-arm
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dart-lang/setup-dart@65eb853c7ba17dde3be364c3d2858773e7144260 # v1.7.2
@@ -139,13 +151,13 @@ jobs:
             ~/.cargo/git
             ~/.cargo/registry
             packages/ptyx/native/target
-          key: ptyx-rust-${{ runner.os }}-${{ hashFiles('packages/ptyx/native/Cargo.lock') }}
-          restore-keys: ptyx-rust-${{ runner.os }}-
+          key: ptyx-rust-${{ matrix.os }}-${{ hashFiles('packages/ptyx/native/Cargo.lock') }}
+          restore-keys: ptyx-rust-${{ matrix.os }}-
       - name: install Rust
         run: |
           rustup toolchain install stable --profile minimal
           rustup default stable
-          rustup component add rustfmt
+          rustup component add clippy rustfmt
       - name: configure Dart SDK
         run: |
           SDK="$(dirname "$(dirname "$(command -v dart)")")"
@@ -167,6 +179,9 @@ jobs:
       - run: cargo test --manifest-path packages/ptyx/native/Cargo.toml
       - if: runner.os != 'Windows'
         run: cargo test --manifest-path packages/ptyx/native/broker/Cargo.toml
+      - run: cargo clippy --manifest-path packages/ptyx/native/Cargo.toml --all-targets -- -D warnings
+      - if: runner.os != 'Windows'
+        run: cargo clippy --manifest-path packages/ptyx/native/broker/Cargo.toml --all-targets -- -D warnings
       - run: cargo doc --manifest-path packages/ptyx/native/Cargo.toml --no-deps
       - if: runner.os != 'Windows'
         run: cargo doc --manifest-path packages/ptyx/native/broker/Cargo.toml --no-deps
