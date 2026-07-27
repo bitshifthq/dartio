@@ -406,13 +406,17 @@ Future<Map<String, Object?>> _pauseResume(int byteCount) async {
   late final StreamSubscription<Uint8List> subscription;
   subscription = bytes.remaining.listen(
     (chunk) {
-      invalid = invalid || chunk.any((value) => value != 0);
+      for (var index = 0; index < chunk.length; index++) {
+        invalid = invalid || chunk[index] != _pattern(received + index);
+      }
       received += chunk.length;
     },
     onError: done.completeError,
     onDone: done.complete,
   );
   subscription.pause();
+  await session.write(Uint8List.fromList(const [1]));
+  await session.flush();
   final rssBefore = ProcessInfo.currentRss;
   await Future<void>.delayed(const Duration(milliseconds: 250));
   final rssWhilePaused = ProcessInfo.currentRss;

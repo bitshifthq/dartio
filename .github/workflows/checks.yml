@@ -203,17 +203,17 @@ jobs:
           dart run packages/ptyx/tool/verify_abi.dart "$LIBRARY"
       - name: run C ABI harness
         if: runner.os == 'Windows'
-        shell: pwsh
+        shell: cmd
         run: |
-          cl /nologo /std:c11 /W4 /WX `
-            /Ipackages/ptyx/include `
-            packages/ptyx/native/tests/abi_harness.c `
-            /Fe:$env:RUNNER_TEMP/ptyx-abi-harness.exe `
+          call "%ProgramFiles%\Microsoft Visual Studio\2022\Enterprise\Common7\Tools\VsDevCmd.bat" -arch=%RUNNER_ARCH%
+          cl /nologo /std:c11 /W4 /WX ^
+            /Ipackages/ptyx/include ^
+            packages/ptyx/native/tests/abi_harness.c ^
+            /Fe:%RUNNER_TEMP%\ptyx-abi-harness.exe ^
             /link /LIBPATH:packages/ptyx/native/target/debug ptyx.dll.lib
-          $env:PATH = "$env:GITHUB_WORKSPACE/packages/ptyx/native/target/debug;$env:PATH"
-          & "$env:RUNNER_TEMP/ptyx-abi-harness.exe"
-          dart run packages/ptyx/tool/verify_abi.dart `
-            "$env:GITHUB_WORKSPACE/packages/ptyx/native/target/debug/ptyx.dll"
+          set "PATH=%GITHUB_WORKSPACE%\packages\ptyx\native\target\debug;%PATH%"
+          "%RUNNER_TEMP%\ptyx-abi-harness.exe"
+          dart run packages/ptyx/tool/verify_abi.dart "%GITHUB_WORKSPACE%\packages\ptyx\native\target\debug\ptyx.dll"
       - if: runner.os != 'Windows'
         run: cargo test --manifest-path packages/ptyx/native/broker/Cargo.toml
       - name: run Unix broker ownership harness
