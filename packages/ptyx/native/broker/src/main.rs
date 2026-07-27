@@ -738,8 +738,13 @@ struct ExitStatus {
 
 enum SlotState {
     Vacant,
-    Running { pid: libc::pid_t },
-    Exited(ExitStatus),
+    Running {
+        pid: libc::pid_t,
+    },
+    Exited {
+        exit: ExitStatus,
+        process_group: libc::pid_t,
+    },
 }
 
 struct Slot {
@@ -1002,7 +1007,15 @@ impl Broker {
                 }
                 (CLOSE_KILLED, 0)
             }
-            Some(SlotState::Exited(exit)) => (CLOSE_ALREADY_EXITED, exit.code),
+            Some(SlotState::Exited {
+                exit,
+                process_group,
+            }) => {
+                unsafe {
+                    libc::kill(-*process_group, libc::SIGKILL);
+                }
+                (CLOSE_ALREADY_EXITED, exit.code)
+            }
             _ => (CLOSE_STALE, 0),
         };
         let mut response = Frame::new(CLOSE_RESULT);
@@ -1036,7 +1049,7 @@ impl Broker {
                 }
                 result == 0
             }
-            Some(SlotState::Exited(_)) | Some(SlotState::Vacant) | None => false,
+            Some(SlotState::Exited { .. }) | Some(SlotState::Vacant) | None => false,
         };
         let mut response = Frame::new(SIGNAL_RESULT);
         response.request = frame.request;
@@ -1047,9 +1060,16 @@ impl Broker {
     fn handle_release(&mut self, frame: Frame) -> io::Result<()> {
         let released = if let Some((index, generation)) = split_session(frame.session) {
             if let Some(slot) = self.slots.get_mut(index) {
-                if slot.generation == generation && matches!(slot.state, SlotState::Exited(_)) {
-                    slot.state = SlotState::Vacant;
-                    true
+                if slot.generation == generation {
+                    if let SlotState::Exited { process_group, .. } = &slot.state {
+                        unsafe {
+                            libc::kill(-*process_group, libc::SIGKILL);
+                        }
+                        slot.state = SlotState::Vacant;
+                        true
+                    } else {
+                        false
+                    }
                 } else {
                     false
                 }
@@ -1159,7 +1179,10 @@ impl Broker {
         if let Some((index, generation)) = split_session(session) {
             let slot = &mut self.slots[index];
             if slot.generation == generation {
-                slot.state = SlotState::Exited(exit);
+                slot.state = SlotState::Exited {
+                    exit,
+                    process_group: pid,
+                };
             }
         }
         let mut frame = Frame::new(EXIT);
@@ -1198,7 +1221,10 @@ impl Broker {
             let exit = ExitStatus {
                 code: decode_wait_status(status),
             };
-            self.slots[index].state = SlotState::Exited(exit);
+            self.slots[index].state = SlotState::Exited {
+                exit,
+                process_group: pid,
+            };
             let mut frame = Frame::new(EXIT);
             frame.session = session;
             frame.code = exit.code;
@@ -1218,7 +1244,7 @@ impl Broker {
             unsafe {
                 libc::kill(-*pid, libc::SIGKILL);
             }
-        } else if matches!(self.lookup(session), Some(SlotState::Exited(_))) {
+        } else if matches!(self.lookup(session), Some(SlotState::Exited { .. })) {
             self.signal_after_reap += 1;
         }
     }
@@ -1232,9 +1258,12 @@ impl Broker {
             if let Some((index, generation)) = split_session(session) {
                 let slot = &mut self.slots[index];
                 if slot.generation == generation {
-                    slot.state = SlotState::Exited(ExitStatus {
-                        code: decode_wait_status(status),
-                    });
+                    slot.state = SlotState::Exited {
+                        exit: ExitStatus {
+                            code: decode_wait_status(status),
+                        },
+                        process_group: pid,
+                    };
                 }
             }
         }
@@ -1246,12 +1275,20 @@ impl Broker {
             .iter()
             .enumerate()
             .filter_map(|(index, slot)| {
-                matches!(slot.state, SlotState::Running { .. })
+                (!matches!(slot.state, SlotState::Vacant))
                     .then_some(make_session(index, slot.generation))
             })
             .collect();
         for session in &sessions {
-            self.kill_running(*session);
+            match self.lookup(*session) {
+                Some(SlotState::Running { pid }) => unsafe {
+                    libc::kill(-*pid, libc::SIGKILL);
+                },
+                Some(SlotState::Exited { process_group, .. }) => unsafe {
+                    libc::kill(-*process_group, libc::SIGKILL);
+                },
+                _ => {}
+            }
         }
         for session in sessions {
             self.reap_blocking(session);

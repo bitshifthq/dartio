@@ -4,7 +4,7 @@ use std::io::{self, Read, Write};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const BROKER: &[u8] = include_bytes!(env!("PTYX_BROKER_BINARY"));
 const BROKER_ID: &str = env!("PTYX_BROKER_ID");
@@ -32,7 +32,9 @@ pub(crate) fn broker_path() -> io::Result<PathBuf> {
             .mode(0o600)
             .open(&lock)
         {
-            Ok(lock_file) => {
+            Ok(mut lock_file) => {
+                writeln!(lock_file, "{}", std::process::id())?;
+                lock_file.sync_all()?;
                 let result = install(&root, &destination);
                 drop(lock_file);
                 let _ = fs::remove_file(&lock);
@@ -44,6 +46,7 @@ pub(crate) fn broker_path() -> io::Result<PathBuf> {
                 if validate_embedded(&destination).is_ok() {
                     return Ok(destination);
                 }
+                reclaim_stale_lock(&lock)?;
                 if Instant::now() >= deadline {
                     return Err(io::Error::new(
                         io::ErrorKind::TimedOut,
@@ -92,7 +95,14 @@ fn install(root: &Path, destination: &Path) -> io::Result<()> {
     if validate_embedded(destination).is_ok() {
         return Ok(());
     }
-    let temporary = root.join(format!(".broker-{BROKER_ID}.{}.tmp", std::process::id()));
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let temporary = root.join(format!(
+        ".broker-{BROKER_ID}.{}.{nonce}.tmp",
+        std::process::id()
+    ));
     let mut file = OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -103,6 +113,42 @@ fn install(root: &Path, destination: &Path) -> io::Result<()> {
     drop(file);
     fs::rename(&temporary, destination)?;
     File::open(root)?.sync_all()
+}
+
+fn reclaim_stale_lock(path: &Path) -> io::Result<()> {
+    let metadata = fs::symlink_metadata(path)?;
+    if !metadata.is_file()
+        || metadata.file_type().is_symlink()
+        || metadata.uid() != unsafe { libc::geteuid() }
+        || metadata.mode() & 0o777 != 0o600
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "broker materialization lock ownership or mode rejected",
+        ));
+    }
+    let pid = fs::read_to_string(path)
+        .ok()
+        .and_then(|value| value.trim().parse::<libc::pid_t>().ok());
+    let owner_is_gone = pid.is_none_or(|pid| {
+        if unsafe { libc::kill(pid, 0) } == 0 {
+            return false;
+        }
+        io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+    });
+    let too_old = metadata
+        .modified()
+        .ok()
+        .and_then(|modified| SystemTime::now().duration_since(modified).ok())
+        .is_some_and(|age| age > Duration::from_secs(30));
+    if owner_is_gone || too_old {
+        match fs::remove_file(path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
 }
 
 fn validate_embedded(path: &Path) -> io::Result<()> {

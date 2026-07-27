@@ -17,7 +17,7 @@ const BYTE_QUANTUM: usize = 64 * 1024;
 const SYSCALL_QUANTUM: usize = 4;
 const INTERACTIVE_BATCH: usize = 256;
 const OUTPUT_BATCH: usize = 64 * 1024;
-const OUTPUT_DELAY: Duration = Duration::from_millis(10);
+const OUTPUT_DELAY: Duration = Duration::from_millis(1);
 const COMMAND_QUANTUM: usize = 64;
 const COMMAND_CAPACITY: usize = 1024;
 const NOTICE_CAPACITY: usize = 4096;
@@ -88,9 +88,10 @@ struct Session {
     output_failed: bool,
     paused: bool,
     output_eof: bool,
-    exit_status: Option<i32>,
+    exit_status: Option<i64>,
     close_started: bool,
     active: bool,
+    abandoned: bool,
     read_filter_enabled: Option<bool>,
     write_filter_enabled: Option<bool>,
     #[cfg(target_os = "linux")]
@@ -124,6 +125,7 @@ impl Session {
             exit_status: None,
             close_started: false,
             active: false,
+            abandoned: false,
             read_filter_enabled: None,
             write_filter_enabled: None,
             #[cfg(target_os = "linux")]
@@ -290,7 +292,7 @@ pub(crate) enum Command {
     },
     ExitStatus {
         handle: u64,
-        reply: Sender<Option<i32>>,
+        reply: Sender<Option<i64>>,
     },
     Pid {
         handle: u64,
@@ -333,6 +335,9 @@ pub(crate) enum Command {
     Destroy {
         handle: u64,
         reply: Sender<bool>,
+    },
+    Abandon {
+        handle: u64,
     },
     Counters {
         reply: Sender<RuntimeCounters>,
@@ -421,19 +426,30 @@ impl IntegratedRuntime {
         input_capacity: usize,
         output_capacity: usize,
     ) -> io::Result<u64> {
-        if input_capacity == 0 || output_capacity == 0 {
+        if input_capacity == 0
+            || input_capacity > 64 * 1024 * 1024
+            || output_capacity == 0
+            || output_capacity > 64 * 1024 * 1024
+        {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "capacities must be nonzero",
             ));
         }
         let broker = self.broker.client().spawn(config)?;
-        self.request(|reply| Command::Add {
+        let broker_session = broker.id;
+        match self.request_result(|reply| Command::Add {
             broker,
             input_capacity,
             output_capacity,
             reply,
-        })
+        }) {
+            Ok(result) => result,
+            Err(error) => {
+                let _ = self.broker.client().abort(broker_session);
+                Err(error)
+            }
+        }
     }
 
     pub fn activate(&self, handle: u64) -> bool {
@@ -523,7 +539,7 @@ impl IntegratedRuntime {
         })
     }
 
-    pub fn exit_status(&self, handle: u64) -> Option<i32> {
+    pub fn exit_status(&self, handle: u64) -> Option<i64> {
         self.request(|reply| Command::ExitStatus { handle, reply })
     }
 
@@ -575,6 +591,14 @@ impl IntegratedRuntime {
         self.request(|reply| Command::Destroy { handle, reply })
     }
 
+    pub fn try_abandon(&self, handle: u64) -> bool {
+        if self.commands.try_send(Command::Abandon { handle }).is_err() {
+            return false;
+        }
+        self.wake.wake();
+        true
+    }
+
     pub fn counters(&self) -> RuntimeCounters {
         self.request(|reply| Command::Counters { reply })
     }
@@ -584,10 +608,19 @@ impl IntegratedRuntime {
     }
 
     fn request<R>(&self, command: impl FnOnce(Sender<R>) -> Command) -> R {
+        self.request_result(command)
+            .expect("ptyx reactor request channel closed")
+    }
+
+    fn request_result<R>(&self, command: impl FnOnce(Sender<R>) -> Command) -> io::Result<R> {
         let (sender, receiver) = mpsc::channel();
-        self.commands.send(command(sender)).unwrap();
+        self.commands
+            .send(command(sender))
+            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "ptyx reactor stopped"))?;
         self.wake.wake();
-        receiver.recv().unwrap()
+        receiver
+            .recv()
+            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "ptyx reactor stopped"))
     }
 }
 
@@ -657,7 +690,7 @@ fn reactor(
             if io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
                 continue;
             }
-            shutdown_all(&mut sessions, &broker);
+            fail_all(&notices, &mut sessions, &mut counters, &broker);
             return;
         }
         counters.reactor_wakeups += 1;
@@ -695,6 +728,7 @@ fn reactor(
             }
         }
         refresh_due_outputs(-1, &notices, &mut sessions, &mut counters);
+        reap_abandoned(&mut sessions, &broker);
         if shutdown {
             shutdown_all(&mut sessions, &broker);
             return;
@@ -749,7 +783,7 @@ fn reactor(
             if io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
                 continue;
             }
-            shutdown_all(&mut sessions, &broker);
+            fail_all(&notices, &mut sessions, &mut counters, &broker);
             return;
         }
         counters.reactor_wakeups += 1;
@@ -806,6 +840,7 @@ fn reactor(
             }
         }
         refresh_due_outputs(epoll.as_raw_fd(), &notices, &mut sessions, &mut counters);
+        reap_abandoned(&mut sessions, &broker);
         if shutdown {
             shutdown_all(&mut sessions, &broker);
             return;
@@ -851,8 +886,16 @@ fn process_commands(
                     if let Some(session) = sessions.get_mut(handle) {
                         session.active = true;
                     }
+                    read_ready(kqueue, handle, notices, sessions, counters);
+                    if sessions
+                        .get(handle)
+                        .is_some_and(|session| session.exit_status.is_some())
+                    {
+                        send_notice(notices, Notice::Exit(handle), counters);
+                    }
+                    refresh_output(kqueue, handle, notices, sessions, counters);
                 } else if let Some(mut session) = sessions.remove(handle) {
-                    let _ = broker_client.abort(session.broker_session);
+                    let _ = broker_client.abort_async(session.broker_session);
                     session.close_started = true;
                 }
                 let _ = reply.send(result);
@@ -1016,14 +1059,24 @@ fn process_commands(
                 signal,
                 reply,
             } => {
-                let result = sessions.get(handle).and_then(|session| {
-                    if session.exit_status.is_some() {
-                        Some(false)
-                    } else {
-                        broker_client.signal(session.broker_session, signal).ok()
+                match sessions.get(handle) {
+                    Some(session) if session.exit_status.is_some() => {
+                        let _ = reply.send(Some(false));
                     }
-                });
-                let _ = reply.send(result);
+                    Some(session) => {
+                        if broker_client
+                            .signal_async(session.broker_session, signal, reply)
+                            .is_err()
+                        {
+                            // The receiver observes channel closure as native
+                            // signal failure. Keep the reactor available to
+                            // make progress for unrelated sessions.
+                        }
+                    }
+                    None => {
+                        let _ = reply.send(None);
+                    }
+                }
             }
             Command::OutputTotal { handle, reply } => {
                 let _ = reply.send(sessions.get(handle).map(Session::output_total));
@@ -1049,12 +1102,29 @@ fn process_commands(
                     .is_some_and(|session| session.exit_status.is_some());
                 let removed = if removable {
                     sessions.remove(handle).is_some_and(|session| {
-                        broker_client.release(session.broker_session).is_ok()
+                        broker_client.release_async(session.broker_session).is_ok()
                     })
                 } else {
                     false
                 };
                 let _ = reply.send(removed);
+            }
+            Command::Abandon { handle } => {
+                if let Some(session) = sessions.get_mut(handle) {
+                    session.abandoned = true;
+                    session.active = false;
+                    session.paused = false;
+                    session.input.clear();
+                    session.input_bytes = 0;
+                    session.capacity_waiters.clear();
+                    session.flush_waiters.clear();
+                    session.output.clear();
+                    session.output_bytes = 0;
+                    session.output_outstanding = 0;
+                    let _ = close_session(session, broker_client);
+                    let _ = update_read_filter(kqueue, handle, session, true);
+                    let _ = update_write_filter(kqueue, handle, session, false);
+                }
             }
             Command::Counters { reply } => {
                 let _ = reply.send(*counters);
@@ -1069,11 +1139,15 @@ fn process_commands(
                         .is_some_and(|session| session.broker_session == broker_session)
                 }) {
                     if let Some(session) = sessions.get_mut(handle) {
-                        session.exit_status = Some(status);
-                        fail_input_waiters(handle, session, notices, counters);
+                        session.exit_status = Some(i64::from(status));
+                        if !session.abandoned {
+                            fail_input_waiters(handle, session, notices, counters);
+                        }
                     }
                     read_ready(kqueue, handle, notices, sessions, counters);
-                    send_notice(notices, Notice::Exit(handle), counters);
+                    if sessions.get(handle).is_some_and(|session| session.active) {
+                        send_notice(notices, Notice::Exit(handle), counters);
+                    }
                 }
             }
             Command::BrokerLost => {
@@ -1240,6 +1314,9 @@ fn read_ready(
             let amount = result as usize;
             counters.read_bytes += amount as u64;
             bytes += amount;
+            if session.abandoned {
+                continue;
+            }
             if session.output_bytes == 0 {
                 session.output_deadline = Some(Instant::now() + OUTPUT_DELAY);
             }
@@ -1418,12 +1495,13 @@ fn refresh_output(
         || session
             .output_deadline
             .is_some_and(|deadline| deadline <= Instant::now());
-    if output_ready && !session.output.is_empty() && !session.output_notified {
+    if session.active && output_ready && !session.output.is_empty() && !session.output_notified {
         let bytes = session.pull(OUTPUT_BATCH);
         session.output_notified = true;
         send_notice(notices, Notice::Output { handle, bytes }, counters);
     }
-    if session.output_eof
+    if session.active
+        && session.output_eof
         && session.output.is_empty()
         && session.output_outstanding == 0
         && !session.output_done_notified
@@ -1479,7 +1557,24 @@ fn close_session(session: &mut Session, broker: &BrokerClient) -> bool {
     if session.exit_status.is_some() {
         return true;
     }
-    broker.close(session.broker_session).is_ok()
+    broker.close_async(session.broker_session).is_ok()
+}
+
+fn reap_abandoned(sessions: &mut GenerationRegistry<Session>, broker: &BrokerClient) {
+    for handle in sessions.handles() {
+        let removable = sessions.get(handle).is_some_and(|session| {
+            session.abandoned
+                && session.exit_status.is_some()
+                && session.output_eof
+                && session.output.is_empty()
+                && session.output_outstanding == 0
+        });
+        if removable {
+            if let Some(session) = sessions.remove(handle) {
+                let _ = broker.release_async(session.broker_session);
+            }
+        }
+    }
 }
 
 fn shutdown_all(sessions: &mut GenerationRegistry<Session>, broker: &BrokerClient) {
@@ -1490,7 +1585,23 @@ fn shutdown_all(sessions: &mut GenerationRegistry<Session>, broker: &BrokerClien
     }
     for handle in sessions.handles() {
         if let Some(session) = sessions.remove(handle) {
-            let _ = broker.abort(session.broker_session);
+            let _ = broker.abort_async(session.broker_session);
+        }
+    }
+}
+
+fn fail_all(
+    notices: &SyncSender<Notice>,
+    sessions: &mut GenerationRegistry<Session>,
+    counters: &mut RuntimeCounters,
+    broker: &BrokerClient,
+) {
+    for handle in sessions.handles() {
+        if let Some(mut session) = sessions.remove(handle) {
+            session.close_started = true;
+            fail_input_waiters(handle, &mut session, notices, counters);
+            let _ = broker.abort_async(session.broker_session);
+            send_notice(notices, Notice::BrokerLost(handle), counters);
         }
     }
 }

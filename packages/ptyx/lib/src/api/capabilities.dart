@@ -15,11 +15,15 @@ final class PtyCapabilities {
   /// Whether the backend uses Windows ConPTY.
   final bool conPty;
 
+  /// Whether [PtySession.ttyName] is available.
+  final bool terminalName;
+
   /// Creates an immutable capability snapshot.
   const PtyCapabilities({
     required this.signals,
     required this.processGroups,
     required this.terminalModes,
     required this.conPty,
+    required this.terminalName,
   });
 }

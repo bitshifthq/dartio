@@ -30,13 +30,13 @@ use crate::GenerationRegistry;
 const BYTE_QUANTUM: usize = 64 * 1024;
 const INTERACTIVE_BATCH: usize = 256;
 const OUTPUT_BATCH: usize = 64 * 1024;
-const OUTPUT_DELAY: Duration = Duration::from_millis(10);
+const OUTPUT_DELAY: Duration = Duration::from_millis(1);
 const COMMAND_QUANTUM: usize = 64;
 const COMMAND_CAPACITY: usize = 1024;
 const NOTICE_CAPACITY: usize = 4096;
 const WAITER_CAPACITY: usize = 1024;
 const SESSION_NOTICE_RESERVATIONS: usize = 4;
-const CLOSE_ADMISSION_CAPACITY: usize = 64;
+const CLOSE_ADMISSION_CAPACITY: usize = 128;
 const QUARANTINED_IO_CAPACITY: usize = CLOSE_ADMISSION_CAPACITY * 2;
 const EXIT_KEY_TAG: usize = 1_usize << (usize::BITS - 1);
 const CLOSE_KEY_TAG: usize = 1_usize << (usize::BITS - 2);
@@ -117,7 +117,7 @@ struct Session {
     read: Option<Pin<Box<IoOperation>>>,
     paused: bool,
     output_eof: bool,
-    exit_status: Option<i32>,
+    exit_status: Option<i64>,
     exit_notified: bool,
     close_started: bool,
     pseudoconsole_close_started: bool,
@@ -125,6 +125,7 @@ struct Session {
     cleanup_failed: bool,
     broker_lost_notified: bool,
     active: bool,
+    abandoned: bool,
 }
 
 impl Session {
@@ -175,6 +176,7 @@ impl Session {
             cleanup_failed: false,
             broker_lost_notified: false,
             active: false,
+            abandoned: false,
         }
     }
 
@@ -388,7 +390,7 @@ enum Command {
     },
     ExitStatus {
         handle: u64,
-        reply: Sender<Option<i32>>,
+        reply: Sender<Option<i64>>,
     },
     Pid {
         handle: u64,
@@ -429,6 +431,9 @@ enum Command {
     Destroy {
         handle: u64,
         reply: Sender<bool>,
+    },
+    Abandon {
+        handle: u64,
     },
     Counters {
         reply: Sender<RuntimeCounters>,
@@ -852,7 +857,7 @@ impl IntegratedRuntime {
         })
     }
 
-    pub(crate) fn exit_status(&self, handle: u64) -> Option<i32> {
+    pub(crate) fn exit_status(&self, handle: u64) -> Option<i64> {
         self.request(|reply| Command::ExitStatus { handle, reply })
     }
 
@@ -904,6 +909,14 @@ impl IntegratedRuntime {
         self.request(|reply| Command::Destroy { handle, reply })
     }
 
+    pub(crate) fn try_abandon(&self, handle: u64) -> bool {
+        if self.commands.try_send(Command::Abandon { handle }).is_err() {
+            return false;
+        }
+        let _ = self.iocp.post_command();
+        true
+    }
+
     pub(crate) fn counters(&self) -> RuntimeCounters {
         self.request(|reply| Command::Counters { reply })
     }
@@ -944,6 +957,7 @@ fn reactor(
             &mut sessions,
             &mut counters,
         );
+        reap_abandoned(&mut sessions);
         let timeout = output_timeout(&sessions);
         let mut transferred = 0;
         let mut key = 0;
@@ -1321,6 +1335,29 @@ fn process_commands(
                 let removable = sessions.get(handle).is_some_and(Session::terminal);
                 let _ = reply.send(removable && sessions.remove(handle).is_some());
             }
+            Command::Abandon { handle } => {
+                if let Some(session) = sessions.get_mut(handle) {
+                    session.abandoned = true;
+                    session.active = false;
+                    if !session.close_started {
+                        session.close_started = true;
+                        session.paused = false;
+                        session.input.clear();
+                        session.input_bytes = 0;
+                        session.capacity_waiters.clear();
+                        session.flush_waiters.clear();
+                        session.output.clear();
+                        session.output_bytes = 0;
+                        session.output_outstanding = 0;
+                        unsafe {
+                            TerminateJobObject(session.job.raw(), 1);
+                        }
+                        cancel_write(session);
+                    }
+                    start_pseudoconsole_close(iocp_sender, handle, session, closer);
+                    ensure_read(iocp, handle, session, notices, counters);
+                }
+            }
             Command::Counters { reply } => {
                 let _ = reply.send(*counters);
             }
@@ -1369,7 +1406,7 @@ fn handle_process_exit(
     {
         let mut status = 0;
         if unsafe { GetExitCodeProcess(session.process.raw(), &mut status) } != 0 {
-            session.exit_status = Some(status as i32);
+            session.exit_status = Some(i64::from(status));
             fail_input_waiters(handle, session, notices, counters);
             cancel_write(session);
         } else {
@@ -1787,6 +1824,17 @@ fn refresh_due_outputs(
             if session.exit_status.is_some() {
                 start_pseudoconsole_close(iocp_sender, handle, session, closer);
             }
+        }
+    }
+}
+
+fn reap_abandoned(sessions: &mut GenerationRegistry<Session>) {
+    for handle in sessions.handles() {
+        let removable = sessions
+            .get(handle)
+            .is_some_and(|session| session.abandoned && session.terminal());
+        if removable {
+            sessions.remove(handle);
         }
     }
 }

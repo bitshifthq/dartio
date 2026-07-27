@@ -46,15 +46,19 @@ void _addBuildDependencies(BuildInput input, BuildOutputBuilder output) {
     packageRoot.uri.resolve('native/Cargo.toml'),
     packageRoot.uri.resolve('native/Cargo.lock'),
     packageRoot.uri.resolve('native/build.rs'),
+    packageRoot.uri.resolve('native/broker/Cargo.toml'),
+    packageRoot.uri.resolve('native/broker/Cargo.lock'),
   ];
 
   for (final uri in dependencyFiles) {
     if (File.fromUri(uri).existsSync()) output.dependencies.add(uri);
   }
 
-  final sourceDir = Directory.fromUri(packageRoot.uri.resolve('native/src/'));
-  if (!sourceDir.existsSync()) return;
-  for (final entity in sourceDir.listSync(recursive: true)) {
-    if (entity is File) output.dependencies.add(entity.uri);
+  for (final relativePath in ['native/src/', 'native/broker/src/']) {
+    final sourceDir = Directory.fromUri(packageRoot.uri.resolve(relativePath));
+    if (!sourceDir.existsSync()) continue;
+    for (final entity in sourceDir.listSync(recursive: true)) {
+      if (entity is File) output.dependencies.add(entity.uri);
+    }
   }
 }

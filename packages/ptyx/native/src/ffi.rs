@@ -3,11 +3,14 @@ use super::{IntegratedRuntime, Notice, WaitResult};
 use crate::broker_client::BrokerSpawn;
 #[cfg(windows)]
 use crate::windows::BrokerSpawn;
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::ffi::{c_void, CStr, CString};
+use std::mem::size_of;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc::{self, Sender};
 use std::sync::{Mutex, OnceLock};
 
 #[derive(Clone, Copy)]
@@ -20,8 +23,22 @@ static RUNTIME: OnceLock<Mutex<IntegratedRuntime>> = OnceLock::new();
 static INIT_LOCK: Mutex<()> = Mutex::new(());
 static PORTS: OnceLock<Mutex<HashMap<u64, Ports>>> = OnceLock::new();
 static LOST_PORTS: OnceLock<Mutex<HashSet<u64>>> = OnceLock::new();
+static ABANDONMENTS: OnceLock<Sender<u64>> = OnceLock::new();
 static COMMAND_INPUT_BYTES: AtomicUsize = AtomicUsize::new(0);
 const COMMAND_INPUT_CAPACITY: usize = 64 * 1024 * 1024;
+const MAX_SESSION_CAPACITY: usize = 64 * 1024 * 1024;
+const MAX_SPAWN_PAYLOAD: usize = 64 * 1024;
+const MAX_ARGUMENTS: usize = 256;
+const MAX_ENVIRONMENT: usize = 4096;
+const MAX_WAITER: u64 = i64::MAX as u64 >> 3;
+
+thread_local! {
+    static LAST_ERROR_CODE: Cell<i32> = const { Cell::new(0) };
+}
+
+fn set_last_error_code(code: i32) {
+    LAST_ERROR_CODE.set(code);
+}
 
 struct InputAdmission(usize);
 
@@ -46,19 +63,24 @@ impl Drop for InputAdmission {
 
 #[no_mangle]
 pub extern "C" fn ptyi_abi_version() -> u32 {
-    2
+    3
 }
 
 #[no_mangle]
 pub extern "C" fn ptyi_capabilities() -> u32 {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
-        1 | 2 | 4
+        1 | 2 | 4 | 16
     }
     #[cfg(windows)]
     {
         8
     }
+}
+
+#[no_mangle]
+pub extern "C" fn ptyi_last_error_code() -> i32 {
+    LAST_ERROR_CODE.get()
 }
 
 fn runtime() -> Option<&'static Mutex<IntegratedRuntime>> {
@@ -94,7 +116,7 @@ pub extern "C" fn ptyi_test_kill_broker() {
 #[no_mangle]
 pub unsafe extern "C" fn ptyi_init(api_data: *mut c_void) -> bool {
     catch_unwind(AssertUnwindSafe(|| {
-        if api_data.is_null() || Dart_InitializeApiDL(api_data) != 0 {
+        if api_data.is_null() {
             return false;
         }
         let Ok(_initializing) = INIT_LOCK.lock() else {
@@ -102,6 +124,9 @@ pub unsafe extern "C" fn ptyi_init(api_data: *mut c_void) -> bool {
         };
         if RUNTIME.get().is_some() {
             return true;
+        }
+        if Dart_InitializeApiDL(api_data) != 0 {
+            return false;
         }
         let Ok(mut runtime) = IntegratedRuntime::try_new() else {
             return false;
@@ -119,9 +144,39 @@ pub unsafe extern "C" fn ptyi_init(api_data: *mut c_void) -> bool {
         if notifier.is_err() {
             return false;
         }
-        RUNTIME.set(Mutex::new(runtime)).is_ok()
+        let (abandon_sender, abandon_receiver) = mpsc::channel();
+        let abandoner = std::thread::Builder::new()
+            .name("ptyx-finalizer".to_owned())
+            .spawn(move || {
+                while let Ok(handle) = abandon_receiver.recv() {
+                    while !with_runtime(|runtime| runtime.try_abandon(handle)).unwrap_or(false) {
+                        std::thread::sleep(std::time::Duration::from_millis(1));
+                    }
+                }
+            });
+        if abandoner.is_err() || RUNTIME.set(Mutex::new(runtime)).is_err() {
+            return false;
+        }
+        ABANDONMENTS.set(abandon_sender).is_ok()
     }))
     .unwrap_or(false)
+}
+
+#[no_mangle]
+pub extern "C" fn ptyi_finalize(token: *mut c_void) {
+    let _ = catch_unwind(AssertUnwindSafe(|| {
+        let handle = token.addr() as u64;
+        if handle == 0 {
+            return;
+        }
+        if let Ok(mut entries) = ports().lock() {
+            entries.remove(&handle);
+        }
+        if let Ok(mut lost) = lost_ports().lock() {
+            lost.insert(handle);
+        }
+        abandon_lost(handle);
+    }));
 }
 
 #[no_mangle]
@@ -143,33 +198,92 @@ pub unsafe extern "C" fn ptyi_spawn(
     event_port: i64,
 ) -> u64 {
     catch_unwind(AssertUnwindSafe(|| {
-        if executable.is_null() || (argument_count != 0 && arguments.is_null()) {
+        set_last_error_code(0);
+        if executable.is_null()
+            || argument_count > MAX_ARGUMENTS
+            || (argument_count != 0
+                && (arguments.is_null()
+                    || argument_count > isize::MAX as usize / size_of::<*const libc::c_char>()))
+            || (!inherit_environment
+                && (environment_count > MAX_ENVIRONMENT
+                    || (environment_count != 0
+                        && (environment.is_null()
+                            || environment_count
+                                > isize::MAX as usize / size_of::<*const libc::c_char>()))))
+            || input_capacity == 0
+            || input_capacity > MAX_SESSION_CAPACITY
+            || output_capacity == 0
+            || output_capacity > MAX_SESSION_CAPACITY
+            || rows == 0
+            || rows > u16::MAX.into()
+            || columns == 0
+            || columns > u16::MAX.into()
+            || pixel_width > u16::MAX.into()
+            || pixel_height > u16::MAX.into()
+            || output_port <= 0
+            || event_port <= 0
+        {
+            set_last_error_code(libc::EINVAL);
             return 0;
         }
         let executable = CStr::from_ptr(executable);
-        let arguments = std::slice::from_raw_parts(arguments, argument_count)
+        if executable.is_empty() || executable.to_bytes().len() > MAX_SPAWN_PAYLOAD {
+            set_last_error_code(libc::EINVAL);
+            return 0;
+        }
+        let argument_pointers = if argument_count == 0 {
+            &[][..]
+        } else {
+            std::slice::from_raw_parts(arguments, argument_count)
+        };
+        let arguments = argument_pointers
             .iter()
             .map(|argument| (!argument.is_null()).then(|| CStr::from_ptr(*argument).to_owned()))
             .collect::<Option<Vec<CString>>>();
         let Some(arguments) = arguments else {
+            set_last_error_code(libc::EINVAL);
             return 0;
         };
-        if !inherit_environment && environment_count != 0 && environment.is_null() {
-            return 0;
-        }
+        let environment_pointers = if inherit_environment || environment_count == 0 {
+            &[][..]
+        } else {
+            std::slice::from_raw_parts(environment, environment_count)
+        };
         let environment = if inherit_environment {
             None
         } else {
-            let values = std::slice::from_raw_parts(environment, environment_count)
+            let values = environment_pointers
                 .iter()
                 .map(|entry| (!entry.is_null()).then(|| CStr::from_ptr(*entry).to_owned()))
                 .collect::<Option<Vec<CString>>>();
             let Some(values) = values else {
+                set_last_error_code(libc::EINVAL);
                 return 0;
             };
             Some(values)
         };
         let cwd = (!cwd.is_null()).then(|| CStr::from_ptr(cwd).to_owned());
+        let payload_bytes = arguments
+            .iter()
+            .try_fold(executable.to_bytes().len(), |total, value| {
+                total.checked_add(value.as_bytes().len())
+            })
+            .and_then(|total| {
+                environment.as_ref().map_or(Some(total), |values| {
+                    values.iter().try_fold(total, |total, value| {
+                        total.checked_add(value.as_bytes().len())
+                    })
+                })
+            })
+            .and_then(|total| {
+                cwd.as_ref().map_or(Some(total), |value| {
+                    total.checked_add(value.as_bytes().len())
+                })
+            });
+        if payload_bytes.is_none_or(|bytes| bytes > MAX_SPAWN_PAYLOAD) {
+            set_last_error_code(libc::E2BIG);
+            return 0;
+        }
         let config = BrokerSpawn {
             executable: executable.to_owned(),
             arguments,
@@ -180,12 +294,19 @@ pub unsafe extern "C" fn ptyi_spawn(
             pixel_width,
             pixel_height,
         };
-        let handle = with_runtime(|runtime| {
-            runtime
-                .spawn_staged(config, input_capacity, output_capacity)
-                .unwrap_or(0)
-        })
-        .unwrap_or(0);
+        let handle = match with_runtime(|runtime| {
+            runtime.spawn_staged(config, input_capacity, output_capacity)
+        }) {
+            Some(Ok(handle)) => handle,
+            Some(Err(error)) => {
+                set_last_error_code(error.raw_os_error().unwrap_or(libc::EIO));
+                0
+            }
+            None => {
+                set_last_error_code(libc::EPIPE);
+                0
+            }
+        };
         if handle == 0 {
             return 0;
         }
@@ -220,7 +341,7 @@ pub extern "C" fn ptyi_activate(handle: u64) -> bool {
 #[no_mangle]
 pub unsafe extern "C" fn ptyi_write(handle: u64, bytes: *const u8, length: usize) -> u64 {
     catch_unwind(AssertUnwindSafe(|| {
-        if bytes.is_null() || length == 0 {
+        if bytes.is_null() || length == 0 || length > isize::MAX as usize {
             return 0;
         }
         let Some(_admission) = InputAdmission::acquire(length) else {
@@ -304,6 +425,9 @@ pub extern "C" fn ptyi_flush_ready(handle: u64, sequence: u64) -> bool {
 #[no_mangle]
 pub extern "C" fn ptyi_wait_capacity(handle: u64, required: usize, waiter: u64) -> i32 {
     catch_unwind(AssertUnwindSafe(|| {
+        if waiter == 0 || waiter > MAX_WAITER {
+            return 0;
+        }
         wait_result(with_runtime(|runtime| {
             runtime.wait_capacity(handle, required, waiter)
         }))
@@ -314,6 +438,9 @@ pub extern "C" fn ptyi_wait_capacity(handle: u64, required: usize, waiter: u64) 
 #[no_mangle]
 pub extern "C" fn ptyi_wait_flush(handle: u64, sequence: u64, waiter: u64) -> i32 {
     catch_unwind(AssertUnwindSafe(|| {
+        if waiter == 0 || waiter > MAX_WAITER {
+            return 0;
+        }
         wait_result(with_runtime(|runtime| {
             runtime.wait_flush(handle, sequence, waiter)
         }))
@@ -330,7 +457,7 @@ fn wait_result(result: Option<WaitResult>) -> i32 {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn ptyi_exit_status(handle: u64, status: *mut i32) -> bool {
+pub unsafe extern "C" fn ptyi_exit_status(handle: u64, status: *mut i64) -> bool {
     catch_unwind(AssertUnwindSafe(|| {
         if status.is_null() {
             return false;
@@ -455,6 +582,9 @@ pub extern "C" fn ptyi_destroy(handle: u64) -> bool {
             if let Ok(mut entries) = ports().lock() {
                 entries.remove(&handle);
             }
+            if let Ok(mut lost) = lost_ports().lock() {
+                lost.remove(&handle);
+            }
         }
         removed
     }))
@@ -498,7 +628,7 @@ fn dispatch_notice(notice: Notice) {
         .ok()
         .and_then(|entries| entries.get(&handle).copied())
     else {
-        cleanup_lost(handle);
+        abandon_lost(handle);
         return;
     };
     let posted = unsafe {
@@ -543,25 +673,27 @@ fn dispatch_notice(notice: Notice) {
         if let Ok(mut lost) = lost_ports().lock() {
             lost.insert(handle);
         }
-        let _ = with_runtime(|runtime| runtime.close(handle));
-        cleanup_lost(handle);
+        abandon_lost(handle);
     }
 }
 
-fn cleanup_lost(handle: u64) {
-    let is_lost = lost_ports()
+fn abandon_lost(handle: u64) -> bool {
+    let queued = lost_ports()
         .lock()
         .ok()
-        .is_some_and(|lost| lost.contains(&handle));
-    if !is_lost {
-        return;
+        .is_some_and(|mut lost| lost.remove(&handle));
+    if !queued {
+        return true;
     }
-    let exited = with_runtime(|runtime| runtime.exit_status(handle).is_some()).unwrap_or(false);
-    if exited && with_runtime(|runtime| runtime.destroy(handle)).unwrap_or(false) {
+    let accepted = ABANDONMENTS
+        .get()
+        .is_some_and(|sender| sender.send(handle).is_ok());
+    if !accepted {
         if let Ok(mut lost) = lost_ports().lock() {
-            lost.remove(&handle);
+            lost.insert(handle);
         }
     }
+    accepted
 }
 
 unsafe extern "C" {

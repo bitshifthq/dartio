@@ -57,7 +57,9 @@ FfiGenerator _generator() => FfiGenerator(
 const _functionNames = {
   'ptyi_abi_version': 'controllerAbiVersion',
   'ptyi_capabilities': 'controllerCapabilities',
+  'ptyi_last_error_code': 'controllerLastErrorCode',
   'ptyi_init': 'controllerInit',
+  'ptyi_finalize': 'controllerFinalize',
   'ptyi_spawn': 'controllerSpawn',
   'ptyi_activate': 'controllerActivate',
   'ptyi_write': 'controllerWrite',

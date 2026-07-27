@@ -18,12 +18,19 @@
 #define PTYX_EXPORT __attribute__((visibility("default")))
 #endif
 
-#define PTYX_ABI_VERSION 2u
+#define PTYX_ABI_VERSION 3u
 
 PTYX_EXPORT uint32_t ptyi_abi_version(void);
-/** Capability bits: signals=1, process groups=2, modes=4, ConPTY=8. */
+/**
+ * Capability bits: signals=1, process groups=2, modes=4, ConPTY=8,
+ * terminal name=16.
+ */
 PTYX_EXPORT uint32_t ptyi_capabilities(void);
+/** Returns the calling thread's last synchronous native error, or zero. */
+PTYX_EXPORT int32_t ptyi_last_error_code(void);
 PTYX_EXPORT bool ptyi_init(void* dart_initialize_api_dl_data);
+/** NativeFinalizer callback. The token is the generation-tagged handle. */
+PTYX_EXPORT void ptyi_finalize(void* token);
 
 PTYX_EXPORT uint64_t ptyi_spawn(
     const char* executable,
@@ -64,7 +71,7 @@ PTYX_EXPORT int32_t ptyi_wait_flush(
     uint64_t sequence,
     uint64_t waiter);
 
-PTYX_EXPORT bool ptyi_exit_status(uint64_t handle, int32_t* status);
+PTYX_EXPORT bool ptyi_exit_status(uint64_t handle, int64_t* status);
 PTYX_EXPORT int64_t ptyi_pid(uint64_t handle);
 PTYX_EXPORT bool ptyi_size(uint64_t handle, uint32_t values[4]);
 PTYX_EXPORT bool ptyi_resize(

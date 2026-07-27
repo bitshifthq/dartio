@@ -69,7 +69,10 @@ void main() {
       addTearDown(session.close);
       final bytes = Uint8List(4096);
 
-      expect(session.tryWrite(Uint8List(4097)), isFalse);
+      expect(
+        () => session.tryWrite(Uint8List(4097)),
+        throwsA(isA<PtyInvalidArgumentException>()),
+      );
       expect(session.tryWrite(bytes), isTrue);
       await session.waitForInputCapacity(1);
       expect(session.tryWrite(Uint8List(1)), isTrue);
@@ -88,9 +91,9 @@ void main() {
     );
     addTearDown(session.close);
 
-    await expectLater(
-      session.waitForInputCapacity(4097),
-      throwsA(isA<PtyInputException>()),
+    expect(
+      () => session.waitForInputCapacity(4097),
+      throwsA(isA<PtyInvalidArgumentException>()),
     );
   });
 

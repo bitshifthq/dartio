@@ -15,7 +15,8 @@ external int controllerAbiVersion();
 @ffi.Native<ffi.Bool Function(ffi.Uint64)>(symbol: 'ptyi_activate')
 external bool controllerActivate(int handle);
 
-/// Capability bits: signals=1, process groups=2, modes=4, ConPTY=8.
+/// Capability bits: signals=1, process groups=2, modes=4, ConPTY=8,
+/// terminal name=16.
 @ffi.Native<ffi.Uint32 Function()>(symbol: 'ptyi_capabilities')
 external int controllerCapabilities();
 
@@ -30,13 +31,21 @@ external bool controllerCredit(int handle, int bytes);
 @ffi.Native<ffi.Bool Function(ffi.Uint64)>(symbol: 'ptyi_destroy')
 external bool controllerDestroy(int handle);
 
-@ffi.Native<ffi.Bool Function(ffi.Uint64, ffi.Pointer<ffi.Int32>)>(
+@ffi.Native<ffi.Bool Function(ffi.Uint64, ffi.Pointer<ffi.Int64>)>(
   symbol: 'ptyi_exit_status',
 )
-external bool controllerExitStatus(int handle, ffi.Pointer<ffi.Int32> status);
+external bool controllerExitStatus(int handle, ffi.Pointer<ffi.Int64> status);
+
+/// NativeFinalizer callback. The token is the generation-tagged handle.
+@ffi.Native<ffi.Void Function(ffi.Pointer<ffi.Void>)>(symbol: 'ptyi_finalize')
+external void controllerFinalize(ffi.Pointer<ffi.Void> token);
 
 @ffi.Native<ffi.Bool Function(ffi.Pointer<ffi.Void>)>(symbol: 'ptyi_init')
 external bool controllerInit(ffi.Pointer<ffi.Void> dart_initialize_api_dl_data);
+
+/// Returns the calling thread's last synchronous native error, or zero.
+@ffi.Native<ffi.Int32 Function()>(symbol: 'ptyi_last_error_code')
+external int controllerLastErrorCode();
 
 /// Returns -1 when unavailable, otherwise canonical/echo/signals bits.
 @ffi.Native<ffi.Int32 Function(ffi.Uint64)>(symbol: 'ptyi_mode')
@@ -137,4 +146,4 @@ external int controllerWrite(
   int length,
 );
 
-const int controllerAbiVersionExpected = 2;
+const int controllerAbiVersionExpected = 3;

@@ -5,7 +5,7 @@ use std::io;
 use std::mem::{size_of, MaybeUninit};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::ptr;
-use std::sync::mpsc::{self, Receiver, Sender, SyncSender};
+use std::sync::mpsc::{self, Receiver, Sender, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -358,6 +358,39 @@ impl Drop for FileActions {
     }
 }
 
+struct BrokerProcessGuard {
+    pid: libc::pid_t,
+    armed: bool,
+}
+
+impl BrokerProcessGuard {
+    fn new(pid: libc::pid_t) -> Self {
+        Self { pid, armed: true }
+    }
+
+    fn disarm(mut self) -> libc::pid_t {
+        self.armed = false;
+        self.pid
+    }
+}
+
+impl Drop for BrokerProcessGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        unsafe {
+            libc::kill(self.pid, libc::SIGKILL);
+        }
+        loop {
+            let result = unsafe { libc::waitpid(self.pid, ptr::null_mut(), 0) };
+            if result >= 0 || io::Error::last_os_error().kind() != io::ErrorKind::Interrupted {
+                break;
+            }
+        }
+    }
+}
+
 #[cfg(target_os = "macos")]
 fn spawn_code(code: libc::c_int) -> io::Result<()> {
     if code == 0 {
@@ -416,6 +449,7 @@ fn launch_broker_at(path: &CStr) -> io::Result<(OwnedFd, libc::pid_t)> {
         )
     };
     spawn_code(code)?;
+    let broker_process = BrokerProcessGuard::new(pid);
     drop(broker);
     let (hello, passed) = receive_frame(controller.as_raw_fd())?
         .ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "broker handshake EOF"))?;
@@ -424,16 +458,12 @@ fn launch_broker_at(path: &CStr) -> io::Result<(OwnedFd, libc::pid_t)> {
         || hello.payload != hello_payload()
         || passed.is_some()
     {
-        unsafe {
-            libc::kill(pid, libc::SIGKILL);
-            libc::waitpid(pid, ptr::null_mut(), 0);
-        }
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "broker handshake rejected",
         ));
     }
-    Ok((controller, pid))
+    Ok((controller, broker_process.disarm()))
 }
 
 #[cfg(target_os = "linux")]
@@ -475,45 +505,34 @@ fn launch_broker_at(path: &CStr) -> io::Result<(OwnedFd, libc::pid_t)> {
             );
         }
     }
+    let broker_process = BrokerProcessGuard::new(pid);
     drop(broker);
     drop(error_write);
     if let Some(code) = read_child_error(error_read.as_raw_fd())? {
-        let _ = unsafe { libc::waitpid(pid, ptr::null_mut(), 0) };
         return Err(io::Error::from_raw_os_error(code));
     }
     let handshake = receive_frame(controller.as_raw_fd());
     let (hello, passed) = match handshake {
         Ok(Some(frame)) => frame,
         Ok(None) => {
-            let _ = unsafe { libc::waitpid(pid, ptr::null_mut(), 0) };
             return Err(io::Error::new(
                 io::ErrorKind::BrokenPipe,
                 "broker handshake EOF",
             ));
         }
-        Err(error) => {
-            unsafe {
-                libc::kill(pid, libc::SIGKILL);
-                libc::waitpid(pid, ptr::null_mut(), 0);
-            }
-            return Err(error);
-        }
+        Err(error) => return Err(error),
     };
     if hello.kind != HELLO
         || hello.aux != VERSION as u32
         || hello.payload != hello_payload()
         || passed.is_some()
     {
-        unsafe {
-            libc::kill(pid, libc::SIGKILL);
-            libc::waitpid(pid, ptr::null_mut(), 0);
-        }
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "broker handshake rejected",
         ));
     }
-    Ok((controller, pid))
+    Ok((controller, broker_process.disarm()))
 }
 
 #[cfg(target_os = "linux")]
@@ -634,22 +653,23 @@ enum Request {
         config: BrokerSpawn,
         reply: Sender<io::Result<BrokerSession>>,
     },
-    Close {
+    CloseDetached {
         session: u64,
-        reply: Sender<io::Result<()>>,
     },
-    Release {
+    ReleaseDetached {
         session: u64,
-        reply: Sender<io::Result<()>>,
     },
     Abort {
         session: u64,
         reply: Sender<io::Result<()>>,
     },
+    AbortDetached {
+        session: u64,
+    },
     Signal {
         session: u64,
         signal: i32,
-        reply: Sender<io::Result<bool>>,
+        reply: Sender<Option<bool>>,
     },
     Shutdown,
 }
@@ -677,6 +697,7 @@ impl BrokerOwner {
         reactor_wake: OwnedFd,
     ) -> io::Result<Self> {
         let (control, broker_pid) = launch_broker_at(path)?;
+        let broker_process = BrokerProcessGuard::new(broker_pid);
         let mut wake_pipe = [-1; 2];
         if unsafe { libc::pipe(wake_pipe.as_mut_ptr()) } < 0 {
             return Err(io::Error::last_os_error());
@@ -704,6 +725,7 @@ impl BrokerOwner {
                     reactor_wake,
                 );
             })?;
+        broker_process.disarm();
         Ok(Self {
             client: BrokerClient { shared },
             pid: broker_pid,
@@ -724,7 +746,11 @@ impl BrokerOwner {
 
 impl Drop for BrokerOwner {
     fn drop(&mut self) {
-        let _ = self.client.send(Request::Shutdown);
+        if self.client.send(Request::Shutdown).is_err() {
+            unsafe {
+                libc::kill(self.pid, libc::SIGKILL);
+            }
+        }
         if let Some(thread) = self.thread.lock().ok().and_then(|mut value| value.take()) {
             let _ = thread.join();
         }
@@ -740,20 +766,12 @@ impl BrokerClient {
             .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "broker worker stopped"))?
     }
 
-    pub(crate) fn close(&self, session: u64) -> io::Result<()> {
-        let (reply, response) = mpsc::channel();
-        self.send(Request::Close { session, reply })?;
-        response
-            .recv()
-            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "broker worker stopped"))?
+    pub(crate) fn close_async(&self, session: u64) -> io::Result<()> {
+        self.send(Request::CloseDetached { session })
     }
 
-    pub(crate) fn release(&self, session: u64) -> io::Result<()> {
-        let (reply, response) = mpsc::channel();
-        self.send(Request::Release { session, reply })?;
-        response
-            .recv()
-            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "broker worker stopped"))?
+    pub(crate) fn release_async(&self, session: u64) -> io::Result<()> {
+        self.send(Request::ReleaseDetached { session })
     }
 
     pub(crate) fn abort(&self, session: u64) -> io::Result<()> {
@@ -764,23 +782,40 @@ impl BrokerClient {
             .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "broker worker stopped"))?
     }
 
-    pub(crate) fn signal(&self, session: u64, signal: i32) -> io::Result<bool> {
-        let (reply, response) = mpsc::channel();
-        self.send(Request::Signal {
+    pub(crate) fn abort_async(&self, session: u64) -> io::Result<()> {
+        self.send(Request::AbortDetached { session })
+    }
+
+    pub(crate) fn signal_async(
+        &self,
+        session: u64,
+        signal: i32,
+        reply: Sender<Option<bool>>,
+    ) -> io::Result<()> {
+        let failure_reply = reply.clone();
+        let result = self.send(Request::Signal {
             session,
             signal,
             reply,
-        })?;
-        response
-            .recv()
-            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "broker worker stopped"))?
+        });
+        if result.is_err() {
+            let _ = failure_reply.send(None);
+        }
+        result
     }
 
     fn send(&self, request: Request) -> io::Result<()> {
         self.shared
             .requests
-            .send(request)
-            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "broker worker stopped"))?;
+            .try_send(request)
+            .map_err(|error| match error {
+                TrySendError::Full(_) => {
+                    io::Error::new(io::ErrorKind::WouldBlock, "broker request queue is full")
+                }
+                TrySendError::Disconnected(_) => {
+                    io::Error::new(io::ErrorKind::BrokenPipe, "broker worker stopped")
+                }
+            })?;
         let byte = [1_u8];
         unsafe {
             libc::write(
@@ -850,10 +885,7 @@ impl Worker {
                 return Ok((frame, fd));
             }
             if frame.request == request && frame.kind == ERROR {
-                return Err(io::Error::other(format!(
-                    "broker error category={} code={}",
-                    frame.aux, frame.code
-                )));
+                return Err(io::Error::from_raw_os_error(frame.code));
             }
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -1043,21 +1075,24 @@ fn run_worker(
                     Request::Spawn { config, reply } => {
                         let _ = reply.send(worker.spawn(config));
                     }
-                    Request::Close { session, reply } => {
-                        let _ = reply.send(worker.close(session));
+                    Request::CloseDetached { session } => {
+                        let _ = worker.close(session);
                     }
-                    Request::Release { session, reply } => {
-                        let _ = reply.send(worker.release(session));
+                    Request::ReleaseDetached { session } => {
+                        let _ = worker.release(session);
                     }
                     Request::Abort { session, reply } => {
                         let _ = reply.send(worker.abort(session));
+                    }
+                    Request::AbortDetached { session } => {
+                        let _ = worker.abort(session);
                     }
                     Request::Signal {
                         session,
                         signal,
                         reply,
                     } => {
-                        let _ = reply.send(worker.signal(session, signal));
+                        let _ = reply.send(worker.signal(session, signal).ok());
                     }
                     Request::Shutdown => {
                         worker.shutdown();
@@ -1066,6 +1101,9 @@ fn run_worker(
                 }
             }
         }
+    }
+    unsafe {
+        libc::kill(worker.broker_pid, libc::SIGKILL);
     }
     unsafe {
         libc::waitpid(worker.broker_pid, ptr::null_mut(), 0);

@@ -63,6 +63,11 @@ void main() {
       return spawnCommand(shell(script), initialSize: initialSize);
     }
 
+    Future<bool> processExists(int pid) async {
+      final result = await Process.run('/bin/kill', ['-0', '$pid']);
+      return result.exitCode == 0;
+    }
+
     ({String executable, List<String> arguments}) finiteOutputCommand(
       int byteCount,
     ) {
@@ -452,6 +457,13 @@ void main() {
         expect(exitCode, 7);
         expect(await session.exitStatus, const PtyExited(7));
       });
+
+      test('preserves the complete unsigned Windows exit code', () async {
+        final session = await spawnScript('exit -1');
+
+        expect(await session.exitCode.timeout(shortTimeout), 0xffffffff);
+        expect(await session.exitStatus, const PtyExited(0xffffffff));
+      }, testOn: 'windows');
     });
 
     group('modeChanges', () {
@@ -560,6 +572,29 @@ void main() {
 
         await expectLater(session.close(), completes);
       });
+
+      test(
+        'reclaims the terminal process group after its leader exits',
+        () async {
+          final session = await spawnScript(
+            r'(trap "" HUP TERM; sleep 30) & child=$!; '
+            r'printf "%s\n" "$child"; exit 0',
+          );
+          final lines = outputLines(session);
+          final descendant = int.parse(await nextLine(lines));
+          await session.exitCode.timeout(shortTimeout);
+
+          await session.close().timeout(shortTimeout);
+
+          final deadline = DateTime.now().add(shortTimeout);
+          while (await processExists(descendant) &&
+              DateTime.now().isBefore(deadline)) {
+            await Future<void>.delayed(const Duration(milliseconds: 20));
+          }
+          expect(await processExists(descendant), isFalse);
+        },
+        testOn: 'posix',
+      );
     });
   });
 }

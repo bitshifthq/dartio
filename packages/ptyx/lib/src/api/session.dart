@@ -31,7 +31,10 @@ part of 'api.dart';
 abstract interface class PtySession {
   /// Starts a child process attached to a new pseudo terminal.
   ///
-  /// Throws a [PtyException] if the process cannot be started.
+  /// Throws [PtyInvalidArgumentException] for options outside the native
+  /// contract, [PtyUnsupportedException] when the platform backend is
+  /// unavailable, [PtySpawnException] when native process creation fails, or
+  /// [PtyInfrastructureException] when controller setup cannot be completed.
   static Future<PtySession> spawn(PtySpawnOptions options) {
     return NativeSession.spawn(options);
   }
@@ -69,7 +72,9 @@ abstract interface class PtySession {
   /// The most recently observed terminal input mode.
   ///
   /// Returns `null` when terminal modes are not available on the current
-  /// platform. Throws [PtyClosedException] after [close].
+  /// platform. Check [capabilities] to distinguish that case. Throws
+  /// [PtyModeException] when the native snapshot fails and
+  /// [PtyClosedException] after [close].
   PtyTermMode? get mode;
 
   /// Terminal input mode changes observed from the pseudo terminal.
@@ -100,18 +105,22 @@ abstract interface class PtySession {
   /// The child process identifier.
   ///
   /// Returns `null` when no stable process identifier is available.
-  /// Throws [PtyClosedException] after [close].
+  /// Throws [PtyMetadataException] when the native query fails and
+  /// [PtyClosedException] after [close].
   int? get pid;
 
   /// The current pseudo terminal size.
   ///
-  /// Throws [PtyClosedException] after [close].
+  /// Throws [PtyMetadataException] when the native query fails and
+  /// [PtyClosedException] after [close].
   PtySize get size;
 
   /// The pseudo terminal device name.
   ///
   /// Returns `null` when no terminal device name is available.
-  /// Throws [PtyClosedException] after [close].
+  /// Check [capabilities] to distinguish an unsupported terminal name. Throws
+  /// [PtyMetadataException] when the native query fails and
+  /// [PtyClosedException] after [close].
   String? get ttyName;
 
   /// Closes the session and releases native resources.
@@ -121,7 +130,10 @@ abstract interface class PtySession {
   ///
   /// After this future completes, operations that require a live session throw
   /// [PtyClosedException]. The [output] and [modeChanges] streams are closed as
-  /// part of closing the session.
+  /// part of closing the session. Throws [PtyCloseException] if bounded native
+  /// cleanup cannot be established. If an earlier
+  /// [PtyInfrastructureException] caused cleanup uncertainty, that root error
+  /// is preserved.
   Future<void> close();
 
   /// Sends [signal] to the child process.
@@ -133,26 +145,42 @@ abstract interface class PtySession {
   /// Returns `true` when a live child was signaled or terminated. Returns
   /// `false` when there is no live child, including after [exitCode] completes
   /// or after [close].
+  ///
+  /// Throws [PtySignalException] if native delivery fails.
   bool kill([ProcessSignal signal = ProcessSignal.sigterm]);
 
   /// Changes the pseudo terminal size.
   ///
   /// Terminal programs commonly observe this as a window-size change.
-  /// Throws [PtyClosedException] after [close].
+  /// Throws [PtyInvalidArgumentException] for invalid dimensions,
+  /// [PtyResizeException] when the native resize fails, and
+  /// [PtyClosedException] after [close].
   void resize(PtySize size);
 
   /// Attempts to accept [data] into the bounded input queue.
   ///
   /// Returns `true` only when the complete buffer was accepted. Returns
   /// `false` without accepting any bytes when capacity is unavailable.
+  /// Throws [PtyInvalidArgumentException] when [data] is empty or larger than
+  /// the configured input bound, [PtyInputException] after terminal input
+  /// failure, and [PtyClosedException] after [close].
   bool tryWrite(Uint8List data);
 
   /// Waits until [byteCount] bytes can be accepted or input fails.
+  ///
+  /// Throws [PtyInvalidArgumentException] when [byteCount] is not positive or
+  /// exceeds the configured input bound, [PtyInputException] on terminal input
+  /// failure, and [PtyClosedException] after [close].
   Future<void> waitForInputCapacity(int byteCount);
 
   /// Accepts all of [data], waiting for bounded input capacity when necessary.
+  ///
+  /// Throws the same typed exceptions as [tryWrite].
   Future<void> write(Uint8List data);
 
   /// Waits until every write accepted before this call reaches the PTY master.
+  ///
+  /// Throws [PtyInputException] when accepted input cannot be written and
+  /// [PtyClosedException] after [close].
   Future<void> flush();
 }
