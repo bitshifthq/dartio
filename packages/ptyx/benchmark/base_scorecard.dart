@@ -9,6 +9,7 @@ import 'package:ptyx/ptyx.dart';
 const _size = PtySize(rows: 24, columns: 80);
 const _ready = [82, 69, 65, 68, 89];
 const _bufferSize = 64 * 1024;
+const _timeout = Duration(seconds: 60);
 
 Future<void> main(List<String> arguments) async {
   final byteCount = _option(arguments, '--bytes=', 32 * 1024 * 1024);
@@ -59,7 +60,8 @@ Future<Map<String, Object?>> _interactive() async {
       final byte = index & 0xff;
       final stopwatch = Stopwatch()..start();
       await _write(session, Uint8List.fromList([byte]));
-      if (!await iterator.moveNext() || iterator.current != byte) {
+      if (!await iterator.moveNext().timeout(_timeout) ||
+          iterator.current != byte) {
         throw StateError('interactive mismatch at $index');
       }
       stopwatch.stop();
@@ -80,18 +82,18 @@ Future<Map<String, Object?>> _output(int byteCount) async {
       initialSize: _size,
     ),
   );
-  final iterator = StreamIterator<Uint8List>(session.output);
+  final bytes = _ChunkReader(session.output);
   var received = 0;
   final stopwatch = Stopwatch();
   try {
-    await _expectReadyChunks(iterator);
+    await _expectReadyReader(bytes);
     await _write(session, Uint8List.fromList([1]));
     stopwatch.start();
     while (received < byteCount) {
-      if (!await iterator.moveNext()) {
+      final chunk = await bytes.readChunk();
+      if (chunk == null) {
         throw StateError('output EOF at $received of $byteCount');
       }
-      final chunk = iterator.current;
       if (received + chunk.length > byteCount) {
         throw StateError('output exceeded $byteCount bytes');
       }
@@ -109,7 +111,7 @@ Future<Map<String, Object?>> _output(int byteCount) async {
       'exit_code': exitCode,
     };
   } finally {
-    await iterator.cancel();
+    await bytes.cancel();
     await session.close();
   }
 }
@@ -143,7 +145,7 @@ Future<Map<String, Object?>> _input(int byteCount) async {
       sent += count;
     }
     final report = StringBuffer();
-    while (await iterator.moveNext()) {
+    while (await iterator.moveNext().timeout(_timeout)) {
       final byte = iterator.current;
       if (byte == 10 || byte == 13) {
         if (report.isNotEmpty) break;
@@ -198,38 +200,56 @@ String _outputScript(int byteCount) => [
 ].join(' ');
 
 Future<void> _write(PtySession session, Uint8List bytes) async {
-  final result = Function.apply(session.write, [bytes]);
-  if (result is Future<void>) await result;
+  await Future<Object?>.sync(() => Function.apply(session.write, [bytes]));
 }
 
 Future<void> _expectReady(StreamIterator<int> iterator) async {
   for (final byte in _ready) {
-    if (!await iterator.moveNext() || iterator.current != byte) {
+    if (!await iterator.moveNext().timeout(_timeout) ||
+        iterator.current != byte) {
       throw StateError('readiness marker mismatch');
     }
   }
 }
 
-Future<void> _expectReadyChunks(StreamIterator<Uint8List> iterator) async {
-  var matched = 0;
-  while (matched != _ready.length) {
-    if (!await iterator.moveNext()) {
-      throw StateError('readiness marker reached EOF');
-    }
-    final chunk = iterator.current;
-    for (var index = 0; index < chunk.length; index++) {
-      if (chunk[index] != _ready[matched]) {
-        throw StateError('readiness marker mismatch');
-      }
-      matched++;
-      if (matched == _ready.length) {
-        if (index + 1 != chunk.length) {
-          throw StateError('unexpected bytes followed readiness marker');
-        }
-        return;
-      }
+Future<void> _expectReadyReader(_ChunkReader reader) async {
+  for (final byte in _ready) {
+    if (await reader.readByte() != byte) {
+      throw StateError('readiness marker mismatch');
     }
   }
+}
+
+final class _ChunkReader {
+  _ChunkReader(Stream<Uint8List> stream) : _chunks = StreamIterator(stream);
+
+  final StreamIterator<Uint8List> _chunks;
+  Uint8List? _current;
+  var _offset = 0;
+
+  Future<int?> readByte() async {
+    while (_current == null || _offset == _current!.length) {
+      if (!await _chunks.moveNext().timeout(_timeout)) return null;
+      _current = _chunks.current;
+      _offset = 0;
+    }
+    return _current![_offset++];
+  }
+
+  Future<Uint8List?> readChunk() async {
+    final current = _current;
+    if (current != null && _offset < current.length) {
+      final remainder = Uint8List.sublistView(current, _offset);
+      _offset = current.length;
+      return remainder;
+    }
+    if (!await _chunks.moveNext().timeout(_timeout)) return null;
+    _current = _chunks.current;
+    _offset = _current!.length;
+    return _current;
+  }
+
+  Future<void> cancel() => _chunks.cancel();
 }
 
 double _throughput(int bytes, Stopwatch stopwatch) =>
