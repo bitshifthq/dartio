@@ -218,38 +218,46 @@ pub unsafe extern "C" fn ptyi_init(api_data: *mut c_void) -> bool {
         if Dart_InitializeApiDL(api_data) != 0 {
             return false;
         }
-        let Ok(runtime) = IntegratedRuntime::try_new() else {
-            return false;
-        };
-        let Some(notifications) = runtime.take_notifications() else {
-            return false;
-        };
-        let notifier = std::thread::Builder::new()
-            .name("ptyx-dart-notifier".to_owned())
-            .spawn(move || {
-                while let Ok(notice) = notifications.recv() {
-                    dispatch_notice(notice);
-                }
-            });
-        if notifier.is_err() {
-            return false;
-        }
-        let (abandon_sender, abandon_receiver) = mpsc::channel();
-        let abandoner = std::thread::Builder::new()
-            .name("ptyx-finalizer".to_owned())
-            .spawn(move || {
-                while let Ok(handle) = abandon_receiver.recv() {
-                    while !with_runtime(|runtime| runtime.try_abandon(handle)).unwrap_or(false) {
-                        std::thread::sleep(std::time::Duration::from_millis(1));
-                    }
-                }
-            });
-        if abandoner.is_err() || RUNTIME.set(runtime).is_err() {
-            return false;
-        }
-        ABANDONMENTS.set(abandon_sender).is_ok()
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        let initialized = crate::isolate_thread::run(initialize_runtime).unwrap_or(false);
+        #[cfg(windows)]
+        let initialized = initialize_runtime();
+        initialized
     }))
     .unwrap_or(false)
+}
+
+fn initialize_runtime() -> bool {
+    let Ok(runtime) = IntegratedRuntime::try_new() else {
+        return false;
+    };
+    let Some(notifications) = runtime.take_notifications() else {
+        return false;
+    };
+    let notifier = std::thread::Builder::new()
+        .name("ptyx-dart-notifier".to_owned())
+        .spawn(move || {
+            while let Ok(notice) = notifications.recv() {
+                dispatch_notice(notice);
+            }
+        });
+    if notifier.is_err() {
+        return false;
+    }
+    let (abandon_sender, abandon_receiver) = mpsc::channel();
+    let abandoner = std::thread::Builder::new()
+        .name("ptyx-finalizer".to_owned())
+        .spawn(move || {
+            while let Ok(handle) = abandon_receiver.recv() {
+                while !with_runtime(|runtime| runtime.try_abandon(handle)).unwrap_or(false) {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+            }
+        });
+    if abandoner.is_err() || RUNTIME.set(runtime).is_err() {
+        return false;
+    }
+    ABANDONMENTS.set(abandon_sender).is_ok()
 }
 
 #[no_mangle]

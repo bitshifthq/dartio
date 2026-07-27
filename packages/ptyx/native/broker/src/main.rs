@@ -402,6 +402,17 @@ fn spawn_code(code: libc::c_int) -> io::Result<()> {
 
 fn launch_broker_at(path: &CStr) -> io::Result<Client> {
     let (controller, broker) = socket_pair()?;
+    let broker_duplicate = if broker.as_raw_fd() == CONTROL_FD {
+        let duplicate =
+            unsafe { libc::fcntl(broker.as_raw_fd(), libc::F_DUPFD_CLOEXEC, CONTROL_FD + 1) };
+        if duplicate < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Some(unsafe { OwnedFd::from_raw_fd(duplicate) })
+    } else {
+        None
+    };
+    let broker_fd = broker_duplicate.as_ref().unwrap_or(&broker).as_raw_fd();
     let mut attrs_raw = MaybeUninit::<libc::posix_spawnattr_t>::uninit();
     spawn_code(unsafe { libc::posix_spawnattr_init(attrs_raw.as_mut_ptr()) })?;
     let mut attrs = SpawnAttrs(unsafe { attrs_raw.assume_init() });
@@ -421,14 +432,17 @@ fn launch_broker_at(path: &CStr) -> io::Result<Client> {
     let flags = libc::POSIX_SPAWN_SETSIGMASK;
     let flags = flags as libc::c_short;
     spawn_code(unsafe { libc::posix_spawnattr_setflags(&mut attrs.0, flags) })?;
-    spawn_code(unsafe {
-        libc::posix_spawn_file_actions_adddup2(&mut actions.0, broker.as_raw_fd(), CONTROL_FD)
-    })?;
-    if broker.as_raw_fd() != CONTROL_FD {
-        spawn_code(unsafe {
-            libc::posix_spawn_file_actions_addclose(&mut actions.0, broker.as_raw_fd())
-        })?;
+    // Explicitly close a pre-existing fd 3 before replacing it. Hosted
+    // processes can inherit an unrelated non-CLOEXEC channel at that number,
+    // and macOS x64 did not consistently replace it when the implicit close
+    // in dup2 was combined with POSIX_SPAWN_CLOEXEC_DEFAULT.
+    if unsafe { libc::fcntl(CONTROL_FD, libc::F_GETFD) } >= 0 {
+        spawn_code(unsafe { libc::posix_spawn_file_actions_addclose(&mut actions.0, CONTROL_FD) })?;
     }
+    spawn_code(unsafe {
+        libc::posix_spawn_file_actions_adddup2(&mut actions.0, broker_fd, CONTROL_FD)
+    })?;
+    spawn_code(unsafe { libc::posix_spawn_file_actions_addclose(&mut actions.0, broker_fd) })?;
 
     let broker_arg = CString::new("--broker").unwrap();
     let mut argv = [
@@ -448,6 +462,7 @@ fn launch_broker_at(path: &CStr) -> io::Result<Client> {
         )
     };
     spawn_code(code)?;
+    drop(broker_duplicate);
     drop(broker);
     let mut client = Client {
         control: controller,
@@ -456,7 +471,17 @@ fn launch_broker_at(path: &CStr) -> io::Result<Client> {
         exits: HashMap::new(),
         sessions: HashMap::new(),
     };
-    let (hello, passed) = client.receive()?;
+    let handshake = client.receive();
+    let (hello, passed) = match handshake {
+        Ok(frame) => frame,
+        Err(error) => {
+            unsafe {
+                libc::kill(pid, libc::SIGKILL);
+            }
+            let _ = wait_exact(pid);
+            return Err(error);
+        }
+    };
     if hello.kind != HELLO
         || hello.aux != VERSION as u32
         || hello.payload != hello_payload()
@@ -1990,7 +2015,22 @@ fn count_open_fds() -> usize {
 
 fn process_exists(pid: libc::pid_t) -> bool {
     let result = unsafe { libc::kill(pid, 0) };
-    result == 0 || io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    if result != 0 && io::Error::last_os_error().raw_os_error() != Some(libc::EPERM) {
+        return false;
+    }
+    #[cfg(target_os = "linux")]
+    if let Ok(status) = std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+        // After broker death the process is reparented to init. A zombie has
+        // stopped executing and is reclaimed by init; do not make correctness
+        // depend on how quickly a particular container's PID 1 calls wait.
+        if status
+            .rsplit_once(") ")
+            .is_some_and(|(_, fields)| fields.starts_with("Z "))
+        {
+            return false;
+        }
+    }
+    true
 }
 
 fn read_pty(fd: RawFd, timeout: Duration) -> io::Result<Vec<u8>> {

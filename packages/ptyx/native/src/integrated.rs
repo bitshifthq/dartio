@@ -1,5 +1,6 @@
 use super::{dup_cloexec, set_cloexec, set_nonblocking, GenerationRegistry};
 use crate::broker_client::{BrokerClient, BrokerOwner, BrokerSession, BrokerSpawn};
+use crate::oneshot::{self, Sender as ReplySender};
 use std::collections::{HashMap, VecDeque};
 use std::ffi::CString;
 use std::io;
@@ -7,7 +8,7 @@ use std::mem::MaybeUninit;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 #[cfg(target_os = "macos")]
 use std::ptr;
-use std::sync::mpsc::{self, Receiver, Sender, SyncSender};
+use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::Mutex;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -239,16 +240,16 @@ pub(crate) enum Command {
         broker: BrokerSession,
         input_capacity: usize,
         output_capacity: usize,
-        reply: Sender<io::Result<u64>>,
+        reply: ReplySender<io::Result<u64>>,
     },
     Activate {
         handle: u64,
-        reply: Sender<io::Result<()>>,
+        reply: ReplySender<io::Result<()>>,
     },
     Write {
         handle: u64,
         bytes: Vec<u8>,
-        reply: Sender<i64>,
+        reply: ReplySender<i64>,
     },
     CreditAsync {
         handle: u64,
@@ -258,56 +259,56 @@ pub(crate) enum Command {
         handle: u64,
         required: usize,
         waiter: u64,
-        reply: Sender<WaitResult>,
+        reply: ReplySender<WaitResult>,
     },
     WaitFlush {
         handle: u64,
         sequence: u64,
         waiter: u64,
-        reply: Sender<WaitResult>,
+        reply: ReplySender<WaitResult>,
     },
     Pause {
         handle: u64,
         paused: bool,
-        reply: Sender<bool>,
+        reply: ReplySender<bool>,
     },
     ExitStatus {
         handle: u64,
-        reply: Sender<Option<i64>>,
+        reply: ReplySender<Option<i64>>,
     },
     Pid {
         handle: u64,
-        reply: Sender<Option<i32>>,
+        reply: ReplySender<Option<i32>>,
     },
     Size {
         handle: u64,
-        reply: Sender<Option<[u32; 4]>>,
+        reply: ReplySender<Option<[u32; 4]>>,
     },
     Resize {
         handle: u64,
         size: [u32; 4],
-        reply: Sender<bool>,
+        reply: ReplySender<bool>,
     },
     Mode {
         handle: u64,
-        reply: Sender<Option<[bool; 3]>>,
+        reply: ReplySender<Option<[bool; 3]>>,
     },
     TtyName {
         handle: u64,
-        reply: Sender<Option<Vec<u8>>>,
+        reply: ReplySender<Option<Vec<u8>>>,
     },
     Signal {
         handle: u64,
         signal: i32,
-        reply: Sender<Option<bool>>,
+        reply: ReplySender<Option<bool>>,
     },
     Close {
         handle: u64,
-        reply: Sender<bool>,
+        reply: ReplySender<bool>,
     },
     Destroy {
         handle: u64,
-        reply: Sender<bool>,
+        reply: ReplySender<bool>,
     },
     Abandon {
         handle: u64,
@@ -427,15 +428,16 @@ impl IntegratedRuntime {
     }
 
     fn activate_result(&self, handle: u64) -> io::Result<()> {
-        self.request(|reply| Command::Activate { handle, reply })
+        self.request_result(|reply| Command::Activate { handle, reply })?
     }
 
     pub fn try_write(&self, handle: u64, bytes: Vec<u8>) -> i64 {
-        self.request(|reply| Command::Write {
+        self.request_result(|reply| Command::Write {
             handle,
             bytes,
             reply,
         })
+        .unwrap_or(-1)
     }
 
     pub fn credit_async(&self, handle: u64, bytes: usize) -> bool {
@@ -451,73 +453,91 @@ impl IntegratedRuntime {
     }
 
     pub fn wait_capacity(&self, handle: u64, required: usize, waiter: u64) -> WaitResult {
-        self.request(|reply| Command::WaitCapacity {
+        self.request_result(|reply| Command::WaitCapacity {
             handle,
             required,
             waiter,
             reply,
         })
+        .unwrap_or(WaitResult::Failed)
     }
 
     pub fn wait_flush(&self, handle: u64, sequence: u64, waiter: u64) -> WaitResult {
-        self.request(|reply| Command::WaitFlush {
+        self.request_result(|reply| Command::WaitFlush {
             handle,
             sequence,
             waiter,
             reply,
         })
+        .unwrap_or(WaitResult::Failed)
     }
 
     pub fn pause(&self, handle: u64, paused: bool) -> bool {
-        self.request(|reply| Command::Pause {
+        self.request_result(|reply| Command::Pause {
             handle,
             paused,
             reply,
         })
+        .unwrap_or(false)
     }
 
     pub fn exit_status(&self, handle: u64) -> Option<i64> {
-        self.request(|reply| Command::ExitStatus { handle, reply })
+        self.request_result(|reply| Command::ExitStatus { handle, reply })
+            .ok()
+            .flatten()
     }
 
     pub fn pid(&self, handle: u64) -> Option<i32> {
-        self.request(|reply| Command::Pid { handle, reply })
+        self.request_result(|reply| Command::Pid { handle, reply })
+            .ok()
+            .flatten()
     }
 
     pub fn size(&self, handle: u64) -> Option<[u32; 4]> {
-        self.request(|reply| Command::Size { handle, reply })
+        self.request_result(|reply| Command::Size { handle, reply })
+            .ok()
+            .flatten()
     }
 
     pub fn resize(&self, handle: u64, size: [u32; 4]) -> bool {
-        self.request(|reply| Command::Resize {
+        self.request_result(|reply| Command::Resize {
             handle,
             size,
             reply,
         })
+        .unwrap_or(false)
     }
 
     pub fn mode(&self, handle: u64) -> Option<[bool; 3]> {
-        self.request(|reply| Command::Mode { handle, reply })
+        self.request_result(|reply| Command::Mode { handle, reply })
+            .ok()
+            .flatten()
     }
 
     pub fn tty_name(&self, handle: u64) -> Option<Vec<u8>> {
-        self.request(|reply| Command::TtyName { handle, reply })
+        self.request_result(|reply| Command::TtyName { handle, reply })
+            .ok()
+            .flatten()
     }
 
     pub fn signal(&self, handle: u64, signal: i32) -> Option<bool> {
-        self.request(|reply| Command::Signal {
+        self.request_result(|reply| Command::Signal {
             handle,
             signal,
             reply,
         })
+        .ok()
+        .flatten()
     }
 
     pub fn close(&self, handle: u64) -> bool {
-        self.request(|reply| Command::Close { handle, reply })
+        self.request_result(|reply| Command::Close { handle, reply })
+            .unwrap_or(false)
     }
 
     pub fn destroy(&self, handle: u64) -> bool {
-        self.request(|reply| Command::Destroy { handle, reply })
+        self.request_result(|reply| Command::Destroy { handle, reply })
+            .unwrap_or(false)
     }
 
     pub fn try_abandon(&self, handle: u64) -> bool {
@@ -533,30 +553,35 @@ impl IntegratedRuntime {
         self.broker.kill_for_test();
     }
 
-    fn request<R>(&self, command: impl FnOnce(Sender<R>) -> Command) -> R {
-        self.request_result(command)
-            .expect("ptyx reactor request channel closed")
-    }
-
-    fn request_result<R>(&self, command: impl FnOnce(Sender<R>) -> Command) -> io::Result<R> {
-        let (sender, receiver) = mpsc::channel();
+    fn request_result<R>(&self, command: impl FnOnce(ReplySender<R>) -> Command) -> io::Result<R> {
+        let (sender, receiver) = oneshot::channel();
         self.commands
             .send(command(sender))
             .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "ptyx reactor stopped"))?;
         self.wake.wake();
         receiver
             .recv()
-            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "ptyx reactor stopped"))
+            .ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "ptyx reactor stopped"))
     }
 }
 
 impl Drop for IntegratedRuntime {
     fn drop(&mut self) {
+        let _ = self.shutdown();
+    }
+}
+
+impl IntegratedRuntime {
+    pub(crate) fn shutdown(&self) -> bool {
         let _ = self.commands.send(Command::Shutdown);
         self.wake.wake();
-        if let Some(thread) = self.thread.lock().ok().and_then(|mut value| value.take()) {
-            let _ = thread.join();
-        }
+        let reactor = self
+            .thread
+            .lock()
+            .ok()
+            .and_then(|mut value| value.take())
+            .is_none_or(|thread| thread.join().is_ok());
+        reactor && self.broker.shutdown()
     }
 }
 

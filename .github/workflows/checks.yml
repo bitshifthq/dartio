@@ -115,7 +115,11 @@ jobs:
       - run: dart pub get
       - name: run Dart tests
         working-directory: packages/ptyx
-        run: dart test --concurrency=1
+        run: |
+          # Fatal infrastructure injection owns a process-wide native runtime.
+          # Keep it in a dedicated test VM before the regular package suite.
+          dart test --concurrency=1 test/src/api/fault_injection_check.dart
+          dart test --concurrency=1
 
   rust:
     name: rust-${{ matrix.os }}

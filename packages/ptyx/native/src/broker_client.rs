@@ -1,11 +1,13 @@
+use crate::dup_cloexec;
 use crate::integrated::Command;
+use crate::oneshot::{self, Sender as ReplySender};
 use std::collections::HashMap;
 use std::ffi::{CStr, CString};
 use std::io;
 use std::mem::{size_of, MaybeUninit};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::ptr;
-use std::sync::mpsc::{self, Receiver, Sender, SyncSender, TrySendError};
+use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -403,6 +405,12 @@ fn spawn_code(code: libc::c_int) -> io::Result<()> {
 #[cfg(target_os = "macos")]
 fn launch_broker_at(path: &CStr) -> io::Result<(OwnedFd, libc::pid_t)> {
     let (controller, broker) = socket_pair()?;
+    let broker_duplicate = if broker.as_raw_fd() == CONTROL_FD {
+        Some(dup_cloexec(broker.as_raw_fd())?)
+    } else {
+        None
+    };
+    let broker_fd = broker_duplicate.as_ref().unwrap_or(&broker).as_raw_fd();
     let mut attrs_raw = MaybeUninit::<libc::posix_spawnattr_t>::uninit();
     spawn_code(unsafe { libc::posix_spawnattr_init(attrs_raw.as_mut_ptr()) })?;
     let mut attrs = SpawnAttrs(unsafe { attrs_raw.assume_init() });
@@ -422,14 +430,17 @@ fn launch_broker_at(path: &CStr) -> io::Result<(OwnedFd, libc::pid_t)> {
     let flags = libc::POSIX_SPAWN_SETSIGMASK;
     let flags = flags as libc::c_short;
     spawn_code(unsafe { libc::posix_spawnattr_setflags(&mut attrs.0, flags) })?;
-    spawn_code(unsafe {
-        libc::posix_spawn_file_actions_adddup2(&mut actions.0, broker.as_raw_fd(), CONTROL_FD)
-    })?;
-    if broker.as_raw_fd() != CONTROL_FD {
-        spawn_code(unsafe {
-            libc::posix_spawn_file_actions_addclose(&mut actions.0, broker.as_raw_fd())
-        })?;
+    // Make replacement of an inherited descriptor explicit. In particular,
+    // hosted processes may already use fd 3 for an unrelated non-CLOEXEC
+    // channel; relying on dup2's implicit close interacted inconsistently
+    // with POSIX_SPAWN_CLOEXEC_DEFAULT on macOS x64.
+    if unsafe { libc::fcntl(CONTROL_FD, libc::F_GETFD) } >= 0 {
+        spawn_code(unsafe { libc::posix_spawn_file_actions_addclose(&mut actions.0, CONTROL_FD) })?;
     }
+    spawn_code(unsafe {
+        libc::posix_spawn_file_actions_adddup2(&mut actions.0, broker_fd, CONTROL_FD)
+    })?;
+    spawn_code(unsafe { libc::posix_spawn_file_actions_addclose(&mut actions.0, broker_fd) })?;
 
     let broker_arg = CString::new("--broker").unwrap();
     let mut argv = [
@@ -450,6 +461,7 @@ fn launch_broker_at(path: &CStr) -> io::Result<(OwnedFd, libc::pid_t)> {
     };
     spawn_code(code)?;
     let broker_process = BrokerProcessGuard::new(pid);
+    drop(broker_duplicate);
     drop(broker);
     let (hello, passed) = receive_frame(controller.as_raw_fd())?
         .ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "broker handshake EOF"))?;
@@ -651,7 +663,7 @@ pub(crate) struct BrokerSpawn {
 enum Request {
     Spawn {
         config: BrokerSpawn,
-        reply: Sender<io::Result<BrokerSession>>,
+        reply: ReplySender<io::Result<BrokerSession>>,
     },
     CloseDetached {
         session: u64,
@@ -661,7 +673,7 @@ enum Request {
     },
     Abort {
         session: u64,
-        reply: Sender<io::Result<()>>,
+        reply: ReplySender<io::Result<()>>,
     },
     AbortDetached {
         session: u64,
@@ -669,7 +681,7 @@ enum Request {
     Signal {
         session: u64,
         signal: i32,
-        reply: Sender<Option<bool>>,
+        reply: ReplySender<Option<bool>>,
     },
     Shutdown,
 }
@@ -751,28 +763,33 @@ impl BrokerOwner {
             libc::kill(self.pid, libc::SIGKILL);
         }
     }
-}
 
-impl Drop for BrokerOwner {
-    fn drop(&mut self) {
+    pub(crate) fn shutdown(&self) -> bool {
+        let Some(thread) = self.thread.lock().ok().and_then(|mut value| value.take()) else {
+            return true;
+        };
         if self.client.send(Request::Shutdown).is_err() {
             unsafe {
                 libc::kill(self.pid, libc::SIGKILL);
             }
         }
-        if let Some(thread) = self.thread.lock().ok().and_then(|mut value| value.take()) {
-            let _ = thread.join();
-        }
+        thread.join().is_ok()
+    }
+}
+
+impl Drop for BrokerOwner {
+    fn drop(&mut self) {
+        let _ = self.shutdown();
     }
 }
 
 impl BrokerClient {
     pub(crate) fn spawn(&self, config: BrokerSpawn) -> io::Result<BrokerSession> {
-        let (reply, response) = mpsc::channel();
+        let (reply, response) = oneshot::channel();
         self.send(Request::Spawn { config, reply })?;
         response
             .recv()
-            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "broker worker stopped"))?
+            .ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "broker worker stopped"))?
     }
 
     pub(crate) fn close_async(&self, session: u64) -> io::Result<()> {
@@ -784,11 +801,11 @@ impl BrokerClient {
     }
 
     pub(crate) fn abort(&self, session: u64) -> io::Result<()> {
-        let (reply, response) = mpsc::channel();
+        let (reply, response) = oneshot::channel();
         self.send(Request::Abort { session, reply })?;
         response
             .recv()
-            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "broker worker stopped"))?
+            .ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "broker worker stopped"))?
     }
 
     pub(crate) fn abort_async(&self, session: u64) -> io::Result<()> {
@@ -799,7 +816,7 @@ impl BrokerClient {
         &self,
         session: u64,
         signal: i32,
-        reply: Sender<Option<bool>>,
+        reply: ReplySender<Option<bool>>,
     ) -> io::Result<()> {
         let failure_reply = reply.clone();
         let result = self.send(Request::Signal {

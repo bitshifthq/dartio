@@ -25,6 +25,7 @@ use windows_sys::Win32::System::IO::{
 
 use self::handles::{IoOperation, OwnedHandle, OwnedProcessWait, OwnedPseudoConsole};
 pub(crate) use self::spawn::BrokerSpawn;
+use crate::oneshot::{self, Sender as ReplySender};
 use crate::GenerationRegistry;
 
 const BYTE_QUANTUM: usize = 64 * 1024;
@@ -349,16 +350,16 @@ fn quarantine_pseudoconsole(pseudoconsole: OwnedPseudoConsole, permit: Option<Cl
 enum Command {
     Add {
         session: Box<Session>,
-        reply: Sender<io::Result<u64>>,
+        reply: ReplySender<io::Result<u64>>,
     },
     Activate {
         handle: u64,
-        reply: Sender<io::Result<()>>,
+        reply: ReplySender<io::Result<()>>,
     },
     Write {
         handle: u64,
         bytes: Vec<u8>,
-        reply: Sender<i64>,
+        reply: ReplySender<i64>,
     },
     CreditAsync {
         handle: u64,
@@ -369,55 +370,55 @@ enum Command {
         required: usize,
         waiter: u64,
         reservation: NoticeReservation,
-        reply: Sender<WaitResult>,
+        reply: ReplySender<WaitResult>,
     },
     WaitFlush {
         handle: u64,
         sequence: u64,
         waiter: u64,
         reservation: NoticeReservation,
-        reply: Sender<WaitResult>,
+        reply: ReplySender<WaitResult>,
     },
     Pause {
         handle: u64,
         paused: bool,
-        reply: Sender<bool>,
+        reply: ReplySender<bool>,
     },
     ExitStatus {
         handle: u64,
-        reply: Sender<Option<i64>>,
+        reply: ReplySender<Option<i64>>,
     },
     Pid {
         handle: u64,
-        reply: Sender<Option<i64>>,
+        reply: ReplySender<Option<i64>>,
     },
     Size {
         handle: u64,
-        reply: Sender<Option<[u32; 4]>>,
+        reply: ReplySender<Option<[u32; 4]>>,
     },
     Resize {
         handle: u64,
         size: [u32; 4],
-        reply: Sender<bool>,
+        reply: ReplySender<bool>,
     },
     Mode {
-        reply: Sender<Option<[bool; 3]>>,
+        reply: ReplySender<Option<[bool; 3]>>,
     },
     TtyName {
-        reply: Sender<Option<Vec<u8>>>,
+        reply: ReplySender<Option<Vec<u8>>>,
     },
     Signal {
         handle: u64,
         signal: i32,
-        reply: Sender<Option<bool>>,
+        reply: ReplySender<Option<bool>>,
     },
     Close {
         handle: u64,
-        reply: Sender<bool>,
+        reply: ReplySender<bool>,
     },
     Destroy {
         handle: u64,
-        reply: Sender<bool>,
+        reply: ReplySender<bool>,
     },
     Abandon {
         handle: u64,
@@ -754,16 +755,18 @@ impl IntegratedRuntime {
     }
 
     pub(crate) fn activate(&self, handle: u64) -> bool {
-        self.request(|reply| Command::Activate { handle, reply })
+        self.request_result(|reply| Command::Activate { handle, reply })
+            .and_then(|result| result)
             .is_ok()
     }
 
     pub(crate) fn try_write(&self, handle: u64, bytes: Vec<u8>) -> i64 {
-        self.request(|reply| Command::Write {
+        self.request_result(|reply| Command::Write {
             handle,
             bytes,
             reply,
         })
+        .unwrap_or(-1)
     }
 
     pub(crate) fn credit_async(&self, handle: u64, bytes: usize) -> bool {
@@ -781,78 +784,96 @@ impl IntegratedRuntime {
         let Some(reservation) = self.notice_emitter.try_reserve() else {
             return WaitResult::Failed;
         };
-        self.request(|reply| Command::WaitCapacity {
+        self.request_result(|reply| Command::WaitCapacity {
             handle,
             required,
             waiter,
             reservation,
             reply,
         })
+        .unwrap_or(WaitResult::Failed)
     }
 
     pub(crate) fn wait_flush(&self, handle: u64, sequence: u64, waiter: u64) -> WaitResult {
         let Some(reservation) = self.notice_emitter.try_reserve() else {
             return WaitResult::Failed;
         };
-        self.request(|reply| Command::WaitFlush {
+        self.request_result(|reply| Command::WaitFlush {
             handle,
             sequence,
             waiter,
             reservation,
             reply,
         })
+        .unwrap_or(WaitResult::Failed)
     }
 
     pub(crate) fn pause(&self, handle: u64, paused: bool) -> bool {
-        self.request(|reply| Command::Pause {
+        self.request_result(|reply| Command::Pause {
             handle,
             paused,
             reply,
         })
+        .unwrap_or(false)
     }
 
     pub(crate) fn exit_status(&self, handle: u64) -> Option<i64> {
-        self.request(|reply| Command::ExitStatus { handle, reply })
+        self.request_result(|reply| Command::ExitStatus { handle, reply })
+            .ok()
+            .flatten()
     }
 
     pub(crate) fn pid(&self, handle: u64) -> Option<i64> {
-        self.request(|reply| Command::Pid { handle, reply })
+        self.request_result(|reply| Command::Pid { handle, reply })
+            .ok()
+            .flatten()
     }
 
     pub(crate) fn size(&self, handle: u64) -> Option<[u32; 4]> {
-        self.request(|reply| Command::Size { handle, reply })
+        self.request_result(|reply| Command::Size { handle, reply })
+            .ok()
+            .flatten()
     }
 
     pub(crate) fn resize(&self, handle: u64, size: [u32; 4]) -> bool {
-        self.request(|reply| Command::Resize {
+        self.request_result(|reply| Command::Resize {
             handle,
             size,
             reply,
         })
+        .unwrap_or(false)
     }
 
     pub(crate) fn mode(&self, _handle: u64) -> Option<[bool; 3]> {
-        self.request(|reply| Command::Mode { reply })
+        self.request_result(|reply| Command::Mode { reply })
+            .ok()
+            .flatten()
     }
 
     pub(crate) fn tty_name(&self, _handle: u64) -> Option<Vec<u8>> {
-        self.request(|reply| Command::TtyName { reply })
+        self.request_result(|reply| Command::TtyName { reply })
+            .ok()
+            .flatten()
     }
 
     pub(crate) fn signal(&self, handle: u64, signal: i32) -> Option<bool> {
-        self.request(|reply| Command::Signal {
+        self.request_result(|reply| Command::Signal {
             handle,
             signal,
             reply,
         })
+        .ok()
+        .flatten()
     }
 
     pub(crate) fn close(&self, handle: u64) -> bool {
-        self.request(|reply| Command::Close { handle, reply })
+        self.request_result(|reply| Command::Close { handle, reply })
+            .unwrap_or(false)
     }
 
     pub(crate) fn destroy(&self, handle: u64) -> bool {
-        self.request(|reply| Command::Destroy { handle, reply })
+        self.request_result(|reply| Command::Destroy { handle, reply })
+            .unwrap_or(false)
     }
 
     pub(crate) fn try_abandon(&self, handle: u64) -> bool {
@@ -863,30 +884,33 @@ impl IntegratedRuntime {
         true
     }
 
-    fn request<R>(&self, command: impl FnOnce(Sender<R>) -> Command) -> R {
-        self.request_result(command)
-            .expect("ptyx IOCP request channel closed")
-    }
-
-    fn request_result<R>(&self, command: impl FnOnce(Sender<R>) -> Command) -> io::Result<R> {
-        let (sender, receiver) = mpsc::channel();
+    fn request_result<R>(&self, command: impl FnOnce(ReplySender<R>) -> Command) -> io::Result<R> {
+        let (sender, receiver) = oneshot::channel();
         self.commands
             .send(command(sender))
             .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "ptyx IOCP reactor stopped"))?;
         self.iocp.post_command()?;
         receiver
             .recv()
-            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "ptyx IOCP reactor stopped"))
+            .ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "ptyx IOCP reactor stopped"))
     }
 }
 
 impl Drop for IntegratedRuntime {
     fn drop(&mut self) {
+        let _ = self.shutdown();
+    }
+}
+
+impl IntegratedRuntime {
+    pub(crate) fn shutdown(&self) -> bool {
         let _ = self.commands.send(Command::Shutdown);
         let _ = self.iocp.post_command();
-        if let Some(thread) = self.thread.lock().ok().and_then(|mut value| value.take()) {
-            let _ = thread.join();
-        }
+        self.thread
+            .lock()
+            .ok()
+            .and_then(|mut value| value.take())
+            .is_none_or(|thread| thread.join().is_ok())
     }
 }
 

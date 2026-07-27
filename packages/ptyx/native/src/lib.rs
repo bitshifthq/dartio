@@ -14,6 +14,9 @@ mod broker_materializer;
 mod ffi;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod integrated;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod isolate_thread;
+mod oneshot;
 #[cfg(windows)]
 mod windows;
 
