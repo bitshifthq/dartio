@@ -54,6 +54,19 @@ jobs:
           SDK="$(dirname "$(dirname "$(command -v dart)")")"
           printf "DART_SDK=%s\n" "$SDK" >> "$GITHUB_ENV"
           printf "PTYX_DART_SDK=%s\n" "$SDK" >> "$GITHUB_ENV"
+      - name: build target broker for controller sanitizer tests
+        env:
+          RUSTFLAGS: -Zsanitizer=${{ matrix.sanitizer }}
+          ASAN_OPTIONS: ${{ matrix.options }}
+          TSAN_OPTIONS: ${{ matrix.options }}
+        run: |
+          cargo +nightly-2026-07-20 build \
+            -Zbuild-std \
+            --target x86_64-unknown-linux-gnu \
+            --manifest-path packages/ptyx/native/broker/Cargo.toml
+          printf "PTYX_BROKER_BINARY=%s\n" \
+            "$GITHUB_WORKSPACE/packages/ptyx/native/broker/target/x86_64-unknown-linux-gnu/debug/ptyx-broker" \
+            >> "$GITHUB_ENV"
       - name: run controller sanitizer tests
         env:
           RUSTFLAGS: -Zsanitizer=${{ matrix.sanitizer }}
