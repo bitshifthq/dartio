@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use windows_sys::Win32::Foundation::{
     GetLastError, ERROR_IO_PENDING, ERROR_PIPE_CONNECTED, GENERIC_READ, GENERIC_WRITE,
-    WAIT_OBJECT_0,
+    INVALID_HANDLE_VALUE, WAIT_OBJECT_0,
 };
 use windows_sys::Win32::Globalization::CompareStringOrdinal;
 use windows_sys::Win32::Security::Cryptography::{
@@ -28,7 +28,8 @@ use windows_sys::Win32::System::Pipes::{
 };
 use windows_sys::Win32::System::Threading::{
     CreateEventW, CreateProcessW, WaitForSingleObject, CREATE_UNICODE_ENVIRONMENT,
-    EXTENDED_STARTUPINFO_PRESENT, INFINITE, PROCESS_INFORMATION, STARTUPINFOEXW, STARTUPINFOW,
+    EXTENDED_STARTUPINFO_PRESENT, INFINITE, PROCESS_INFORMATION, STARTF_USESTDHANDLES,
+    STARTUPINFOEXW, STARTUPINFOW,
 };
 use windows_sys::Win32::System::IO::{GetOverlappedResult, OVERLAPPED};
 
@@ -153,6 +154,13 @@ pub(crate) fn spawn(config: BrokerSpawn) -> io::Result<SpawnedSession> {
     let cwd = cwd.as_deref().map(nul_terminated).transpose()?;
     let mut startup: STARTUPINFOEXW = unsafe { zeroed() };
     startup.StartupInfo.cb = size_of::<STARTUPINFOEXW>() as u32;
+    // Prevent inherited runner or embedding-process standard handles from
+    // bypassing ConPTY. The pseudoconsole attribute supplies the child's
+    // console streams; explicit invalid standard handles leave no fallback.
+    startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+    startup.StartupInfo.hStdInput = INVALID_HANDLE_VALUE;
+    startup.StartupInfo.hStdOutput = INVALID_HANDLE_VALUE;
+    startup.StartupInfo.hStdError = INVALID_HANDLE_VALUE;
     startup.lpAttributeList = attributes.raw();
     let mut process: PROCESS_INFORMATION = unsafe { zeroed() };
     let created = unsafe {

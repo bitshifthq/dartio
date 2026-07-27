@@ -1174,12 +1174,11 @@ impl Broker {
             Some(SlotState::Running { pid }) => *pid,
             _ => return Ok(()),
         };
-        let Some(exit) = observe_exit(pid)? else {
-            // EVFILT_PROC can become observable just before waitid reports
-            // the status. The registration is one-shot, so rearm it rather
-            // than permanently losing this child's exit.
-            return self.register_process(pid, session);
-        };
+        // NOTE_EXIT is authoritative: the process has exited even if waitid's
+        // nonblocking observation would briefly lag the kqueue notification.
+        // Wait for the status instead of racing a one-shot re-registration
+        // against the process disappearing.
+        let exit = await_exit(pid)?;
         if let Some((index, generation)) = split_session(session) {
             let slot = &mut self.slots[index];
             if slot.generation == generation {
@@ -1907,6 +1906,7 @@ fn decode_wait_status(status: i32) -> i32 {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn observe_exit(pid: libc::pid_t) -> io::Result<Option<ExitStatus>> {
     let mut information = MaybeUninit::<libc::siginfo_t>::zeroed();
     loop {

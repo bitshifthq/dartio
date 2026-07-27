@@ -1426,10 +1426,6 @@ fn close_session(session: &mut Session, broker: &BrokerClient) -> bool {
     if session.close_started {
         return true;
     }
-    if session.exit_status.is_some() {
-        session.close_started = true;
-        return true;
-    }
     if broker.close_async(session.broker_session).is_err() {
         return false;
     }
