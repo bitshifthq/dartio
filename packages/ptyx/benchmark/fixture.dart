@@ -4,6 +4,8 @@ import 'dart:typed_data';
 
 const _ready = [82, 69, 65, 68, 89];
 const _outputFlushBytes = 1024 * 1024;
+const _conptyClear = [0x1b, 0x5b, 0x32, 0x4a, 0x1b, 0x5b, 0x48];
+const _conptyClearInterval = 512;
 
 Future<void> main(List<String> arguments) async {
   if (arguments.isEmpty) {
@@ -46,7 +48,7 @@ Future<void> main(List<String> arguments) async {
     case 'ready-cat':
       await _writeReady();
       await for (final chunk in stdin) {
-        stdout.add(chunk);
+        _writePayload(chunk);
         await stdout.flush();
       }
     case 'idle':
@@ -81,7 +83,7 @@ Future<void> _writePattern(int byteCount) async {
     for (var index = 0; index < count; index++) {
       chunk[index] = _pattern(offset + index);
     }
-    stdout.add(count == chunk.length ? chunk : chunk.sublist(0, count));
+    _writePayload(count == chunk.length ? chunk : chunk.sublist(0, count));
     offset += count;
     if (offset % _outputFlushBytes == 0 || offset == byteCount) {
       await stdout.flush();
@@ -102,11 +104,25 @@ Future<String> _readPattern(int byteCount, {required bool echo}) async {
       }
     }
     if (echo) {
-      stdout.add(count == chunk.length ? chunk : chunk.sublist(0, count));
+      _writePayload(count == chunk.length ? chunk : chunk.sublist(0, count));
       await stdout.flush();
     }
     received += count;
     if (received == byteCount) break;
   }
   return received == byteCount ? 'OK $received' : 'SHORT $received $byteCount';
+}
+
+void _writePayload(List<int> bytes) {
+  if (!Platform.isWindows) {
+    stdout.add(bytes);
+    return;
+  }
+  for (var offset = 0; offset < bytes.length; offset += _conptyClearInterval) {
+    final end = offset + _conptyClearInterval < bytes.length
+        ? offset + _conptyClearInterval
+        : bytes.length;
+    stdout.add(bytes.sublist(offset, end));
+    stdout.add(_conptyClear);
+  }
 }
