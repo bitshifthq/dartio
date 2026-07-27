@@ -80,7 +80,9 @@ Future<void> main(List<String> arguments) async {
           0,
           List<int>.generate(
             interactiveLength,
-            (index) => 32 + ((cycles * interactiveLength + index) % 95),
+            (index) => Platform.isWindows
+                ? 33 + ((cycles * interactiveLength + index) % 94)
+                : 32 + ((cycles * interactiveLength + index) % 95),
           ),
         );
       longSession.resize(

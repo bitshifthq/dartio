@@ -394,7 +394,7 @@ Future<Map<String, Object?>> _interactiveRoundTrips(int repetitions) async {
   final samples = <int>[];
   try {
     for (var i = 0; i < repetitions; i++) {
-      final value = 32 + (i % 95);
+      final value = _interactiveByte(i);
       final stopwatch = Stopwatch()..start();
       await session.write(Uint8List.fromList([value]));
       final received = await bytes.readByte().timeout(_timeout);
@@ -919,7 +919,7 @@ Future<Map<String, Object?>> _fairness(
       await Future.wait([
         for (var index = 0; index < pairs.length; index++)
           Future<void>(() async {
-            final value = 32 + ((round + index) % 95);
+            final value = _interactiveByte(round + index);
             final stopwatch = Stopwatch()..start();
             await pairs[index].session.write(Uint8List.fromList([value]));
             final received = await pairs[index].bytes.readByte().timeout(
@@ -1539,6 +1539,9 @@ final class _MarkerTracker {
 }
 
 int _pattern(int offset) => 32 + ((offset * 31 + 17) % 95);
+
+int _interactiveByte(int offset) =>
+    Platform.isWindows ? 33 + (offset % 94) : 32 + (offset % 95);
 
 int _acceptPatternByte(int byte, int offset) {
   if (byte == _pattern(offset)) return 1;
