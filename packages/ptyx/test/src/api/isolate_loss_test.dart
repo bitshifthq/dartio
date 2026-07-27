@@ -1,3 +1,6 @@
+@DefaultAsset('package:ptyx/ptyx.dart')
+library;
+
 import 'dart:async';
 import 'dart:ffi';
 import 'dart:io';
