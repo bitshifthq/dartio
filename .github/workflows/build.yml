@@ -2,6 +2,17 @@ name: build
 
 on:
   workflow_call:
+    inputs:
+      extended:
+        description: Run sanitizer fuzzing and lifecycle soaks
+        required: false
+        type: boolean
+        default: false
+      soak_seconds:
+        description: Per-target exact-integrity soak duration
+        required: false
+        type: string
+        default: "300"
   push:
     branches: [main]
     paths:
@@ -10,6 +21,16 @@ on:
       - ".github/workflows/build.yml"
       - ".github/workflows/checks.yml"
   workflow_dispatch:
+    inputs:
+      extended:
+        description: Run sanitizer fuzzing and lifecycle soaks
+        required: false
+        type: boolean
+        default: false
+      soak_seconds:
+        description: Per-target exact-integrity soak duration
+        required: false
+        default: "300"
 
 permissions:
   contents: read
@@ -24,6 +45,15 @@ jobs:
     permissions:
       contents: read
       pull-requests: read
+
+  extended:
+    name: extended
+    if: inputs.extended
+    uses: ./.github/workflows/ptyx-extended.yml
+    with:
+      soak_seconds: ${{ inputs.soak_seconds }}
+    permissions:
+      contents: read
 
   build-native:
     name: build-${{ matrix.target }}

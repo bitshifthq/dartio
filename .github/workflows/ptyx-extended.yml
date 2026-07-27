@@ -1,6 +1,13 @@
 name: ptyx-extended
 
 on:
+  workflow_call:
+    inputs:
+      soak_seconds:
+        description: Per-target exact-integrity soak duration
+        required: false
+        type: string
+        default: "300"
   workflow_dispatch:
     inputs:
       soak_seconds:
