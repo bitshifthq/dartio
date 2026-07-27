@@ -50,13 +50,14 @@ class PtyException implements Exception {
   /// Human-readable failure detail.
   final String message;
 
-  /// The public operation that failed.
+  /// The public operation or infrastructure subsystem that reported failure.
   final String operation;
 
   /// Stable machine-readable error category.
   final PtyErrorCategory category;
 
-  /// Native status or operating-system error code, when available.
+  /// Native status or operating-system error code when retained by the
+  /// native boundary.
   final int? nativeCode;
 
   /// Non-secret context useful for diagnosing the failed operation.

@@ -10,8 +10,10 @@ use std::io;
 use std::mem::size_of;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr;
+#[cfg(feature = "test-controls")]
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::mpsc::{self, RecvTimeoutError, Sender};
+use std::sync::mpsc::{self, Sender};
 use std::sync::{Mutex, OnceLock};
 
 #[derive(Clone, Copy)]
@@ -23,10 +25,15 @@ struct Ports {
 static RUNTIME: OnceLock<IntegratedRuntime> = OnceLock::new();
 static LIBRARY_PINNED: OnceLock<bool> = OnceLock::new();
 static INIT_LOCK: Mutex<()> = Mutex::new(());
+static DART_CALL_LOCK: Mutex<()> = Mutex::new(());
 static PORTS: OnceLock<Mutex<HashMap<u64, Ports>>> = OnceLock::new();
 static LOST_PORTS: OnceLock<Mutex<HashSet<u64>>> = OnceLock::new();
 static ABANDONMENTS: OnceLock<Sender<u64>> = OnceLock::new();
 static COMMAND_INPUT_BYTES: AtomicUsize = AtomicUsize::new(0);
+#[cfg(feature = "test-controls")]
+static TEST_SPAWN_DELAY_MS: AtomicUsize = AtomicUsize::new(0);
+#[cfg(feature = "test-controls")]
+static TEST_SPAWN_DELAY_ACTIVE: AtomicBool = AtomicBool::new(false);
 const COMMAND_INPUT_CAPACITY: usize = 64 * 1024 * 1024;
 const MAX_SESSION_CAPACITY: usize = 64 * 1024 * 1024;
 const MAX_SPAWN_PAYLOAD: usize = 64 * 1024;
@@ -99,7 +106,7 @@ impl Drop for InputAdmission {
 
 #[no_mangle]
 pub extern "C" fn ptyi_abi_version() -> u32 {
-    4
+    5
 }
 
 #[no_mangle]
@@ -182,6 +189,18 @@ pub extern "C" fn ptyi_test_kill_broker() {
 }
 
 #[no_mangle]
+#[cfg(feature = "test-controls")]
+pub extern "C" fn ptyi_test_delay_next_spawn(milliseconds: usize) {
+    TEST_SPAWN_DELAY_MS.store(milliseconds, Ordering::Release);
+}
+
+#[no_mangle]
+#[cfg(feature = "test-controls")]
+pub extern "C" fn ptyi_test_spawn_delay_active() -> bool {
+    TEST_SPAWN_DELAY_ACTIVE.load(Ordering::Acquire)
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn ptyi_init(api_data: *mut c_void) -> bool {
     catch_unwind(AssertUnwindSafe(|| {
         if api_data.is_null() {
@@ -207,11 +226,9 @@ pub unsafe extern "C" fn ptyi_init(api_data: *mut c_void) -> bool {
         };
         let notifier = std::thread::Builder::new()
             .name("ptyx-dart-notifier".to_owned())
-            .spawn(move || loop {
-                match notifications.recv_timeout(std::time::Duration::from_millis(250)) {
-                    Ok(notice) => dispatch_notice(notice),
-                    Err(RecvTimeoutError::Timeout) => probe_event_ports(),
-                    Err(RecvTimeoutError::Disconnected) => break,
+            .spawn(move || {
+                while let Ok(notice) = notifications.recv() {
+                    dispatch_notice(notice);
                 }
             });
         if notifier.is_err() {
@@ -239,17 +256,29 @@ pub unsafe extern "C" fn ptyi_init(api_data: *mut c_void) -> bool {
 pub extern "C" fn ptyi_finalize(token: *mut c_void) {
     let _ = catch_unwind(AssertUnwindSafe(|| {
         let handle = token.addr() as u64;
-        if handle == 0 {
-            return;
-        }
-        if let Ok(mut entries) = ports().lock() {
-            entries.remove(&handle);
-        }
-        if let Ok(mut lost) = lost_ports().lock() {
-            lost.insert(handle);
-        }
-        abandon_lost(handle);
+        abandon_handle(handle);
     }));
+}
+
+#[no_mangle]
+pub extern "C" fn ptyi_abandon(handle: u64) -> bool {
+    catch_unwind(AssertUnwindSafe(|| abandon_handle(handle))).unwrap_or(false)
+}
+
+fn abandon_handle(handle: u64) -> bool {
+    if handle == 0 {
+        return false;
+    }
+    let Ok(_dart_calls) = DART_CALL_LOCK.lock() else {
+        return false;
+    };
+    if let Ok(mut entries) = ports().lock() {
+        entries.remove(&handle);
+    }
+    if let Ok(mut lost) = lost_ports().lock() {
+        lost.insert(handle);
+    }
+    abandon_lost(handle)
 }
 
 #[no_mangle]
@@ -267,8 +296,6 @@ pub unsafe extern "C" fn ptyi_spawn(
     pixel_height: u32,
     input_capacity: usize,
     output_capacity: usize,
-    output_port: i64,
-    event_port: i64,
 ) -> u64 {
     catch_unwind(AssertUnwindSafe(|| {
         set_last_error_code(0);
@@ -293,8 +320,6 @@ pub unsafe extern "C" fn ptyi_spawn(
             || columns > u16::MAX.into()
             || pixel_width > u16::MAX.into()
             || pixel_height > u16::MAX.into()
-            || output_port <= 0
-            || event_port <= 0
         {
             set_last_error_code(libc::EINVAL);
             return 0;
@@ -398,7 +423,34 @@ pub unsafe extern "C" fn ptyi_spawn(
         if handle == 0 {
             return 0;
         }
-        if let Ok(mut entries) = ports().lock() {
+        #[cfg(feature = "test-controls")]
+        {
+            let delay = TEST_SPAWN_DELAY_MS.swap(0, Ordering::AcqRel);
+            if delay != 0 {
+                TEST_SPAWN_DELAY_ACTIVE.store(true, Ordering::Release);
+                std::thread::sleep(std::time::Duration::from_millis(delay as u64));
+                TEST_SPAWN_DELAY_ACTIVE.store(false, Ordering::Release);
+            }
+        }
+        handle
+    }))
+    .unwrap_or(0)
+}
+
+#[no_mangle]
+pub extern "C" fn ptyi_activate(handle: u64, output_port: i64, event_port: i64) -> bool {
+    catch_unwind(AssertUnwindSafe(|| {
+        if output_port <= 0 || event_port <= 0 {
+            set_last_error_code(libc::EINVAL);
+            return false;
+        }
+        {
+            let Ok(_dart_calls) = DART_CALL_LOCK.lock() else {
+                return false;
+            };
+            let Ok(mut entries) = ports().lock() else {
+                return false;
+            };
             entries.insert(
                 handle,
                 Ports {
@@ -407,19 +459,13 @@ pub unsafe extern "C" fn ptyi_spawn(
                 },
             );
         }
-        handle
-    }))
-    .unwrap_or(0)
-}
-
-#[no_mangle]
-pub extern "C" fn ptyi_activate(handle: u64) -> bool {
-    catch_unwind(AssertUnwindSafe(|| {
         let activated = with_runtime(|runtime| runtime.activate(handle)).unwrap_or(false);
         set_last_error_code(if activated { 0 } else { libc::EPIPE });
         if !activated {
-            if let Ok(mut entries) = ports().lock() {
-                entries.remove(&handle);
+            if let Ok(_dart_calls) = DART_CALL_LOCK.lock() {
+                if let Ok(mut entries) = ports().lock() {
+                    entries.remove(&handle);
+                }
             }
         }
         activated
@@ -620,6 +666,9 @@ pub extern "C" fn ptyi_destroy(handle: u64) -> bool {
     catch_unwind(AssertUnwindSafe(|| {
         let removed = with_runtime(|runtime| runtime.destroy(handle)).unwrap_or(false);
         if removed {
+            let Ok(_dart_calls) = DART_CALL_LOCK.lock() else {
+                return false;
+            };
             if let Ok(mut entries) = ports().lock() {
                 entries.remove(&handle);
             }
@@ -633,6 +682,9 @@ pub extern "C" fn ptyi_destroy(handle: u64) -> bool {
 }
 
 fn dispatch_notice(notice: Notice) {
+    let Ok(_dart_calls) = DART_CALL_LOCK.lock() else {
+        return;
+    };
     let broker_lost = matches!(notice, Notice::BrokerLost(_));
     let handle = match &notice {
         Notice::Output { handle, .. }
@@ -699,44 +751,6 @@ fn dispatch_notice(notice: Notice) {
     }
 }
 
-fn probe_event_ports() {
-    let event_ports = ports()
-        .lock()
-        .ok()
-        .map(|entries| {
-            entries
-                .values()
-                .map(|entry| entry.event)
-                .collect::<HashSet<_>>()
-        })
-        .unwrap_or_default();
-    for event_port in event_ports {
-        if unsafe { ptyx_dart_probe_port(event_port) } {
-            continue;
-        }
-        let handles = ports()
-            .lock()
-            .ok()
-            .map(|mut entries| {
-                let handles = entries
-                    .iter()
-                    .filter_map(|(handle, entry)| (entry.event == event_port).then_some(*handle))
-                    .collect::<Vec<_>>();
-                for handle in &handles {
-                    entries.remove(handle);
-                }
-                handles
-            })
-            .unwrap_or_default();
-        for handle in handles {
-            if let Ok(mut lost) = lost_ports().lock() {
-                lost.insert(handle);
-            }
-            abandon_lost(handle);
-        }
-    }
-}
-
 fn abandon_lost(handle: u64) -> bool {
     let queued = lost_ports()
         .lock()
@@ -759,7 +773,6 @@ fn abandon_lost(handle: u64) -> bool {
 unsafe extern "C" {
     fn Dart_InitializeApiDL(data: *mut c_void) -> libc::intptr_t;
     fn ptyx_dart_post_integer(port: i64, message: i64) -> bool;
-    fn ptyx_dart_probe_port(port: i64) -> bool;
     fn ptyx_dart_post_bytes(port: i64, handle: i64, bytes: *const u8, length: usize) -> bool;
     #[cfg(feature = "test-controls")]
     fn ptyx_dart_fail_next_post();

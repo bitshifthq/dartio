@@ -4,7 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-_Static_assert(PTYX_ABI_VERSION == 4u, "unexpected compile-time ABI version");
+_Static_assert(PTYX_ABI_VERSION == 5u, "unexpected compile-time ABI version");
 _Static_assert(sizeof(uint32_t) == 4, "uint32_t layout is not supported");
 _Static_assert(sizeof(uint64_t) == 8, "uint64_t layout is not supported");
 _Static_assert(sizeof(int64_t) == 8, "int64_t layout is not supported");
@@ -28,16 +28,17 @@ int main(void) {
   require(ptyi_last_error_code() == 0, "unexpected initial native error");
   require(!ptyi_init(NULL), "NULL Dart API initialization was accepted");
   ptyi_finalize(NULL);
+  require(!ptyi_abandon(0), "zero handle was abandoned");
   require(ptyi_spawn(NULL, NULL, 0, NULL, 0, true, NULL, 24, 80, 0, 0,
-                     65536, 65536, 0, 0) == 0,
+                     65536, 65536) == 0,
           "NULL executable was accepted");
   require(ptyi_spawn("true", NULL, 0, NULL, 0, false, NULL, 24, 80, 0, 0,
-                     65536, 65536, 1, 1) == 0,
+                     65536, 65536) == 0,
           "uninitialized empty-array spawn unexpectedly succeeded");
   require(ptyi_spawn("true", (const char *const *)&byte, SIZE_MAX, NULL, 0,
-                     true, NULL, 24, 80, 0, 0, 65536, 65536, 1, 1) == 0,
+                     true, NULL, 24, 80, 0, 0, 65536, 65536) == 0,
           "oversized argument count was accepted");
-  require(!ptyi_activate(invalid), "invalid handle activated");
+  require(!ptyi_activate(invalid, 1, 1), "invalid handle activated");
   require(ptyi_write(invalid, &byte, 1) == -1,
           "invalid-handle input was accepted");
   require(ptyi_write(invalid, NULL, 1) == -1, "NULL input was accepted");

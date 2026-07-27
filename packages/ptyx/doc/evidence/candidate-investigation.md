@@ -322,8 +322,10 @@ The corrected revision stores bounded sets of capacity and flush waiters and
 notifies or fails every token. It rejects impossible capacity requests
 immediately. Broker exit, PTY EOF, close, and write failure all enter one
 permanent input-failure transition that clears accepted input, fails all
-waiters, and rejects later writes. Only output credit can rearm a delivered
-chunk; subscription resume cannot do so.
+waiters, and rejects later writes. The production path later replaced
+single-flight output with several budget-charged messages and a Dart FIFO for
+messages already posted when pause commits. Credit, not subscription resume,
+rearms native reads, so the pipeline remains bounded and lossless.
 
 Fifteen native tests and eleven Dart tests passed. The native suite includes
 exact concurrent-waiter registration, all-ready and all-failed delivery,

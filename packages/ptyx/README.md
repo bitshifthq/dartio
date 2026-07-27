@@ -98,9 +98,10 @@ complete before trailing output is delivered. Await the output stream when
 trailing bytes matter.
 
 Always call `close`, including after normal process exit. Close is idempotent,
-first requests graceful termination, then forces cleanup after
-`gracefulCloseTimeout`. Operations requiring live native state throw
-`PtyClosedException` after close.
+first requests graceful termination on Unix, then forces cleanup after
+`gracefulCloseTimeout`. ConPTY has no equivalent portable graceful request, so
+Windows begins Job Object termination immediately. Operations requiring live
+native state throw `PtyClosedException` after close.
 
 The session owns the terminal job. On Unix this is the controlling-terminal
 process group; on Windows this is a kill-on-close job associated with ConPTY.

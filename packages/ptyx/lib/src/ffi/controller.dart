@@ -8,12 +8,18 @@ library;
 
 import 'dart:ffi' as ffi;
 
+/// Abandons a handle whose owning Dart isolate has exited.
+@ffi.Native<ffi.Bool Function(ffi.Uint64)>(symbol: 'ptyi_abandon')
+external bool controllerAbandon(int handle);
+
 @ffi.Native<ffi.Uint32 Function()>(symbol: 'ptyi_abi_version')
 external int controllerAbiVersion();
 
 /// Publishes a staged session after Dart has installed its routing state.
-@ffi.Native<ffi.Bool Function(ffi.Uint64)>(symbol: 'ptyi_activate')
-external bool controllerActivate(int handle);
+@ffi.Native<ffi.Bool Function(ffi.Uint64, ffi.Int64, ffi.Int64)>(
+  symbol: 'ptyi_activate',
+)
+external bool controllerActivate(int handle, int output_port, int event_port);
 
 /// Capability bits: signals=1, process groups=2, modes=4, ConPTY=8,
 /// terminal name=16.
@@ -92,8 +98,6 @@ external bool controllerSize(int handle, ffi.Pointer<ffi.Uint32> values);
     ffi.Uint32,
     ffi.Size,
     ffi.Size,
-    ffi.Int64,
-    ffi.Int64,
   )
 >(symbol: 'ptyi_spawn')
 external int controllerSpawn(
@@ -110,8 +114,6 @@ external int controllerSpawn(
   int pixel_height,
   int input_capacity,
   int output_capacity,
-  int output_port,
-  int event_port,
 );
 
 /// Returns -1 when unavailable. Otherwise returns the required byte count when
@@ -147,4 +149,4 @@ external int controllerWrite(
   int length,
 );
 
-const int controllerAbiVersionExpected = 4;
+const int controllerAbiVersionExpected = 5;

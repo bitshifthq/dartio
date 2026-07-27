@@ -60,6 +60,7 @@ const _functionNames = {
   'ptyi_last_error_code': 'controllerLastErrorCode',
   'ptyi_init': 'controllerInit',
   'ptyi_finalize': 'controllerFinalize',
+  'ptyi_abandon': 'controllerAbandon',
   'ptyi_spawn': 'controllerSpawn',
   'ptyi_activate': 'controllerActivate',
   'ptyi_write': 'controllerWrite',

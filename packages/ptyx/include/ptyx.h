@@ -18,7 +18,7 @@
 #define PTYX_EXPORT __attribute__((visibility("default")))
 #endif
 
-#define PTYX_ABI_VERSION 4u
+#define PTYX_ABI_VERSION 5u
 
 PTYX_EXPORT uint32_t ptyi_abi_version(void);
 /**
@@ -31,6 +31,8 @@ PTYX_EXPORT int32_t ptyi_last_error_code(void);
 PTYX_EXPORT bool ptyi_init(void* dart_initialize_api_dl_data);
 /** Dart finalizer callback. The token is the generation-tagged handle. */
 PTYX_EXPORT void ptyi_finalize(void* token);
+/** Abandons a handle whose owning Dart isolate has exited. */
+PTYX_EXPORT bool ptyi_abandon(uint64_t handle);
 
 PTYX_EXPORT uint64_t ptyi_spawn(
     const char* executable,
@@ -45,12 +47,13 @@ PTYX_EXPORT uint64_t ptyi_spawn(
     uint32_t pixel_width,
     uint32_t pixel_height,
     size_t input_capacity,
-    size_t output_capacity,
-    int64_t output_port,
-    int64_t event_port);
+    size_t output_capacity);
 
 /** Publishes a staged session after Dart has installed its routing state. */
-PTYX_EXPORT bool ptyi_activate(uint64_t handle);
+PTYX_EXPORT bool ptyi_activate(
+    uint64_t handle,
+    int64_t output_port,
+    int64_t event_port);
 
 /**
  * Returns a positive accepted-input sequence, zero for temporary backpressure,

@@ -174,7 +174,11 @@ fn receive_frame(fd: RawFd) -> io::Result<Option<(Frame, Option<OwnedFd>)>> {
         message.msg_iovlen = 1;
         message.msg_control = control.as_mut_ptr().cast();
         message.msg_controllen = std::mem::size_of_val(&control) as _;
-        let received = unsafe { libc::recvmsg(fd, &mut message, libc::MSG_DONTWAIT) };
+        #[cfg(target_os = "linux")]
+        let receive_flags = libc::MSG_DONTWAIT | libc::MSG_CMSG_CLOEXEC;
+        #[cfg(target_os = "macos")]
+        let receive_flags = libc::MSG_DONTWAIT;
+        let received = unsafe { libc::recvmsg(fd, &mut message, receive_flags) };
         if received == 0 {
             return if offset == 0 {
                 Ok(None)
@@ -247,7 +251,9 @@ fn collect_received_fds(message: &libc::msghdr, received_fds: &mut Vec<OwnedFd>)
                 );
             }
             if raw >= 0 {
-                received_fds.push(unsafe { OwnedFd::from_raw_fd(raw) });
+                let descriptor = unsafe { OwnedFd::from_raw_fd(raw) };
+                set_cloexec(descriptor.as_raw_fd())?;
+                received_fds.push(descriptor);
             }
         }
         header = unsafe { libc::CMSG_NXTHDR(message, header) };

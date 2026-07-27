@@ -2,13 +2,14 @@ import 'dart:convert';
 import 'dart:ffi';
 import 'dart:io';
 
-const _expectedAbi = 4;
+const _expectedAbi = 5;
 const _symbols = [
   'ptyi_abi_version',
   'ptyi_capabilities',
   'ptyi_last_error_code',
   'ptyi_init',
   'ptyi_finalize',
+  'ptyi_abandon',
   'ptyi_spawn',
   'ptyi_activate',
   'ptyi_write',

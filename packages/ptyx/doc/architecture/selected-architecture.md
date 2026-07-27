@@ -43,10 +43,10 @@ equivalent language comparison.
   recursively close the stream or silently terminate the process.
 - Loss of a Dart port is a terminal typed failure. It starts native cleanup,
   fails all waiters, and never leaves a session waiting for another Dart call.
-- A failed operational post or quiet-port probe commits every session routed
-  to that isolate to native abandonment. Background posts snapshot and
-  null-check Dart's dynamic function pointer before calling it, so VM teardown
-  becomes a failed probe instead of a call through a cleared pointer.
+- A failed operational post commits the affected session to native
+  abandonment. Dart posts and native-finalizer route removal share a native
+  lock, so an isolate-group shutdown waits for any in-flight post and prevents
+  a later post from starting.
 
 ### Native controller
 
@@ -55,20 +55,29 @@ equivalent language comparison.
 - The native module is pinned before controller threads start. The controller
   intentionally lives for the host process, so library unloading cannot race
   a reactor, notifier, broker-controller, closer, or TLS destructor.
-- Dart object collection uses a Dart `Finalizer` that calls the idempotent
-  native abandonment entry point while its isolate is live. VM shutdown never
-  invokes a native finalizer callback; quiet isolate loss is covered by the
-  independent event-port probe.
+- Dart object collection uses `NativeFinalizer`, whose SDK contract guarantees
+  its callback no later than normal isolate-group shutdown. The pinned callback
+  only removes native routing and enqueues idempotent abandonment; it never
+  calls a Dart API. Active-session receive ports keep a standalone owner alive.
+  A separate per-owner supervisor receives staged handles before publication
+  and abandons them if that individual isolate exits. The native notifier
+  performs no periodic liveness posts.
+- A staged spawn has no Dart notification route. Activation installs the route
+  only after the finalizer is attached, under the same lock used by
+  native-to-Dart posts and finalization.
 - Controller initialization is transactional. The registry, reactor,
   notifier, broker or IOCP owner, and failure route either become observable
   together or are all torn down before initialization reports failure.
 - Reactor, notifier, broker-channel, or IOCP-owner death atomically fails every
   affected sub-resource with a typed infrastructure error and starts cleanup;
   no synchronous request waits on a dead owner.
-- macOS uses one `kqueue` reactor for PTY masters and controller wakeups. Linux
-  uses `epoll`. The broker channel has its own bounded controller because it
-  owns a framed request/response transaction. Windows uses IOCP for
-  overlapped controller pipe ends.
+- Linux uses `epoll`. macOS uses a shared `poll` reactor because the measured
+  `kqueue` candidate missed the input-throughput gate. A separate
+  direct-parent prototype also failed exit ownership when the Dart host
+  reaped its children; the mandatory broker corrects that ownership boundary.
+  The broker channel has its own bounded controller because it owns a framed
+  request/response transaction. Windows uses IOCP for overlapped controller
+  pipe ends.
 - Work is scheduled with command, byte, and syscall quanta. A busy session
   cannot drain the complete command queue or monopolize the readiness batch.
 - Input and output use chunk queues with explicit byte accounting. Unix reads
@@ -104,6 +113,13 @@ parent of every PTY child.
 - PTY masters move to the controller with `SCM_RIGHTS`. A versioned, bounded,
   nonblocking protocol carries generation IDs, spawn results, signal
   acknowledgements, exit status, and cleanup state.
+- Linux receives transferred masters with `MSG_CMSG_CLOEXEC`, making
+  close-on-exec atomic. Darwin does not expose that receive flag; the
+  controller applies `FD_CLOEXEC` while parsing the returned control message,
+  before publishing the descriptor, and every ptyx `posix_spawn` uses
+  `POSIX_SPAWN_CLOEXEC_DEFAULT`. A foreign native component that performs
+  inheriting process creation concurrently with that short Darwin receive
+  interval remains an external integration hazard.
 - The handshake identifies protocol version, target architecture, helper
   build identity, and controller ABI. Controller and helper protocol constants
   are checked together by protocol tests; consolidating them into generated
@@ -226,7 +242,7 @@ The decisive results are:
 - direct ownership matched the same-host direct input boundary and met the
   latency and idle-scaling gates;
 - the representative broker-controller-Dart slice demonstrated bounded
-  queues, copied typed-data delivery, one-message output credit, no
+  queues, copied typed-data delivery, bounded multi-message output credit, no
   per-session I/O workers, race-free capacity waits, concurrent close,
   pause/cancel/no-listener bounds, and typed cleanup after a real broker kill;
 - the pre-correction Candidate B prototype recorded five post-warmup 128 MiB

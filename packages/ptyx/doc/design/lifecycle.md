@@ -9,7 +9,10 @@ returns to a live state after its release transition.
 Before spawn commits, a native spawn transaction owns every acquired object.
 An unpublished staged entry has a five-second activation deadline; expiry
 commits native abandonment so isolate loss between native spawn and Dart
-publication cannot orphan the child. The native module is pinned for the
+publication cannot orphan the child. It has no Dart notification route. A
+per-owner supervisor receives the staged handle before publication and
+abandons it if that individual isolate exits; activation installs routing only
+after Dart attaches the native finalizer. The native module is pinned for the
 process lifetime before any controller thread starts, ensuring those threads
 and their TLS destructors cannot outlive loaded code.
 After commit, a generation-checked session entry owns:
@@ -17,7 +20,7 @@ After commit, a generation-checked session entry owns:
 - the PTY master and platform child or job identity;
 - direct-child exit observation and exact-once reap state;
 - input queue bytes, sequence numbers, capacity waiters, and flush barriers;
-- output buffers, one copied Dart message, and explicit delivery credit;
+- output buffers, bounded copied Dart messages, and explicit delivery credit;
 - reactor registrations or unavoidable platform workers;
 - Dart output, event, and control ports;
 - mode-observer registration and timers.
@@ -81,7 +84,8 @@ identity, not an unchecked numeric PID, controls signal and cleanup decisions.
 | running | wait facility fails | exitObservationFailed | exit future receives a dedicated failure |
 | running | signal races before reap commit | running or exited | delivery result reflects the OS operation |
 | exited | signal request | exited | returns already-exited without an OS signal |
-| running | graceful close deadline expires | running | force termination is requested against the owned job |
+| running | Unix graceful close deadline expires | running | force termination is requested against the owned job |
+| running | close commits on Windows | running | the owned Job Object is terminated immediately |
 
 ## Race table
 
@@ -97,17 +101,20 @@ identity, not an unchecked numeric PID, controls signal and cleanup decisions.
 | pause or cancel versus close | close commits discard and cleanup; a prior cancel also yields discard, and no path delivers late bytes |
 | repeated or concurrent close | atomic installation of one shared close completion makes all callers observe one result |
 | native output post versus port closure | failed post returns credit and commits native shutdown; no Dart acknowledgment is awaited |
-| copied output post versus shutdown | a successful post retains one charged message until Dart delivery or discard returns credit; a failed post rolls the same credit back before shutdown |
-| isolate loss versus explicit close | a Dart finalizer, failed operational post, or teardown-safe quiet-port probe reaches the same native abandonment entry; the first shutdown cause commits and later causes merge into the same cleanup |
+| copied output post versus shutdown | successful posts remain charged within the session output budget until Dart delivery or discard returns credit; a failed post rolls its credit back before shutdown |
+| isolate loss versus explicit close | the owner supervisor, native finalizer, or a failed operational post reaches the same native abandonment entry; the first shutdown cause commits and later causes merge into the same cleanup |
 | reactor failure versus public operations | the reactor commits affected sub-resources to typed failures, then performs session cleanup without corrupting other sessions |
 | mode timer versus close | generation and observer state are checked at callback commit; a late callback is discarded without touching released state |
 | handle reuse versus late ABI call | registry index and generation must both match a live entry; retired generations are never dereferenced |
 
 ## Cleanup order
 
-Cleanup first prevents new work and wakes capacity waiters. It then requests
-graceful job termination, continues the platform-required output drain,
-escalates at the deadline, observes or records direct-child exit, unregisters
-readiness and timers, resolves accepted input and output credit, closes OS
-resources, and retires the session generation. Failures are accumulated and
-reported only after all independent safe cleanup actions have run.
+Cleanup first prevents new work and wakes capacity waiters. On Unix it then
+requests graceful job termination, continues the platform-required output
+drain, and escalates at the deadline. On Windows it immediately terminates the
+owned Job Object because ConPTY does not provide an equivalent portable
+graceful-close primitive. Cleanup then observes or records direct-child exit,
+unregisters readiness and timers, resolves accepted input and output credit,
+closes OS resources, and retires the session generation. Failures are
+accumulated and reported only after all independent safe cleanup actions have
+run.

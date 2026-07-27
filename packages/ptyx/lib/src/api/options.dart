@@ -36,8 +36,6 @@ enum PtyEnvironmentMode {
 ///   environment: {'LANG': 'en_US.UTF-8'},
 ///   initialSize: PtySize(rows: 30, columns: 100),
 /// );
-///
-/// final session = await PtySession.spawn(options);
 /// ```
 @immutable
 final class PtySpawnOptions {
@@ -72,12 +70,20 @@ final class PtySpawnOptions {
   final PtySize initialSize;
 
   /// Maximum accepted input bytes retained by this session.
+  ///
+  /// Must be between 1 byte and 64 MiB, inclusive.
   final int maxBufferedInput;
 
   /// Maximum queued and in-flight output bytes retained by this session.
+  ///
+  /// Must be between 1 byte and 64 MiB, inclusive.
   final int maxBufferedOutput;
 
   /// Time allowed for graceful termination before forced cleanup.
+  ///
+  /// Must be between zero and one minute, inclusive. Unix uses this interval
+  /// after requesting graceful termination. ConPTY has no equivalent portable
+  /// request, so Windows begins Job Object termination immediately.
   final Duration gracefulCloseTimeout;
 
   /// Creates spawn options for [PtySession.spawn].

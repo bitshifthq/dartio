@@ -1,0 +1,31 @@
+import 'dart:convert';
+import 'dart:io';
+
+import 'package:ptyx/ptyx.dart';
+
+Future<void> main() async {
+  final session = await PtySession.spawn(
+    PtySpawnOptions(
+      executable: Platform.isWindows
+          ? r'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe'
+          : '/bin/sh',
+      arguments: Platform.isWindows
+          ? const [
+              '-NoProfile',
+              '-NonInteractive',
+              '-Command',
+              "Start-Sleep -Seconds 1; Write-Output 'ptyx-standalone-alive'",
+            ]
+          : const ['-c', r"sleep 1; printf 'ptyx-standalone-alive\n'"],
+      initialSize: const PtySize(rows: 24, columns: 80),
+    ),
+  );
+  final output = session.output.expand((chunk) => chunk).toList();
+  final exitCode = await session.exitCode;
+  final bytes = await output;
+  await session.close();
+  if (exitCode != 0) {
+    throw StateError('probe child exited with $exitCode');
+  }
+  stdout.write(utf8.decode(bytes));
+}

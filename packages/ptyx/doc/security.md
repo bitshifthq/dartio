@@ -22,6 +22,12 @@ an owner-only executable materialization. Installation uses an interprocess
 lock, unpredictable temporary names, atomic publication, and post-publication
 owner, type, mode, size, and content checks.
 
+Linux receives broker-transferred PTY masters atomically close-on-exec.
+Darwin provides no equivalent `recvmsg` flag; ptyx marks the descriptor before
+publishing it and uses close-by-default for its own process creation. Embedders
+that invoke a foreign, inheriting native process-creation API concurrently with
+PTY spawn must serialize that operation on macOS.
+
 Applications subject to code-signing, sandbox, allow-list, or no-exec policies
 must bundle and select their own signed broker with `PTYX_BROKER_BINARY`.
 `ptyx` never falls back to forking a child inside the multithreaded Dart host.

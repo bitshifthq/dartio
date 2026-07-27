@@ -83,7 +83,6 @@ struct Session {
     output: VecDeque<QueuedOutput>,
     output_outstanding: usize,
     output_deadline: Option<Instant>,
-    output_notified: bool,
     output_done_notified: bool,
     output_failed: bool,
     paused: bool,
@@ -118,7 +117,6 @@ impl Session {
             output: VecDeque::new(),
             output_outstanding: 0,
             output_deadline: None,
-            output_notified: false,
             output_done_notified: false,
             output_failed: false,
             paused: true,
@@ -207,7 +205,6 @@ impl Session {
         if self.output.is_empty() {
             self.output_deadline = None;
         }
-        self.output_notified = false;
         bytes
     }
 
@@ -216,9 +213,6 @@ impl Session {
             return false;
         }
         self.output_outstanding -= bytes;
-        if bytes != 0 {
-            self.output_notified = false;
-        }
         true
     }
 
@@ -1364,9 +1358,8 @@ fn refresh_output(
         || session
             .output_deadline
             .is_some_and(|deadline| deadline <= Instant::now());
-    if session.active && output_ready && !session.output.is_empty() && !session.output_notified {
+    if session.active && output_ready && !session.output.is_empty() {
         let bytes = session.pull(OUTPUT_BATCH);
-        session.output_notified = true;
         send_notice(notices, Notice::Output { handle, bytes }, counters);
     }
     if session.active
@@ -1393,7 +1386,7 @@ fn output_poll_timeout(sessions: &GenerationRegistry<Session>) -> i32 {
         .handles()
         .into_iter()
         .filter_map(|handle| sessions.get(handle))
-        .filter(|session| !session.output_notified && !session.output.is_empty())
+        .filter(|session| !session.output.is_empty())
         .filter_map(|session| session.output_deadline)
         .min();
     let activation_deadline = sessions
@@ -1783,15 +1776,20 @@ mod tests {
         }
 
         let mut actual = Vec::new();
+        let mut outstanding = Vec::new();
         while session.output_bytes != 0 {
             state ^= state << 13;
             state ^= state >> 7;
             state ^= state << 17;
             let maximum = 1 + state as usize % 193;
             let bytes = session.pull(maximum);
+            outstanding.push(bytes.len());
             actual.extend_from_slice(&bytes);
             assert!(session.output_total() <= expected.len());
-            assert!(session.credit(bytes.len()));
+        }
+        assert_eq!(session.output_outstanding, expected.len());
+        for bytes in outstanding {
+            assert!(session.credit(bytes));
         }
 
         assert_eq!(actual, expected);

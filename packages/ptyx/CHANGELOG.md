@@ -17,8 +17,9 @@
   native status, and safe context.
 - Added shared native reactors, a hardened Unix spawn/reaping broker, and
   generation-checked session ownership.
-- Added ABI version 4 generated bindings, Dart finalization and native
-  teardown-safe quiet-port liveness probing for isolate loss, lifecycle and
-  security documentation, ABI/runtime/fault contract tests, a
+- Added ABI version 5 generated bindings, staged-route publication, an
+  individual-isolate owner supervisor, and guaranteed native finalization with
+  post/finalizer serialization for isolate loss; added lifecycle and security
+  documentation, ABI/runtime/fault contract tests, a
   correctness-gated diagnostic scorecard, reproducible comparison harnesses,
   and an extended fuzz/scorecard/soak workflow.

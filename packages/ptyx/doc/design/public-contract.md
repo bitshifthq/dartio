@@ -95,8 +95,9 @@ exactly once and in PTY read order.
 
 Native output credit is released only after a copied Dart event is delivered
 to the subscription or explicitly discarded. Data in a Dart controller or its
-single in-flight native-port message remains charged to the same session
-budget.
+bounded in-flight native-port messages remains charged to the same session
+budget. Messages that arrive after a subscription pauses are retained in a
+FIFO charged to that budget, then delivered in order after resume.
 
 Awaiting child exit without consuming or discarding output can legitimately
 block the child on PTY backpressure.
@@ -156,9 +157,11 @@ await session.close();
 The first call atomically commits `open` to `closing`. Every caller receives
 the same completion future. Close rejects new operations, resolves pending
 capacity waits, performs graceful terminal-job termination for the configured
-deadline, escalates to forced termination when needed, stops I/O, reaps the
-direct child exactly once, and releases ports, messages, buffers, descriptors,
-handles, workers, and job ownership.
+deadline on Unix, escalates to forced termination when needed, stops I/O,
+reaps the direct child exactly once, and releases ports, messages, buffers,
+descriptors, handles, workers, and job ownership. ConPTY has no equivalent
+portable graceful request, so Windows begins Job Object termination
+immediately.
 
 Close is an explicit shutdown request, so output not already delivered may be
 drained and discarded during its cleanup phase. Normal child exit without
@@ -174,20 +177,23 @@ it with a less specific cleanup exception.
 
 A session belongs to the isolate that spawned it and is not transferable.
 Native state owns cleanup independently of the Dart wrapper. Dart
-finalization, failed operational posts, and teardown-safe quiet-port probes
-commit the same idempotent native shutdown path. The VM does not receive a
-native finalizer function pointer that could race dynamic-library or isolate
-shutdown. Late messages carry generation-checked identities and cannot access
-a released session.
+native finalization and failed operational posts commit the same idempotent
+native shutdown path. The pinned native-finalizer callback is guaranteed at
+normal isolate-group shutdown, performs no Dart API calls, and serializes route
+removal with every native-to-Dart post. A separate supervisor receives staged
+handles before publication and requests the same abandonment path when the
+individual owner isolate exits. Late messages carry generation-checked
+identities and cannot access a released session.
 
 ## Errors
 
 Every operational exception includes:
 
-- the public operation;
+- the public operation or infrastructure subsystem that first reported the
+  failure;
 - a stable error category;
 - a safe message;
-- the native OS code when available;
+- the native OS code when the native boundary retained it;
 - non-secret context needed to act on the failure.
 
 The public error families are spawn, input, output, exit observation, signal,

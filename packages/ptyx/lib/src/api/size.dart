@@ -28,12 +28,12 @@ final class PtySize {
 
   /// Terminal width in pixels.
   ///
-  /// Use zero when the width is unknown.
+  /// Use zero when the width is unknown. The maximum is 65535.
   final int pixelWidth;
 
   /// Terminal height in pixels.
   ///
-  /// Use zero when the height is unknown.
+  /// Use zero when the height is unknown. The maximum is 65535.
   final int pixelHeight;
 
   /// Creates a terminal size.

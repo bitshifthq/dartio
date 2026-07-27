@@ -1,5 +1,7 @@
 #include "dart_api_dl.h"
 
+#include <stddef.h>
+
 #if defined(_WIN32)
 #define PTYX_HIDDEN
 #else
@@ -36,11 +38,6 @@ PTYX_HIDDEN bool ptyx_dart_post_integer(Dart_Port_DL port, int64_t message) {
   }
   Dart_PostInteger_Type post = Dart_PostInteger_DL;
   return post != NULL && post(port, message);
-}
-
-PTYX_HIDDEN bool ptyx_dart_probe_port(Dart_Port_DL port) {
-  Dart_PostInteger_Type post = Dart_PostInteger_DL;
-  return post != NULL && post(port, 0);
 }
 
 PTYX_HIDDEN bool ptyx_dart_post_bytes(
