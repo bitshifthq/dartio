@@ -192,6 +192,219 @@ hardware.
 The three verdicts keep architecture selection open. Corrective prototypes and
 focused independent re-review are required before implementation begins.
 
+## Candidate B corrective prototypes
+
+The corrective work was split into three focused slices. Each slice was used
+to prove or reject an ownership boundary; none is production package code.
+
+### Persistent Unix broker
+
+The prototype at `/private/tmp/ptyx-candidate-b-broker-0B35LG` is a
+single-threaded broker launched with `posix_spawn`. It implements a bounded,
+versioned control protocol, transfers PTY masters with `SCM_RIGHTS`, owns
+`fork`, controlling-terminal setup, `exec`, signalling, and exact reaping, and
+uses generation-tagged job identities.
+
+Independent reruns produced:
+
+- 40 controlling-terminal sessions under descriptor churn with no inherited
+  descriptor or final descriptor leak;
+- rollback for missing executables and injected post-exec setup failure;
+- no signal after reap;
+- typed failure for accepted input;
+- no interference with an unrelated host `waitpid`;
+- 100 idle sessions with controller descriptors returning from 104 to 4,
+  broker descriptors remaining 5 to 5, and zero remaining jobs;
+- child reclamation after controller EOF; and
+- detected broker death with best-effort controller cleanup.
+
+An embedded-helper materializer reproduced under Dart JIT and AOT. It used a
+536,844-byte broker with SHA-256
+`cd588e9bcd69bad73f344e79139b89b83c4ebd4e86d846a170aff6f712fb5c96`,
+an owner-only version-and-hash path, no-follow/create-new semantics, content
+verification, synchronization, and atomic replacement.
+
+Review found five requirements still missing from the prototype:
+
+- reset the `SIGCHLD` disposition as well as the signal mask;
+- use incremental nonblocking framing instead of `MSG_WAITALL` request and
+  response stalls;
+- never signal a cached PID or process group after broker loss;
+- serialize helper materialization across concurrent processes and qualify
+  hardened-runtime, sandbox, and signing behavior; and
+- open broker descriptors atomically close-on-exec and close only the
+  broker's known descriptors rather than scanning a full descriptor table.
+
+Those findings are incorporated into the selected architecture. Ordinary CLI
+materialization is evidence, not proof for a signed or sandboxed application;
+those applications require an explicitly bundled and signed helper.
+
+### Integrated macOS reactor and Dart stream
+
+The prototype at `/private/tmp/ptyx-candidate-b-integrated-saI2fI` began with
+a single `kqueue` thread and was corrected into a broker-integrated shared
+`poll` reactor after measured input throughput rejected the `kqueue`
+implementation. It includes a wake descriptor, bounded native queues,
+per-event byte and syscall quanta, copied typed-data Dart native-port
+messages, one-message output credit, and a real Dart `Stream`.
+
+The first integrated result was not selectable:
+
+- one-byte p50/p95/p99 was 158/201/280 microseconds versus direct
+  12/22/62 microseconds;
+- output was 82.366 MiB/s versus direct 94.986 MiB/s, or 86.71 percent;
+- input was 4.643 MiB/s;
+- 32 MiB input caused 65,612 write syscalls and 32,295 capacity
+  notifications; and
+- Dart contained deterministic check-then-listen capacity and flush races.
+
+The correction replaced broadcast waits with tokenized register-or-ready
+capacity and flush waiters, staged native publication, explicit output-done
+and typed wait-failure events, permanent input failure state, no signalling
+after recorded exit, destruction only after recorded reap, port-post failure
+injection, and nonrecursive output cancellation. It also made exec-status and
+post-exec controller failures kill and reap the child. Native contract tests
+reached 9 passing cases and Clippy was warning-free; the focused Dart
+capacity, early-output, and port-loss cases passed in isolation.
+
+Stress testing then exposed the decisive remaining defect. Eight concurrent
+exact-output tests all received exact output and output completion, but six
+never received exit status and waited in teardown. The fixture processes were
+no longer live. The Dart host had reaped children that the integrated slice
+created directly, so `kqueue` could not provide status to the package. An
+activation-time `waitpid(WNOHANG)` check narrowed the registration race but
+did not fix host reaping.
+
+This result rejects direct child parenting inside the Dart process. The
+production reactor consumes broker-owned exit messages and owns only the PTY
+master. It does not use host-global child waiting or claim that process
+readiness alone gives it exclusive reap ownership.
+
+The corrected representative vertical slice then connected the external
+broker, controller, PTY reactor, C ABI, Dart native ports, and Dart stream.
+The broker remained the only parent and reaper; its exit messages replaced
+host-global child waiting. The slice added chunk queues, cached readiness
+state, bounded 1,024-command and 4,096-notice queues, a 64-command quantum,
+64 KiB byte quanta, generation retirement, staged publication, and terminal
+infrastructure failure.
+
+The initial integer-notice plus synchronous pull/credit boundary passed
+single-session throughput but amplified quiet latency under noisy neighbors.
+The final boundary posts copied typed data directly, allows one message in
+flight per session, and returns credit with a bounded nonblocking command.
+Messages up to 256 bytes bypass bulk coalescing; bulk output targets 64 KiB
+with a 10 ms ceiling.
+
+Retained final measurements are in
+`benchmark/results/candidate-b-integrated-macos-x64-2026-07-27.json`:
+
+- five post-warmup 128 MiB output runs: 89.847, 90.968, 90.847, 90.137,
+  and 90.353 MiB/s;
+- five 32 MiB input runs: 5.540, 5.528, 5.520, 5.502, and 5.485 MiB/s,
+  versus four post-warmup direct samples from 5.511 to 5.587 MiB/s;
+- 400 one-byte echoes: p50/p95/p99 134/193/288 microseconds;
+- four-session quiet p99 6.317 ms with each of three saturated sessions
+  reaching 1.573 to 1.626 MiB/s; and
+- sixteen-session quiet p99 64.213 ms with all fifteen saturated sessions
+  progressing between 0.346 and 0.363 MiB/s.
+
+The saturated quiet tail is retained as a production regression target. It is
+not a starvation result: every session completed and noisy throughput spread
+was approximately five percent.
+
+The focused correctness review then found four selection blockers in the
+vertical slice: concurrent capacity or flush waiters could replace one
+another, a request larger than the input bound could wait forever, broker exit
+or PTY EOF did not permanently fail queued input, and pause/resume could post
+a second output chunk before the first received credit.
+
+The corrected revision stores bounded sets of capacity and flush waiters and
+notifies or fails every token. It rejects impossible capacity requests
+immediately. Broker exit, PTY EOF, close, and write failure all enter one
+permanent input-failure transition that clears accepted input, fails all
+waiters, and rejects later writes. Only output credit can rearm a delivered
+chunk; subscription resume cannot do so.
+
+Fifteen native tests and eleven Dart tests passed. The native suite includes
+exact concurrent-waiter registration, all-ready and all-failed delivery,
+oversize waits, terminal input failure, and pause/resume without credit. The
+Dart suite covers exact early output, real native-port post failure,
+no-listener bounds, stable native reads while paused, repeated slow-consumer
+pause/resume, cancellation credit, race-free capacity recovery, impossible
+capacity failure, concurrent flush failure on terminal exit, twenty
+concurrent close callers, and a real broker `SIGKILL` that completes output
+and exit with a typed infrastructure error. Clippy and Dart analysis were
+warning-free. The raw result preserves both the benchmarked revision hashes
+and the corrected verification revision hashes. The exact reviewed broker
+hash is
+`cd588e9bcd69bad73f344e79139b89b83c4ebd4e86d846a170aff6f712fb5c96`;
+integrated source and binary hashes are retained with the raw results.
+
+The focused correctness re-review rebuilt the corrected artifacts, matched
+their recorded hashes, reran all 26 native and Dart tests, strict Clippy, and
+fatal Dart analysis, and passed Candidate B for architecture selection. It
+confirmed that every prior blocker is closed. Incremental broker framing,
+helper distribution and signing, initialization failure containment, extreme
+command-queue saturation, and target runtime qualification remain production
+requirements rather than selection evidence.
+
+### Windows ConPTY ownership slice
+
+The prototype at `/private/tmp/ptyx-candidate-b-windows-KoHhML` modeled
+separate synchronous ConPTY-facing named-pipe ends, overlapped
+controller-facing ends on IOCP, separately owned `HPCON`, process, thread,
+job, attribute list, and pinned `OVERLAPPED` state, and atomic pseudoconsole
+plus job-list attributes.
+
+Five host model tests passed. Host Clippy, x64 MSVC cross-Clippy, arm64 MSVC
+cross-Clippy, and both cross-builds passed. No Windows runtime test ran.
+
+Review correctly rejected the model as runtime proof. It also found:
+
+- a detached cleanup thread could retain all session resources indefinitely
+  on older Windows;
+- predictable pipe names lacked first-instance enforcement and a restrictive
+  DACL;
+- the fault model did not inject failures into real handle acquisition;
+- environment sorting used lossy Unicode and did not preserve `SystemRoot`;
+- legitimate exit code 259 was treated as `STILL_ACTIVE`; and
+- the slice had no C ABI or Dart port-loss evidence.
+
+The implementation therefore targets Windows build 26100 or newer, uses
+random first-instance secured pipes, exact UTF-16 environment handling,
+real acquisition-boundary fault injection, and exact exit-code observation.
+Windows x64 and arm64 runtime qualification remain explicit missing external
+evidence; cross-compilation is not recorded as a substitute.
+
+## Candidate B selection
+
+Candidate B is selected as direct Rust platform backends with a mandatory
+Unix spawn/reap broker and shared controller reactors. The complete decision,
+topology, ownership rules, platform floor, and failure ordering are in
+`docs/architecture/selected-architecture.md`.
+
+The selection resolves the independent reviews as follows:
+
+- descriptor inheritance, `fork` safety, child reaping, PID reuse, and
+  host-wait interference move behind the Unix broker;
+- Dart publication, capacity, flush, output completion, and port loss use
+  staged routing and tokenized terminal states;
+- reactor performance findings become explicit chunking, coalescing,
+  transition-caching, bounded-queue, and fairness gates;
+- Windows handle ownership is retained, while compile-only evidence and older
+  blocking close behavior are not represented as runtime support; and
+- helper packaging is split between integrity-checked ordinary CLI fallback
+  and an explicit signed-helper requirement for hardened applications.
+
+Correctness, performance, and platform-focused re-reviews each passed
+Candidate B for implementation. None represented the prototypes as
+production-ready. Their remaining hardening and qualification findings are
+requirements on the selected implementation and release evidence.
+
+No review finding is dismissed because another prototype happened to pass.
+Where the corrective slice could not close a finding, the selected design
+changes the boundary or retains the item as a production validation gate.
+
 Commands:
 
 ```text

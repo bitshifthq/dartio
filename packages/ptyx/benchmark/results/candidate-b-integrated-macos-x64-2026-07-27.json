@@ -1,0 +1,173 @@
+{
+  "schema": 1,
+  "candidate": "direct-rust-broker-reactor-dart-vertical-slice",
+  "date": "2026-07-27",
+  "host": {
+    "os": "macOS 26.5.2 (25F84)",
+    "kernel": "Darwin 25.5.0",
+    "architecture": "x86_64",
+    "dart": "3.12.2 stable",
+    "rustc": "1.95.0"
+  },
+  "boundary": "Dart Stream and write API through Dart native ports, copied typed-data output, bounded Rust controller, external Unix broker, PTY, and child",
+  "topology": {
+    "dart_io_threads_per_session": 0,
+    "native_io_threads_per_session": 0,
+    "controller_reactors": 1,
+    "broker_controller_threads": 1,
+    "broker_processes": 1,
+    "command_capacity": 1024,
+    "notice_capacity": 4096,
+    "input_capacity_default_bytes": 1048576,
+    "output_capacity_default_bytes": 262144,
+    "byte_quantum": 65536,
+    "syscall_quantum": 4,
+    "bulk_output_batch_bytes": 65536,
+    "bulk_output_deadline_milliseconds": 10,
+    "interactive_output_threshold_bytes": 256,
+    "output_messages_in_flight_per_session": 1
+  },
+  "commands": {
+    "build": "PTYX_DART_SDK=<flutter-sdk> cargo build --release",
+    "native_test": "PTYX_DART_SDK=<flutter-sdk> PTYI_BROKER=<broker> cargo test --release -- --test-threads=1",
+    "dart_test": "PTYI_BROKER=<broker> PTYI_LIBRARY=<library> PTYI_FIXTURE=<fixture> dart test",
+    "clippy": "PTYX_DART_SDK=<flutter-sdk> cargo clippy --release --all-targets -- -D warnings",
+    "benchmark": "PTYI_BROKER=<broker> PTYI_LIBRARY=<library> PTYI_FIXTURE=<fixture> dart run bin/benchmark.dart <mode>"
+  },
+  "interactive": {
+    "samples": 400,
+    "p50_microseconds": 134,
+    "p95_microseconds": 193,
+    "p99_microseconds": 288,
+    "counters": {
+      "reactor_wakeups": 2003,
+      "reactor_events": 2296,
+      "command_wakeups": 1205,
+      "read_syscalls": 800,
+      "write_syscalls": 400,
+      "read_bytes": 400,
+      "write_bytes": 400,
+      "notifications": 400
+    }
+  },
+  "output": {
+    "warmup_bytes": 33554432,
+    "bytes_per_measured_run": 134217728,
+    "integrity": "Every byte checked against its generated offset",
+    "mib_per_second": [
+      89.84688126032712,
+      90.96756082567275,
+      90.84650489364572,
+      90.13690951521835,
+      90.35298369552174
+    ]
+  },
+  "input": {
+    "bytes_per_run": 33554432,
+    "integrity": "Every byte checked by the child and the exact consumed count checked in Dart",
+    "mib_per_second": [
+      5.540496179135323,
+      5.528180504767796,
+      5.519875692399407,
+      5.502470093215283,
+      5.484989640225817
+    ],
+    "instrumented_direct_comparator_mib_per_second": [
+      5.587,
+      5.571,
+      5.511,
+      5.579
+    ],
+    "direct_comparator_note": "A separate 5.097 MiB/s first run was treated as warmup.",
+    "direct_comparator_counters": {
+      "write_syscalls_approximate": 64000,
+      "write_eagain_and_poll_approximate": 30700
+    }
+  },
+  "fairness": {
+    "sessions_1": {
+      "quiet_p50_microseconds": 153,
+      "quiet_p95_microseconds": 233,
+      "quiet_p99_microseconds": 421
+    },
+    "sessions_4": {
+      "quiet_p50_microseconds": 3824,
+      "quiet_p95_microseconds": 4667,
+      "quiet_p99_microseconds": 6317,
+      "noisy_mib_per_second": [
+        1.573016784678974,
+        1.6019736315140254,
+        1.625668988189718
+      ]
+    },
+    "sessions_16": {
+      "quiet_p50_microseconds": 30730,
+      "quiet_p95_microseconds": 57588,
+      "quiet_p99_microseconds": 64213,
+      "noisy_mib_per_second": [
+        0.34565823871227097,
+        0.34663638566746935,
+        0.3477753268794637,
+        0.3491222716967272,
+        0.350537601993297,
+        0.3534924479431556,
+        0.3527067665161887,
+        0.35423859093807203,
+        0.3560087626216788,
+        0.3564606011004028,
+        0.3579467351991486,
+        0.3596343687281733,
+        0.3603845158630452,
+        0.36151992738510735,
+        0.36290298618804845
+      ],
+      "observation": "All saturated sessions progressed; noisy throughput spread was approximately five percent. Quiet tail latency remains a production regression target rather than a starvation failure."
+    }
+  },
+  "contracts": {
+    "native_tests_passed": 15,
+    "dart_tests_passed": 11,
+    "analysis": "clean with fatal infos and warnings",
+    "clippy": "clean with -D warnings",
+    "staged_publication": true,
+    "register_or_ready_capacity_wait": true,
+    "register_or_ready_flush_wait": true,
+    "concurrent_capacity_and_flush_waiters": true,
+    "oversize_capacity_wait_fails": true,
+    "terminal_input_failure_is_permanent": true,
+    "output_rearms_only_after_credit": true,
+    "typed_port_loss": true,
+    "typed_broker_loss": true,
+    "real_broker_kill_injected": true,
+    "bounded_no_listener": true,
+    "pause_stops_native_reads": true,
+    "slow_consumer_bounded": true,
+    "cancellation_releases_credit": true,
+    "concurrent_close_callers": 20,
+    "generation_retirement": true
+  },
+  "artifact_sha256": {
+    "broker": "cd588e9bcd69bad73f344e79139b89b83c4ebd4e86d846a170aff6f712fb5c96",
+    "integrated_library": "ba6550dbc51c2b29dbda8826366958faa0ca8ce4f7d7a6c8c1c8ac159970f4b8",
+    "fixture": "8c8f1f359cc5b5faf7ce50221b96ac965659ebf180645e2d66d4a290d0ece95d",
+    "benchmark_source": "466da8e75083f50ba28a621cb71ac0a5841c8bf26f74256dd3969d49369d326a",
+    "dart_source": "485d3fe41a3ee127fcef3cbb581da0231793ae632ed391df22a58235f6f8b525",
+    "broker_client_source": "14d2d7c8cf30062bcbaeaedfa5cf084cf7506d4556c8f58429fa96ecd74a78c8",
+    "reactor_source": "fdc179a4ea5056fc1debe8fb6f2f293fa734972b40b11bc50c077bf634304b70",
+    "ffi_source": "6073ce7009e1e38fd8e192d74c357c825bb7275e60aebb3784efd26a8cc62863",
+    "dart_tests_source": "1e6aebdab4687a493d71c355590083428ead2dee86d7bb700ae5616ab8e02cff",
+    "native_tests_source": "2baa02e8e1c9bae00b186a6dfae379407749ddb6ddc4068b3e8ebb3b8a2a4d9f"
+  },
+  "corrected_verification_artifact_sha256": {
+    "integrated_library": "b9f53d209fd7bfdc9fead4ae26cf13eeafa1dabae86e8840c9d837dbb7710a7f",
+    "reactor_source": "2ea96717fb41731883af80b75c40884937a5a8c6f74ab52baba4c962498a70e9",
+    "dart_tests_source": "a1fda098beb6818058d82aff7c0647c312b1e48435df36a93e4fb0c0948d2bcc",
+    "native_tests_source": "af75411bda0d2c2f9a13632dd9a1a3576cf23002949e0ae8d468e6fd1ee0f60a"
+  },
+  "limitations": [
+    "This is selection evidence, not production package code.",
+    "The macOS slice uses poll after measured kqueue input throughput missed the direct comparator gate.",
+    "Linux and Windows runtime qualification are not represented by this macOS result.",
+    "Sixteen-session saturated quiet-tail latency remains visible and must be tracked in production."
+  ]
+}
