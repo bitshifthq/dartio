@@ -7,7 +7,10 @@ import 'dart:typed_data';
 /// fixtures use printable ASCII payloads and reserve ESC for the terminal, so
 /// filtering controls gives integrity checks an unambiguous byte stream without
 /// changing the package's raw PTY output contract.
-Stream<Uint8List> fixturePayload(Stream<Uint8List> source) async* {
+Stream<Uint8List> fixturePayload(
+  Stream<Uint8List> source, {
+  bool discardC0 = false,
+}) async* {
   var state = _VtState.ground;
   await for (final chunk in source) {
     final output = BytesBuilder(copy: false);
@@ -20,7 +23,7 @@ Stream<Uint8List> fixturePayload(Stream<Uint8List> source) async* {
             state = _VtState.csi;
           } else if (byte == 0x9d) {
             state = _VtState.string;
-          } else {
+          } else if (!discardC0 || byte >= 0x20) {
             output.addByte(byte);
           }
         case _VtState.escape:
