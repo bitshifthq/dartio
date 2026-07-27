@@ -1077,8 +1077,8 @@ Future<Map<String, Object?>> _spawnClose(int repetitions) async {
     final session = await _spawnExit();
     await fixturePayload(session.output).drain<void>();
     final exit = session.exitCode;
-    await session.close().timeout(_timeout);
     await exit.timeout(_timeout);
+    await session.close().timeout(_timeout);
     stopwatch.stop();
     samples.add(stopwatch.elapsedMicroseconds);
   }

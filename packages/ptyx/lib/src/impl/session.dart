@@ -27,6 +27,7 @@ const _supervisorRemove = 3;
 const _supervisorOwnerExit = 4;
 const _supervisorIdle = 5;
 const _supervisorArm = 6;
+const _supervisorSpawn = 7;
 const _supervisorStartupTimeout = Duration(seconds: 30);
 
 int? _lastNativeCode() {
@@ -73,6 +74,22 @@ Future<void> _superviseOwner(SendPort ready) async {
       case [_supervisorArm, final SendPort acknowledgement]:
         startupDeadline.cancel();
         acknowledgement.send(null);
+      case [
+        _supervisorSpawn,
+        final PtySpawnOptions options,
+        final String workingDirectory,
+        final SendPort reply,
+      ]:
+        try {
+          final result = _spawnNative(
+            options,
+            workingDirectory,
+            commands.sendPort,
+          );
+          reply.send([result.handle, result.nativeCode]);
+        } on Object catch (error, stackTrace) {
+          reply.send([error, stackTrace.toString()]);
+        }
     }
     if (ownerExited && pendingSpawns == 0) {
       for (final handle in handles) {
@@ -110,9 +127,32 @@ final class NativeSession implements PtySession, Finalizable {
     var handle = 0;
     var retained = false;
     try {
-      final spawnResult = await Isolate.run(
-        () => _spawnNative(options, workingDirectory, supervisor),
-      );
+      final reply = ReceivePort();
+      late final ({int handle, int? nativeCode}) spawnResult;
+      try {
+        supervisor.send([
+          _supervisorSpawn,
+          options,
+          workingDirectory,
+          reply.sendPort,
+        ]);
+        final response = await reply.first;
+        if (response case [final int handle, final int? nativeCode]) {
+          spawnResult = (handle: handle, nativeCode: nativeCode);
+        } else if (response case [
+          final Object error,
+          final String stackTrace,
+        ]) {
+          Error.throwWithStackTrace(error, StackTrace.fromString(stackTrace));
+        } else {
+          throw const PtyInfrastructureException(
+            'native spawn supervisor returned an invalid response',
+            operation: 'spawn',
+          );
+        }
+      } finally {
+        reply.close();
+      }
       handle = spawnResult.handle;
       if (handle == 0) {
         if (_isUnsupportedNativeCode(spawnResult.nativeCode)) {
