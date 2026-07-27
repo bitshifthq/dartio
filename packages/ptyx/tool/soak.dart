@@ -74,12 +74,13 @@ Future<void> main(List<String> arguments) async {
   try {
     while (DateTime.now().isBefore(deadline)) {
       bytes += await _runCycle(cycles);
-      final interactive = Uint8List(Platform.isWindows ? 1 : 1024)
+      final interactiveLength = Platform.isWindows ? 1 : 1024;
+      final interactive = Uint8List(interactiveLength)
         ..setAll(
           0,
           List<int>.generate(
-            1024,
-            (index) => 32 + ((cycles * 1024 + index) % 95),
+            interactiveLength,
+            (index) => 32 + ((cycles * interactiveLength + index) % 95),
           ),
         );
       longSession.resize(
