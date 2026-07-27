@@ -647,7 +647,7 @@ final class NativeSession implements PtySession, Finalizable {
     if (terminalFailure != null) {
       recordFailure(terminalFailure);
     }
-    if (!_infrastructureLost) {
+    if (!_infrastructureLost && !_exit.isCompleted) {
       final signal = controllerSignal(
         _handle,
         ProcessSignal.sigterm.signalNumber,

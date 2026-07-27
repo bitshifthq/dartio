@@ -479,6 +479,7 @@ void main() {
 
         expect(exitCode, 7);
         expect(await session.exitStatus, const PtyExited(7));
+        await expectLater(session.close(), completes);
       });
 
       test('preserves the complete unsigned Windows exit code', () async {
