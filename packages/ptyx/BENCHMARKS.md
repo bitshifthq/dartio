@@ -119,21 +119,26 @@ samples are in
 `direct-rust-128m-macos-x64-55da5a3.json`.
 
 That retained raw output result did **not** clear the nominal 90%
-direct-throughput gate. A follow-up same-host diagnostic found and removed a
-redundant Rust copy when a complete queued read already matched the delivery
-batch. Production then reached a 92.912 MiB/s median versus a 101.902 MiB/s
-direct median, or 91.18%, without changing the bounded output budget, credit
-contract, or interactive batching. The direct candidate still omits the
-asynchronous Dart stream contract, bounded output ownership, native-port
-delivery, and credit return, so it remains a useful ceiling rather than an
-equivalent production substitute.
+direct-throughput gate. A follow-up found and removed a redundant Rust copy
+when a complete queued read already matched the delivery batch, without
+changing the bounded output budget, credit contract, or interactive batching.
+On clean exact revision `7849136`, production reached a 95.401 MiB/s median
+versus a 113.795 MiB/s direct median, or 83.84%.
+
+The direct candidate omits the asynchronous Dart stream contract, bounded
+output ownership, native-port delivery, and credit return. Under the
+equivalence rule in `doc/architecture/candidate-gates.md`, it is a useful
+ceiling rather than an equivalent baseline: it cannot clear the gate, but its
+different boundary also cannot disqualify the production architecture. No
+equivalent direct-boundary result currently clears the qualification gap.
 
 Single-flight and larger-batch variants were profiled and rejected. Bounded
 pipelining was retained because it improved sustained output without weakening
 pause, cancellation, or memory bounds. External typed-data delivery remains
 rejected because its finalizer lifetime would outlive output credit and weaken
-the process-shutdown ownership proof. The follow-up result is diagnostic;
-release acceptance still requires a clean exact-revision evidence bundle.
+the process-shutdown ownership proof. Release acceptance still requires an
+equivalent performance comparison and a complete exact-revision evidence
+bundle.
 
 A dirty-tree AOT-fixture diagnostic exercised the complete scorecard after the
 isolate-owner, pipelining, and resource-accounting changes. Interactive p99
