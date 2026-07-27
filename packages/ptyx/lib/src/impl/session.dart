@@ -648,15 +648,9 @@ final class NativeSession implements PtySession, Finalizable {
       recordFailure(terminalFailure);
     }
     if (!_infrastructureLost && !_exit.isCompleted) {
-      final signal = controllerSignal(
-        _handle,
-        ProcessSignal.sigterm.signalNumber,
-      );
-      if (signal < 0) {
-        recordFailure(
-          const PtyCloseException('graceful termination request failed'),
-        );
-      }
+      controllerSignal(_handle, ProcessSignal.sigterm.signalNumber);
+      // Graceful delivery is advisory. The timed forced-close path below
+      // remains authoritative and reports any cleanup failure.
     }
     var nativeCloseRequested = false;
     try {

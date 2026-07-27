@@ -1006,7 +1006,18 @@ impl Broker {
                         .unwrap_or(libc::EIO);
                     return send_frame(self.control.as_raw_fd(), &response, None);
                 }
-                (CLOSE_KILLED, 0)
+                let exit = await_exit(pid)?;
+                if let Some((index, generation)) = split_session(frame.session) {
+                    let slot = &mut self.slots[index];
+                    if slot.generation == generation {
+                        slot.state = SlotState::Exited { exit, pid };
+                    }
+                }
+                let mut notification = Frame::new(EXIT);
+                notification.session = frame.session;
+                notification.code = exit.code;
+                send_frame(self.control.as_raw_fd(), &notification, None)?;
+                (CLOSE_KILLED, exit.code)
             }
             Some(SlotState::Exited { exit, pid }) => {
                 unsafe {
@@ -1164,7 +1175,10 @@ impl Broker {
             _ => return Ok(()),
         };
         let Some(exit) = observe_exit(pid)? else {
-            return Ok(());
+            // EVFILT_PROC can become observable just before waitid reports
+            // the status. The registration is one-shot, so rearm it rather
+            // than permanently losing this child's exit.
+            return self.register_process(pid, session);
         };
         if let Some((index, generation)) = split_session(session) {
             let slot = &mut self.slots[index];
@@ -1922,6 +1936,34 @@ fn observe_exit(pid: libc::pid_t) -> io::Result<Option<ExitStatus>> {
             continue;
         }
         return Err(error);
+    }
+}
+
+fn await_exit(pid: libc::pid_t) -> io::Result<ExitStatus> {
+    let mut information = MaybeUninit::<libc::siginfo_t>::zeroed();
+    loop {
+        let result = unsafe {
+            libc::waitid(
+                libc::P_PID,
+                pid as libc::id_t,
+                information.as_mut_ptr(),
+                libc::WEXITED | libc::WNOWAIT,
+            )
+        };
+        if result == 0 {
+            let information = unsafe { information.assume_init() };
+            let status = unsafe { information.si_status() };
+            let code = match information.si_code {
+                libc::CLD_EXITED => status,
+                libc::CLD_KILLED | libc::CLD_DUMPED => -status,
+                _ => continue,
+            };
+            return Ok(ExitStatus { code });
+        }
+        let error = io::Error::last_os_error();
+        if error.kind() != io::ErrorKind::Interrupted {
+            return Err(error);
+        }
     }
 }
 
