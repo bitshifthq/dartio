@@ -1,0 +1,157 @@
+{
+  "schema": 2,
+  "candidate": "direct-rust",
+  "library": "benchmark/candidates/rust/target/release/libptyx_candidate_rust.dylib",
+  "library_sha256": "daee9df6e229d304ed793b0d5ac8616e02f5573aada5575df901793156e8aca5",
+  "revision": "ba2b4654bc8cc117512135b7bee3dba5f91967c7",
+  "tree_dirty": false,
+  "command": [
+    "direct-rust",
+    "benchmark/candidates/rust/target/release/libptyx_candidate_rust.dylib",
+    "--bytes=33554432",
+    "--repetitions=5",
+    "--output=benchmark/results/direct-rust-macos-x64-ba2b465.json"
+  ],
+  "byte_count": 33554432,
+  "repetitions": 5,
+  "boundary": "Dart FFI, copied buffers, candidate registry, direct PTY, child",
+  "pid": 87497,
+  "rss_before_bytes": 185622528,
+  "interactive": [
+    {
+      "samples": 400,
+      "mean_us": 24.4975,
+      "stddev_us": 185.90907722257674,
+      "p50_us": 13,
+      "p95_us": 28,
+      "p99_us": 48,
+      "min_us": 9,
+      "max_us": 3736
+    },
+    {
+      "samples": 400,
+      "mean_us": 25.9575,
+      "stddev_us": 205.2048505609699,
+      "p50_us": 14,
+      "p95_us": 30,
+      "p99_us": 41,
+      "min_us": 12,
+      "max_us": 4123
+    },
+    {
+      "samples": 400,
+      "mean_us": 25.965,
+      "stddev_us": 211.5671141151195,
+      "p50_us": 13,
+      "p95_us": 29,
+      "p99_us": 50,
+      "min_us": 13,
+      "max_us": 4250
+    },
+    {
+      "samples": 400,
+      "mean_us": 25.495,
+      "stddev_us": 214.9286392619653,
+      "p50_us": 14,
+      "p95_us": 22,
+      "p99_us": 37,
+      "min_us": 10,
+      "max_us": 4318
+    },
+    {
+      "samples": 400,
+      "mean_us": 25.655,
+      "stddev_us": 213.72238061326192,
+      "p50_us": 14,
+      "p95_us": 24,
+      "p99_us": 31,
+      "min_us": 9,
+      "max_us": 4294
+    }
+  ],
+  "output": [
+    {
+      "bytes": 33554432,
+      "elapsed_us": 288636,
+      "mib_per_second": 110.86628140633877,
+      "exit_code": 0
+    },
+    {
+      "bytes": 33554432,
+      "elapsed_us": 289197,
+      "mib_per_second": 110.65121699049438,
+      "exit_code": 0
+    },
+    {
+      "bytes": 33554432,
+      "elapsed_us": 271754,
+      "mib_per_second": 117.75355652538693,
+      "exit_code": 0
+    },
+    {
+      "bytes": 33554432,
+      "elapsed_us": 273206,
+      "mib_per_second": 117.12773511562703,
+      "exit_code": 0
+    },
+    {
+      "bytes": 33554432,
+      "elapsed_us": 287901,
+      "mib_per_second": 111.14931868941059,
+      "exit_code": 0
+    }
+  ],
+  "input": [
+    {
+      "bytes": 33554432,
+      "elapsed_us": 6483451,
+      "mib_per_second": 4.9356430703339935,
+      "exit_code": 0
+    },
+    {
+      "bytes": 33554432,
+      "elapsed_us": 6597701,
+      "mib_per_second": 4.850174325875028,
+      "exit_code": 0
+    },
+    {
+      "bytes": 33554432,
+      "elapsed_us": 6501514,
+      "mib_per_second": 4.921930491882352,
+      "exit_code": 0
+    },
+    {
+      "bytes": 33554432,
+      "elapsed_us": 6511415,
+      "mib_per_second": 4.914446399131371,
+      "exit_code": 0
+    },
+    {
+      "bytes": 33554432,
+      "elapsed_us": 6489972,
+      "mib_per_second": 4.93068383037708,
+      "exit_code": 0
+    }
+  ],
+  "spawn_close": {
+    "samples": 50,
+    "mean_us": 16383.48,
+    "stddev_us": 365.9673887110707,
+    "p50_us": 16363,
+    "p95_us": 17025,
+    "p99_us": 17052,
+    "min_us": 15785,
+    "max_us": 17052
+  },
+  "idle_100": {
+    "requested_sessions": 100,
+    "created_sessions": 100,
+    "failure": null,
+    "spawn_elapsed_us": 759744,
+    "rss_delta_bytes": 20480,
+    "threads_before": 9,
+    "threads_after": 9
+  },
+  "stale_handle_rejected": true,
+  "rss_after_bytes": 191774720
+}
