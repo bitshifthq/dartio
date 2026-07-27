@@ -78,6 +78,15 @@ Future<void> main(List<String> arguments) async {
           stdout.add(chunk);
           await stdout.flush();
         }
+      case 'input-report':
+        await _writeReady();
+        var received = 0;
+        while (true) {
+          final chunk = await input.readApplication(maxBytes: 1);
+          if (chunk == null) break;
+          received++;
+          await _writeTerminalReport('PTYX-INPUT $received ${chunk.single}');
+        }
       case 'environment':
         stdout.write(
           '${Platform.environment[arguments[1]] ?? ''}|'

@@ -63,7 +63,10 @@ Future<void> main(List<String> arguments) async {
   var cycles = 0;
   var bytes = 0;
   var longLivedBytes = 0;
-  final longSession = await _spawnFixture('ready-cat', 0);
+  final longSession = await _spawnFixture(
+    Platform.isWindows ? 'input-report' : 'ready-cat',
+    0,
+  );
   final longOutput = StreamIterator(
     _fixturePayload(longSession).expand((chunk) => chunk),
   );
@@ -90,16 +93,24 @@ Future<void> main(List<String> arguments) async {
       );
       await _writeFixtureInput(longSession, interactive);
       await longSession.flush().timeout(_operationTimeout);
-      for (var index = 0; index < interactive.length; index++) {
-        if (!await longOutput.moveNext().timeout(_operationTimeout)) {
-          throw StateError(
-            'long-lived session ended in cycle $cycles at $index',
-          );
-        }
-        if (longOutput.current != interactive[index]) {
-          throw StateError(
-            'long-lived session mismatch in cycle $cycles at $index',
-          );
+      if (Platform.isWindows) {
+        await _expectReport(
+          longOutput,
+          'PTYX-INPUT ${cycles + 1} ${interactive.single}',
+          cycles,
+        );
+      } else {
+        for (var index = 0; index < interactive.length; index++) {
+          if (!await longOutput.moveNext().timeout(_operationTimeout)) {
+            throw StateError(
+              'long-lived session ended in cycle $cycles at $index',
+            );
+          }
+          if (longOutput.current != interactive[index]) {
+            throw StateError(
+              'long-lived session mismatch in cycle $cycles at $index',
+            );
+          }
         }
       }
       longLivedBytes += interactive.length;
@@ -193,7 +204,10 @@ Future<void> main(List<String> arguments) async {
 }
 
 Future<void> _warmLongLivedSession() async {
-  final session = await _spawnFixture('ready-cat', 0);
+  final session = await _spawnFixture(
+    Platform.isWindows ? 'input-report' : 'ready-cat',
+    0,
+  );
   final output = StreamIterator(
     _fixturePayload(session).expand((chunk) => chunk),
   );
@@ -201,9 +215,13 @@ Future<void> _warmLongLivedSession() async {
     await _expectReady(output);
     await session.write(Uint8List.fromList(const [65]));
     await session.flush();
-    if (!await output.moveNext().timeout(_operationTimeout) ||
-        output.current != 65) {
-      throw StateError('long-lived warmup mismatch');
+    if (Platform.isWindows) {
+      await _expectReport(output, 'PTYX-INPUT 1 65', -1);
+    } else {
+      if (!await output.moveNext().timeout(_operationTimeout) ||
+          output.current != 65) {
+        throw StateError('long-lived warmup mismatch');
+      }
     }
   } finally {
     await output.cancel();

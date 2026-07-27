@@ -390,16 +390,22 @@ Future<({PtySession session, _ChunkReader bytes})> _readySession(
 }
 
 Future<Map<String, Object?>> _interactiveRoundTrips(int repetitions) async {
-  final (:session, :bytes) = await _readySession('ready-cat');
+  final (:session, :bytes) = await _readySession(
+    Platform.isWindows ? 'input-report' : 'ready-cat',
+  );
   final samples = <int>[];
   try {
     for (var i = 0; i < repetitions; i++) {
       final value = _interactiveByte(i);
       final stopwatch = Stopwatch()..start();
       await session.write(Uint8List.fromList([value]));
-      final received = await bytes.readByte().timeout(_timeout);
+      final received = Platform.isWindows
+          ? await _readReport(bytes, 'PTYX-INPUT ${i + 1} $value')
+          : await bytes.readByte().timeout(_timeout);
       stopwatch.stop();
-      if (received != value) {
+      if (Platform.isWindows
+          ? received != 'PTYX-INPUT ${i + 1} $value'
+          : received != value) {
         throw StateError('interactive byte mismatch: $received != $value');
       }
       samples.add(stopwatch.elapsedMicroseconds);
@@ -912,7 +918,9 @@ Future<Map<String, Object?>> _fairness(
   final pairs = <({PtySession session, _ChunkReader bytes})>[];
   try {
     for (var i = 0; i < sessionCount; i++) {
-      pairs.add(await _readySession('ready-cat'));
+      pairs.add(
+        await _readySession(Platform.isWindows ? 'input-report' : 'ready-cat'),
+      );
     }
     final perSession = List.generate(sessionCount, (_) => <int>[]);
     for (var round = 0; round < repetitions; round++) {
@@ -922,11 +930,16 @@ Future<Map<String, Object?>> _fairness(
             final value = _interactiveByte(round + index);
             final stopwatch = Stopwatch()..start();
             await pairs[index].session.write(Uint8List.fromList([value]));
-            final received = await pairs[index].bytes.readByte().timeout(
-              _timeout,
-            );
+            final received = Platform.isWindows
+                ? await _readReport(
+                    pairs[index].bytes,
+                    'PTYX-INPUT ${round + 1} $value',
+                  )
+                : await pairs[index].bytes.readByte().timeout(_timeout);
             stopwatch.stop();
-            if (received != value) {
+            if (Platform.isWindows
+                ? received != 'PTYX-INPUT ${round + 1} $value'
+                : received != value) {
               throw StateError('fairness byte mismatch for session $index');
             }
             perSession[index].add(stopwatch.elapsedMicroseconds);
