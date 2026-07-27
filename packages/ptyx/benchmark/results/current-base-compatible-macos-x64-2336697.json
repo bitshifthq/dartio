@@ -1,0 +1,138 @@
+{
+  "schema": 1,
+  "suite": "ptyx-base-compatible-scorecard",
+  "boundary": "Dart public API through native PTY and child",
+  "revision": "23366973ce2af3c79b97c48f1b68b43dd4af7762",
+  "tree_dirty": false,
+  "platform": "macos",
+  "architecture": "x86_64",
+  "dart_version": "3.12.2 (stable) (Tue Jun 9 01:11:39 2026 -0700) on \"macos_x64\"",
+  "byte_count": 33554432,
+  "repetitions": 5,
+  "interactive": [
+    {
+      "samples": 400,
+      "mean_us": 233.9575,
+      "stddev_us": 412.1212330052287,
+      "p50_us": 203,
+      "p95_us": 280,
+      "p99_us": 383,
+      "min_us": 186,
+      "max_us": 8440
+    },
+    {
+      "samples": 400,
+      "mean_us": 226.955,
+      "stddev_us": 207.97297414568078,
+      "p50_us": 197,
+      "p95_us": 326,
+      "p99_us": 465,
+      "min_us": 171,
+      "max_us": 4210
+    },
+    {
+      "samples": 400,
+      "mean_us": 217.62,
+      "stddev_us": 246.41928820609803,
+      "p50_us": 192,
+      "p95_us": 296,
+      "p99_us": 404,
+      "min_us": 168,
+      "max_us": 5051
+    },
+    {
+      "samples": 400,
+      "mean_us": 191.95,
+      "stddev_us": 218.5962316692582,
+      "p50_us": 171,
+      "p95_us": 245,
+      "p99_us": 336,
+      "min_us": 155,
+      "max_us": 4518
+    },
+    {
+      "samples": 400,
+      "mean_us": 200.3275,
+      "stddev_us": 255.2425224051627,
+      "p50_us": 176,
+      "p95_us": 266,
+      "p99_us": 310,
+      "min_us": 155,
+      "max_us": 5252
+    }
+  ],
+  "transport_output": [
+    {
+      "bytes": 33554432,
+      "elapsed_us": 343142,
+      "mib_per_second": 93.2558532619149,
+      "exit_code": 0
+    },
+    {
+      "bytes": 33554432,
+      "elapsed_us": 322222,
+      "mib_per_second": 99.31041331752643,
+      "exit_code": 0
+    },
+    {
+      "bytes": 33554432,
+      "elapsed_us": 323031,
+      "mib_per_second": 99.06169996068489,
+      "exit_code": 0
+    },
+    {
+      "bytes": 33554432,
+      "elapsed_us": 317857,
+      "mib_per_second": 100.67420255020339,
+      "exit_code": 0
+    },
+    {
+      "bytes": 33554432,
+      "elapsed_us": 326187,
+      "mib_per_second": 98.10323526075533,
+      "exit_code": 0
+    }
+  ],
+  "transport_input": [
+    {
+      "bytes": 33554432,
+      "elapsed_us": 5641217,
+      "mib_per_second": 5.672534844874785,
+      "exit_code": 0
+    },
+    {
+      "bytes": 33554432,
+      "elapsed_us": 5650264,
+      "mib_per_second": 5.6634521855969915,
+      "exit_code": 0
+    },
+    {
+      "bytes": 33554432,
+      "elapsed_us": 5607734,
+      "mib_per_second": 5.706404761709454,
+      "exit_code": 0
+    },
+    {
+      "bytes": 33554432,
+      "elapsed_us": 5603546,
+      "mib_per_second": 5.710669636690767,
+      "exit_code": 0
+    },
+    {
+      "bytes": 33554432,
+      "elapsed_us": 5586305,
+      "mib_per_second": 5.728294462976869,
+      "exit_code": 0
+    }
+  ],
+  "spawn_close": {
+    "samples": 50,
+    "mean_us": 11214.22,
+    "stddev_us": 461.5473665833226,
+    "p50_us": 11225,
+    "p95_us": 11898,
+    "p99_us": 12744,
+    "min_us": 10291,
+    "max_us": 12744
+  }
+}
