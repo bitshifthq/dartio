@@ -6,6 +6,10 @@ pubspec.lock
 native/target/
 native/broker/target/
 native/fuzz/artifacts/
-native/fuzz/corpus/
+native/fuzz/corpus/*
+!native/fuzz/corpus/spawn_protocol/
+native/fuzz/corpus/spawn_protocol/*
+!native/fuzz/corpus/spawn_protocol/empty
+!native/fuzz/corpus/spawn_protocol/truncated_header
 native/fuzz/target/
 benchmark/candidates/rust/target/

@@ -3,6 +3,7 @@
 
 use libfuzzer_sys::fuzz_target;
 
+#[allow(dead_code)]
 #[path = "../../broker/src/main.rs"]
 mod broker;
 

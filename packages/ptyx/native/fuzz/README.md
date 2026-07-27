@@ -16,6 +16,7 @@ With `cargo-fuzz` installed, run it from `packages/ptyx`:
 cargo fuzz run spawn_protocol --fuzz-dir native/fuzz
 ```
 
-Crash artifacts and generated corpora are intentionally ignored. A minimized
-regression must be converted into a deterministic broker test before a fix is
-accepted.
+The repository retains a small seed corpus under `corpus/spawn_protocol`.
+Generated corpus growth and crash artifacts remain CI artifacts rather than
+source files. A minimized crash must be added to the seed corpus and converted
+into a deterministic broker regression test before a fix is accepted.

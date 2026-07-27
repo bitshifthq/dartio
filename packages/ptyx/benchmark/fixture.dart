@@ -19,15 +19,20 @@ Future<void> main(List<String> arguments) async {
       exit(int.parse(arguments[1]));
     case 'output':
       _writeReady();
-      await _writeBytes(int.parse(arguments[1]), 0);
-    case 'input-count':
+      await _waitForGate();
+      await _writePattern(int.parse(arguments[1]));
+    case 'input-verify':
       _writeReady();
-      final count = await _readBytes(int.parse(arguments[1]), echo: false);
-      stdout.writeln(count);
+      final result = await _readPattern(int.parse(arguments[1]), echo: false);
+      stdout.writeln(result);
       await stdout.flush();
     case 'echo-count':
       _writeReady();
-      await _readBytes(int.parse(arguments[1]), echo: true);
+      final result = await _readPattern(int.parse(arguments[1]), echo: true);
+      if (result != 'OK ${arguments[1]}') {
+        stderr.writeln(result);
+        exitCode = 65;
+      }
     case 'ready-cat':
       _writeReady();
       await for (final chunk in stdin) {
@@ -46,23 +51,43 @@ void _writeReady() {
   stdout.add(_ready);
 }
 
-Future<void> _writeBytes(int byteCount, int value) async {
-  final chunk = Uint8List(64 * 1024)..fillRange(0, 64 * 1024, value);
-  var remaining = byteCount;
-  while (remaining != 0) {
-    final count = remaining < chunk.length ? remaining : chunk.length;
+Future<void> _waitForGate() async {
+  await for (final chunk in stdin) {
+    if (chunk.isNotEmpty) return;
+  }
+  throw StateError('output gate reached EOF');
+}
+
+int _pattern(int offset) => 32 + ((offset * 31 + 17) % 95);
+
+Future<void> _writePattern(int byteCount) async {
+  final chunk = Uint8List(64 * 1024);
+  var offset = 0;
+  while (offset != byteCount) {
+    final count = byteCount - offset < chunk.length
+        ? byteCount - offset
+        : chunk.length;
+    for (var index = 0; index < count; index++) {
+      chunk[index] = _pattern(offset + index);
+    }
     stdout.add(count == chunk.length ? chunk : chunk.sublist(0, count));
-    remaining -= count;
+    offset += count;
   }
   await stdout.flush();
 }
 
-Future<int> _readBytes(int byteCount, {required bool echo}) async {
+Future<String> _readPattern(int byteCount, {required bool echo}) async {
   var received = 0;
   await for (final chunk in stdin) {
     final count = byteCount - received < chunk.length
         ? byteCount - received
         : chunk.length;
+    for (var index = 0; index < count; index++) {
+      final expected = _pattern(received + index);
+      if (chunk[index] != expected) {
+        return 'MISMATCH ${received + index} $expected ${chunk[index]}';
+      }
+    }
     if (echo) {
       stdout.add(count == chunk.length ? chunk : chunk.sublist(0, count));
       await stdout.flush();
@@ -70,5 +95,5 @@ Future<int> _readBytes(int byteCount, {required bool echo}) async {
     received += count;
     if (received == byteCount) break;
   }
-  return received;
+  return received == byteCount ? 'OK $received' : 'SHORT $received $byteCount';
 }

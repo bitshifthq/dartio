@@ -1,0 +1,89 @@
+name: ptyx-extended
+
+on:
+  workflow_dispatch:
+    inputs:
+      soak_seconds:
+        description: Per-target exact-integrity soak duration
+        required: false
+        default: "300"
+  schedule:
+    - cron: "17 3 * * 0"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ptyx-extended-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  fuzz:
+    name: broker-protocol-fuzz
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: rustup toolchain install nightly --profile minimal
+      - run: cargo install cargo-fuzz --locked
+      - name: fuzz spawn protocol with AddressSanitizer
+        working-directory: packages/ptyx/native/fuzz
+        run: cargo +nightly fuzz run spawn_protocol -- -max_total_time=300 -timeout=5
+
+  soak:
+    name: soak-${{ matrix.os }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: linux-x64
+            runner: ubuntu-latest
+          - os: linux-arm64
+            runner: ubuntu-24.04-arm
+          - os: macos-x64
+            runner: macos-15-intel
+          - os: macos-arm64
+            runner: macos-15
+          - os: windows-x64
+            runner: windows-2022
+          - os: windows-arm64
+            runner: windows-11-arm
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dart-lang/setup-dart@65eb853c7ba17dde3be364c3d2858773e7144260 # v1.7.2
+        with:
+          sdk: 3.11.0
+      - run: rustup toolchain install stable --profile minimal
+      - run: dart pub get
+      - name: run exact-integrity lifecycle soak
+        working-directory: packages/ptyx
+        env:
+          SOAK_SECONDS: ${{ inputs.soak_seconds || '1800' }}
+        run: dart run tool/soak.dart "$SOAK_SECONDS"
+
+  multi-day-soak:
+    name: multi-day-soak-linux-x64
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 1500
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dart-lang/setup-dart@65eb853c7ba17dde3be364c3d2858773e7144260 # v1.7.2
+        with:
+          sdk: 3.11.0
+      - run: rustup toolchain install stable --profile minimal
+      - run: dart pub get
+      - name: retain a 24-hour long-lived and repeated-cycle session result
+        working-directory: packages/ptyx
+        run: dart run tool/soak.dart 86400 | tee soak-linux-x64.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ptyx-soak-linux-x64-${{ github.sha }}
+          path: packages/ptyx/soak-linux-x64.json
+          if-no-files-found: error
+          retention-days: 90

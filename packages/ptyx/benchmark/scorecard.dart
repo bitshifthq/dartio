@@ -4,6 +4,7 @@ import 'dart:io';
 import 'dart:math';
 import 'dart:typed_data';
 
+import 'package:crypto/crypto.dart';
 import 'package:ptyx/ptyx.dart';
 
 const _size = PtySize(rows: 24, columns: 80);
@@ -19,12 +20,36 @@ Future<void> main(List<String> arguments) async {
       .singleOrNull;
   final repetitions = _integerOption(arguments, 'repetitions', 5);
   final warmups = _integerOption(arguments, 'warmups', 1);
+  final allowDirty = arguments.contains('--allow-dirty');
   if (repetitions <= 0 || warmups < 0) {
     throw ArgumentError('repetitions must be positive and warmups nonnegative');
   }
+  final revision = await _commandOutput('git', const ['rev-parse', 'HEAD']);
+  final status = await _commandOutput('git', const [
+    'status',
+    '--porcelain=v1',
+    '--untracked-files=all',
+  ]);
+  final dirty = status?.isNotEmpty ?? false;
+  if (outputPath != null && dirty && !allowDirty) {
+    throw StateError(
+      'refusing to retain a benchmark from a dirty tree; commit the exact '
+      'artifact or pass --allow-dirty to retain a diagnostic result',
+    );
+  }
   final results = <String, Object?>{
-    'schema': 3,
-    'suite': 'ptyx-production-scorecard',
+    'schema': 4,
+    'suite': 'ptyx-diagnostic-scorecard',
+    'acceptance_result': false,
+    'missing_acceptance_workloads': const [
+      'complete process-tree CPU and memory',
+      'descriptor and handle return',
+      'active noisy-neighbor fairness',
+      'resize and mode overhead',
+      'forced close and descendant cleanup timing',
+      'multi-gigabyte exact integrity',
+      'base, direct-native, and competitor comparisons',
+    ],
     'boundary':
         'Dart public API through native PTY and child; release native asset',
     'platform': Platform.operatingSystem,
@@ -34,9 +59,16 @@ Future<void> main(List<String> arguments) async {
     'rustc_version': await _commandOutput('rustc', const ['--version']),
     'cargo_version': await _commandOutput('cargo', const ['--version']),
     'processors': Platform.numberOfProcessors,
-    'revision':
-        Platform.environment['PTYX_BENCHMARK_REVISION'] ??
-        await _commandOutput('git', const ['rev-parse', 'HEAD']),
+    'revision': Platform.environment['PTYX_BENCHMARK_REVISION'] ?? revision,
+    'tree_dirty': dirty,
+    'working_tree_sha256': dirty
+        ? sha256.convert(utf8.encode(status ?? '')).toString()
+        : null,
+    'command': arguments,
+    'fixture_sha256': await _fileHash(
+      Platform.script.resolve('fixture.dart').toFilePath(),
+    ),
+    'scorecard_sha256': await _fileHash(Platform.script.toFilePath()),
     'warmups': warmups,
     'repetitions': repetitions,
     'pid': pid,
@@ -148,27 +180,6 @@ Future<PtySession> _spawnFixture(
   String operation, [
   List<String> arguments = const [],
 ]) {
-  if (!Platform.isWindows) {
-    final script = switch (operation) {
-      'output' =>
-        'stty raw -echo; printf READY; '
-            'head -c ${arguments.single} /dev/zero',
-      'input-count' =>
-        'stty raw -echo; printf READY; '
-            'head -c ${arguments.single} | wc -c',
-      'echo-count' =>
-        'stty raw -echo; printf READY; head -c ${arguments.single}',
-      'ready-cat' => 'stty raw -echo; printf READY; cat',
-      _ => throw ArgumentError.value(operation, 'operation'),
-    };
-    return PtySession.spawn(
-      PtySpawnOptions(
-        executable: '/bin/sh',
-        arguments: ['-c', script],
-        initialSize: _size,
-      ),
-    );
-  }
   return PtySession.spawn(
     PtySpawnOptions(
       executable: Platform.resolvedExecutable,
@@ -251,13 +262,21 @@ Future<Map<String, Object?>> _outputThroughput(int byteCount) async {
   var received = 0;
   final stopwatch = Stopwatch()..start();
   try {
+    await session.write(Uint8List.fromList(const [1]));
+    await session.flush();
     while (received < byteCount) {
       final chunk = await bytes.readChunk().timeout(_timeout);
       if (chunk == null) {
         throw StateError('output child reached EOF at $received bytes');
       }
-      if (chunk.any((value) => value != 0)) {
-        throw StateError('output byte mismatch in chunk at $received');
+      for (var index = 0; index < chunk.length; index++) {
+        final expected = _pattern(received + index);
+        if (chunk[index] != expected) {
+          throw StateError(
+            'output mismatch at ${received + index}: '
+            '${chunk[index]} != $expected',
+          );
+        }
       }
       received += chunk.length;
     }
@@ -277,13 +296,16 @@ Future<Map<String, Object?>> _outputThroughput(int byteCount) async {
 }
 
 Future<Map<String, Object?>> _inputThroughput(int byteCount) async {
-  final (:session, :bytes) = await _readySession('input-count', ['$byteCount']);
-  final chunk = Uint8List(64 * 1024)..fillRange(0, 64 * 1024, 120);
+  final (:session, :bytes) = await _readySession('input-verify', [
+    '$byteCount',
+  ]);
+  final chunk = Uint8List(64 * 1024);
   final stopwatch = Stopwatch()..start();
   try {
     var sent = 0;
     while (sent < byteCount) {
       final count = min(chunk.length, byteCount - sent);
+      _fillPattern(chunk, sent, count);
       await session.write(
         count == chunk.length ? chunk : chunk.sublist(0, count),
       );
@@ -303,16 +325,16 @@ Future<Map<String, Object?>> _inputThroughput(int byteCount) async {
       }
     }
     stopwatch.stop();
-    final received = int.parse(result.toString().trim());
+    final report = result.toString().trim();
     final exitCode = await session.exitCode.timeout(_timeout);
-    if (received != byteCount) {
-      throw StateError('input count mismatch: $received != $byteCount');
+    if (report != 'OK $byteCount') {
+      throw StateError('input integrity failure: $report');
     }
     return {
-      'bytes': received,
+      'bytes': byteCount,
       'elapsed_us': stopwatch.elapsedMicroseconds,
       'mib_per_second':
-          received / (1024 * 1024) / (stopwatch.elapsedMicroseconds / 1e6),
+          byteCount / (1024 * 1024) / (stopwatch.elapsedMicroseconds / 1e6),
       'exit_code': exitCode,
     };
   } finally {
@@ -323,7 +345,7 @@ Future<Map<String, Object?>> _inputThroughput(int byteCount) async {
 
 Future<Map<String, Object?>> _bidirectionalThroughput(int byteCount) async {
   final (:session, :bytes) = await _readySession('echo-count', ['$byteCount']);
-  final chunk = Uint8List(64 * 1024)..fillRange(0, 64 * 1024, 120);
+  final chunk = Uint8List(64 * 1024);
   var sent = 0;
   var received = 0;
   final stopwatch = Stopwatch()..start();
@@ -331,6 +353,7 @@ Future<Map<String, Object?>> _bidirectionalThroughput(int byteCount) async {
     final sender = Future<void>(() async {
       while (sent < byteCount) {
         final count = min(chunk.length, byteCount - sent);
+        _fillPattern(chunk, sent, count);
         await session.write(
           count == chunk.length ? chunk : chunk.sublist(0, count),
         );
@@ -344,8 +367,14 @@ Future<Map<String, Object?>> _bidirectionalThroughput(int byteCount) async {
         if (next == null) {
           throw StateError('bidirectional child reached EOF at $received');
         }
-        if (next.any((value) => value != 120)) {
-          throw StateError('bidirectional byte mismatch at $received');
+        for (var index = 0; index < next.length; index++) {
+          final expected = _pattern(received + index);
+          if (next[index] != expected) {
+            throw StateError(
+              'bidirectional mismatch at ${received + index}: '
+              '${next[index]} != $expected',
+            );
+          }
         }
         received += next.length;
       }
@@ -576,6 +605,18 @@ Future<String?> _commandOutput(
     return output.isEmpty ? null : output;
   } on ProcessException {
     return null;
+  }
+}
+
+Future<String> _fileHash(String path) async {
+  return sha256.convert(await File(path).readAsBytes()).toString();
+}
+
+int _pattern(int offset) => 32 + ((offset * 31 + 17) % 95);
+
+void _fillPattern(Uint8List bytes, int offset, int count) {
+  for (var index = 0; index < count; index++) {
+    bytes[index] = _pattern(offset + index);
   }
 }
 
