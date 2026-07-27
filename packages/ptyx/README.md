@@ -1,7 +1,7 @@
 # ptyx
 
 `ptyx` starts local processes attached to a native pseudo-terminal and exposes
-their terminal input and output as exact bytes. It is intended for terminal
+its terminal input and output as bytes. It is intended for terminal
 applications, IDEs, TTY-aware automation, and services that own many concurrent
 terminal sessions.
 
@@ -49,7 +49,10 @@ Future<void> main() async {
 ```
 
 Output is a single-subscription byte stream containing the child's combined
-terminal output. Chunk boundaries have no semantic meaning.
+terminal output. Chunk boundaries have no semantic meaning. On Windows, ConPTY
+produces UTF-8 text and virtual-terminal presentation updates rather than a
+history of the child's write calls; `ptyx` preserves the bytes and order it
+receives from that backend.
 
 ## Backpressure
 

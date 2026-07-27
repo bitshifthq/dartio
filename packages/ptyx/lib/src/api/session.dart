@@ -87,11 +87,15 @@ abstract interface class PtySession {
   /// [PtyException] if mode polling fails.
   Stream<PtyTermMode> get modeChanges;
 
-  /// Raw bytes produced by the child process through the pseudo terminal.
+  /// Raw bytes received from the platform pseudo-terminal backend.
   ///
   /// A pseudo terminal has one output byte stream rather than separate standard
   /// output and standard error streams. This stream closes when the terminal
   /// reaches EOF or the session closes.
+  ///
+  /// On Windows, ConPTY emits UTF-8 text and virtual-terminal presentation
+  /// updates. Those bytes need not reproduce the attached application's
+  /// original write-call boundaries or intermediate screen states.
   ///
   /// The stream is single-subscription. Output-heavy children may block while
   /// this stream has no listener or while its subscription is paused. Cancel

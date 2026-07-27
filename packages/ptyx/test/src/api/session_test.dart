@@ -450,56 +450,43 @@ void main() {
         expect(utf8.decode(bytes), 'ping');
       });
 
-      test('echoes high-volume input', () async {
+      test('preserves high-volume input', () async {
         const byteCount = 512 * 1024;
-        final session = await spawnFixture('ready-cat');
-        final data = Uint8List(byteCount)..fillRange(0, byteCount, 120);
-        final ready = Completer<void>();
-        final echoed = Completer<int>();
-        final readyBytes = <int>[];
-        var received = 0;
-        var outputProgress = Completer<void>();
-        late final StreamSubscription<Uint8List> subscription;
-        subscription = fixtureOutput(session).listen((chunk) {
-          if (!ready.isCompleted) {
-            readyBytes.addAll(chunk);
-            if (utf8
-                .decode(readyBytes, allowMalformed: true)
-                .contains('READY')) {
-              ready.complete();
-            }
-            return;
-          }
-          received += chunk.length;
-          if (!outputProgress.isCompleted) outputProgress.complete();
-          if (received >= data.length && !echoed.isCompleted) {
-            echoed.complete(received);
-          }
-        });
-        addTearDown(subscription.cancel);
-
-        await ready.future.timeout(shortTimeout);
-        for (
-          var offset = 0;
-          offset < data.length;
-          offset += fixturePagePayloadBytes
-        ) {
-          final end = min(offset + fixturePagePayloadBytes, data.length);
-          await session.write(Uint8List.sublistView(data, offset, end));
-          while (received < end) {
-            if (outputProgress.isCompleted) {
-              outputProgress = Completer<void>();
-            }
-            if (received < end) {
-              await outputProgress.future.timeout(shortTimeout);
-            }
-          }
-        }
-        final echoedBytes = await echoed.future.timeout(
-          const Duration(minutes: 1),
+        final session = await spawnFixture(
+          'input-verify',
+          arguments: const ['$byteCount'],
         );
+        final output = StreamIterator(
+          fixtureOutput(session).expand((chunk) => chunk),
+        );
+        addTearDown(output.cancel);
+        for (final expected in utf8.encode('READY')) {
+          expect(await output.moveNext().timeout(shortTimeout), isTrue);
+          expect(output.current, expected);
+        }
+        final chunk = Uint8List(64 * 1024);
+        var sent = 0;
+        while (sent < byteCount) {
+          final count = min(chunk.length, byteCount - sent);
+          for (var index = 0; index < count; index++) {
+            chunk[index] = 32 + (((sent + index) * 31 + 17) % 95);
+          }
+          await session.write(
+            count == chunk.length
+                ? chunk
+                : Uint8List.sublistView(chunk, 0, count),
+          );
+          sent += count;
+        }
+        await session.flush();
 
-        expect(echoedBytes, greaterThanOrEqualTo(byteCount));
+        final report = <int>[];
+        while (await output.moveNext().timeout(shortTimeout)) {
+          if (output.current == 10) break;
+          if (output.current != 13) report.add(output.current);
+        }
+        expect(utf8.decode(report), 'OK $byteCount');
+        expect(await session.exitCode, 0);
       }, timeout: const Timeout(Duration(minutes: 2)));
 
       test('throws PtyClosedException after close', () async {
