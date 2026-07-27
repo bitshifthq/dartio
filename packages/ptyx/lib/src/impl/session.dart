@@ -964,7 +964,6 @@ final class _ControllerRuntime {
       _scheduleIdleRelease();
     }
     _forgetSupervisedHandle(handle);
-    _stopSupervisorIfIdle();
   }
 
   void _scheduleIdleRelease() {
@@ -975,6 +974,7 @@ final class _ControllerRuntime {
       if (_sessions.isEmpty && _pendingSpawns == 0) {
         _output.keepIsolateAlive = false;
         _events.keepIsolateAlive = false;
+        _stopSupervisorIfIdle();
       }
     });
   }

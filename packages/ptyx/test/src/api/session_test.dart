@@ -610,7 +610,18 @@ void main() {
         final line = await nextLine(lines);
 
         expect(line, '42 120');
-      });
+      }, testOn: 'posix');
+
+      test('reports the updated ConPTY cell size', () async {
+        final session = await spawnFixture(
+          'idle',
+          initialSize: const PtySize(rows: 18, columns: 70),
+        );
+
+        session.resize(const PtySize(rows: 42, columns: 120));
+
+        expect(session.size, const PtySize(rows: 42, columns: 120));
+      }, testOn: 'windows');
     });
 
     group('kill', () {

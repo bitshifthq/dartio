@@ -1,10 +1,7 @@
 import 'dart:async';
 import 'dart:collection';
-import 'dart:ffi';
 import 'dart:io';
 import 'dart:typed_data';
-
-import 'package:ffi/ffi.dart';
 
 const _ready = [82, 69, 65, 68, 89];
 const _outputFlushBytes = 1024 * 1024;
@@ -88,15 +85,9 @@ Future<void> main(List<String> arguments) async {
         );
         await stdout.flush();
       case 'size':
-        if (Platform.isWindows) _enableWindowInput();
-        final initialSize = _terminalSize();
-        await _writeSize(initialSize);
+        await _writeSize((stdout.terminalLines, stdout.terminalColumns));
         await input.readApplication(maxBytes: 1);
-        await _writeSize(
-          Platform.isWindows
-              ? await _waitForTerminalSizeChange(initialSize)
-              : _terminalSize(),
-        );
+        await _writeSize((stdout.terminalLines, stdout.terminalColumns));
       case 'idle':
         while (await input.readApplication() != null) {}
       default:
@@ -196,76 +187,6 @@ Future<void> _writeSize((int, int) size) async {
   await stdout.flush();
 }
 
-Future<(int, int)> _waitForTerminalSizeChange((int, int) initial) async {
-  final deadline = DateTime.now().add(const Duration(seconds: 5));
-  var current = _terminalSize();
-  while (current == initial && DateTime.now().isBefore(deadline)) {
-    await Future<void>.delayed(const Duration(milliseconds: 1));
-    current = _terminalSize();
-  }
-  return current;
-}
-
-void _enableWindowInput() {
-  final kernel32 = DynamicLibrary.open('kernel32.dll');
-  final getStdHandle = kernel32
-      .lookupFunction<
-        Pointer<Void> Function(Uint32),
-        Pointer<Void> Function(int)
-      >('GetStdHandle');
-  final getConsoleMode = kernel32
-      .lookupFunction<
-        Int32 Function(Pointer<Void>, Pointer<Uint32>),
-        int Function(Pointer<Void>, Pointer<Uint32>)
-      >('GetConsoleMode');
-  final setConsoleMode = kernel32
-      .lookupFunction<
-        Int32 Function(Pointer<Void>, Uint32),
-        int Function(Pointer<Void>, int)
-      >('SetConsoleMode');
-  final mode = calloc<Uint32>();
-  try {
-    final handle = getStdHandle(_stdInputHandle);
-    if (getConsoleMode(handle, mode) == 0 ||
-        setConsoleMode(handle, mode.value | _enableWindowInputMode) == 0) {
-      throw StateError('enabling Windows terminal resize events failed');
-    }
-  } finally {
-    calloc.free(mode);
-  }
-}
-
-(int, int) _terminalSize() {
-  if (!Platform.isWindows) {
-    return (stdout.terminalLines, stdout.terminalColumns);
-  }
-  // Dart 3.11 caches Stdout's Windows terminal dimensions. Querying the
-  // screen buffer directly makes this resize fixture observe ConPTY's current
-  // internal buffer instead of Dart's cached initial viewport.
-  final kernel32 = DynamicLibrary.open('kernel32.dll');
-  final getStdHandle = kernel32
-      .lookupFunction<
-        Pointer<Void> Function(Uint32),
-        Pointer<Void> Function(int)
-      >('GetStdHandle');
-  final getConsoleScreenBufferInfo = kernel32
-      .lookupFunction<
-        Int32 Function(Pointer<Void>, Pointer<_ConsoleScreenBufferInfo>),
-        int Function(Pointer<Void>, Pointer<_ConsoleScreenBufferInfo>)
-      >('GetConsoleScreenBufferInfo');
-  final information = calloc<_ConsoleScreenBufferInfo>();
-  try {
-    final handle = getStdHandle(_stdOutputHandle);
-    if (getConsoleScreenBufferInfo(handle, information) == 0) {
-      throw StateError('GetConsoleScreenBufferInfo failed');
-    }
-    final size = information.ref.size;
-    return (size.y, size.x);
-  } finally {
-    calloc.free(information);
-  }
-}
-
 final class _FixtureInput {
   final _chunks = StreamIterator<List<int>>(stdin);
   final _application = ListQueue<int>();
@@ -293,41 +214,4 @@ final class _FixtureInput {
     }
     _application.addAll(_chunks.current);
   }
-}
-
-const _stdInputHandle = 0xfffffff6;
-const _stdOutputHandle = 0xfffffff5;
-const _enableWindowInputMode = 0x0008;
-
-final class _Coord extends Struct {
-  @Int16()
-  external int x;
-
-  @Int16()
-  external int y;
-}
-
-final class _SmallRect extends Struct {
-  @Int16()
-  external int left;
-
-  @Int16()
-  external int top;
-
-  @Int16()
-  external int right;
-
-  @Int16()
-  external int bottom;
-}
-
-final class _ConsoleScreenBufferInfo extends Struct {
-  external _Coord size;
-  external _Coord cursorPosition;
-
-  @Uint16()
-  external int attributes;
-
-  external _SmallRect window;
-  external _Coord maximumWindowSize;
 }
