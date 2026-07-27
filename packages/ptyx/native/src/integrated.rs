@@ -26,6 +26,7 @@ pub enum Notice {
     Capacity { handle: u64, waiter: u64 },
     Flush { handle: u64, waiter: u64 },
     WaitFailed { handle: u64, waiter: u64 },
+    InputFailed(u64),
     BrokerLost(u64),
     OutputDone(u64),
     Exit(u64),
@@ -302,6 +303,11 @@ pub(crate) enum Command {
         handle: u64,
         reply: Sender<Option<Vec<u8>>>,
     },
+    Signal {
+        handle: u64,
+        signal: i32,
+        reply: Sender<Option<bool>>,
+    },
     OutputTotal {
         handle: u64,
         reply: Sender<Option<usize>>,
@@ -399,10 +405,6 @@ impl IntegratedRuntime {
             thread: Mutex::new(Some(thread)),
             broker,
         }
-    }
-
-    pub fn notifications(&self) -> &Receiver<Notice> {
-        self.notices.as_ref().unwrap()
     }
 
     pub fn take_notifications(&mut self) -> Receiver<Notice> {
@@ -543,6 +545,14 @@ impl IntegratedRuntime {
 
     pub fn tty_name(&self, handle: u64) -> Option<Vec<u8>> {
         self.request(|reply| Command::TtyName { handle, reply })
+    }
+
+    pub fn signal(&self, handle: u64, signal: i32) -> Option<bool> {
+        self.request(|reply| Command::Signal {
+            handle,
+            signal,
+            reply,
+        })
     }
 
     pub fn output_total(&self, handle: u64) -> Option<usize> {
@@ -891,6 +901,20 @@ fn process_commands(
                 let name = sessions.get(handle).and_then(session_tty_name);
                 let _ = reply.send(name);
             }
+            Command::Signal {
+                handle,
+                signal,
+                reply,
+            } => {
+                let result = sessions.get(handle).and_then(|session| {
+                    if session.exit_status.is_some() {
+                        Some(false)
+                    } else {
+                        broker_client.signal(session.broker_session, signal).ok()
+                    }
+                });
+                let _ = reply.send(result);
+            }
             Command::OutputTotal { handle, reply } => {
                 let _ = reply.send(sessions.get(handle).map(Session::output_total));
             }
@@ -1155,6 +1179,12 @@ fn fail_input_waiters(
     notices: &SyncSender<Notice>,
     counters: &mut RuntimeCounters,
 ) {
+    let first_failure = session.input_failed_from.is_none();
+    let accepted_input_pending = !session.input.is_empty()
+        || session
+            .flush_waiters
+            .values()
+            .any(|sequence| *sequence > session.flushed_sequence);
     session.input_failed_from.get_or_insert(
         session
             .input
@@ -1173,6 +1203,9 @@ fn fail_input_waiters(
         .collect();
     for waiter in waiters {
         send_notice(notices, Notice::WaitFailed { handle, waiter }, counters);
+    }
+    if first_failure && accepted_input_pending {
+        send_notice(notices, Notice::InputFailed(handle), counters);
     }
 }
 
@@ -1435,7 +1468,7 @@ mod tests {
     #[test]
     fn notifies_every_ready_concurrent_waiter() {
         let mut session = session(4);
-        session.input_bytes = 4;
+        assert!(session.try_write(vec![1, 2, 3, 4]).is_ok());
         assert_eq!(session.wait_capacity(1, 11), WaitResult::Armed);
         assert_eq!(session.wait_capacity(1, 12), WaitResult::Armed);
         assert_eq!(session.wait_flush(1, 21), WaitResult::Armed);
@@ -1488,15 +1521,18 @@ mod tests {
 
         fail_input_waiters(7, &mut session, &sender, &mut counters);
 
-        let mut waiters: Vec<_> = receiver
-            .try_iter()
-            .map(|notice| match notice {
-                Notice::WaitFailed { handle: 7, waiter } => waiter,
+        let mut input_failed = false;
+        let mut waiters = Vec::new();
+        for notice in receiver.try_iter() {
+            match notice {
+                Notice::WaitFailed { handle: 7, waiter } => waiters.push(waiter),
+                Notice::InputFailed(7) => input_failed = true,
                 other => panic!("unexpected notice: {other:?}"),
-            })
-            .collect();
+            }
+        }
         waiters.sort_unstable();
         assert_eq!(waiters, vec![11, 12, 21, 22]);
+        assert!(input_failed);
         assert!(session.try_write(vec![1]).is_err());
     }
 }

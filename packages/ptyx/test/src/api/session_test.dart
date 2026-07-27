@@ -515,6 +515,20 @@ void main() {
 
         expect(killed, isTrue);
       });
+
+      test('preserves the requested Unix signal', () async {
+        final session = await spawnScript(
+          'trap "exit 42" INT; printf ready; while :; do sleep 1; done',
+        );
+
+        await session.output.first.timeout(shortTimeout);
+        final killed = session.kill(ProcessSignal.sigint);
+        final exitCode = await session.exitCode.timeout(shortTimeout);
+
+        expect(killed, isTrue);
+        expect(exitCode, 42);
+        expect(session.kill(), isFalse);
+      }, testOn: 'posix');
     });
 
     group('close', () {

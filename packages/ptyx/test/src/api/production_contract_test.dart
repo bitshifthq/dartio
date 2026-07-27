@@ -2,6 +2,7 @@
 library;
 
 import 'dart:async';
+import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:ptyx/ptyx.dart';
@@ -58,6 +59,28 @@ void main() {
       session.waitForInputCapacity(4097),
       throwsA(isA<PtyInputException>()),
     );
+  });
+
+  test('accepted input reports a typed failure when the child exits', () async {
+    const capacity = 1024 * 1024;
+    final session = await PtySession.spawn(
+      shell(
+        r'stty raw -echo; printf ready; kill -STOP $$; sleep 10',
+        inputCapacity: capacity,
+      ),
+    );
+    addTearDown(session.close);
+    await session.output.first;
+    final inputDone = expectLater(
+      session.inputDone,
+      throwsA(isA<PtyInputException>()),
+    );
+
+    expect(session.tryWrite(Uint8List(capacity)), isTrue);
+    expect(session.kill(ProcessSignal.sigkill), isTrue);
+
+    await session.exitCode;
+    await inputDone;
   });
 
   test('capabilities describe platform-specific behavior', () async {

@@ -13,6 +13,7 @@ const MAGIC: u32 = 0x4258_5450;
 const VERSION: u16 = 1;
 const HEADER: usize = 32;
 const MAX_PAYLOAD: usize = 64 * 1024;
+const FRAME_TIMEOUT: Duration = Duration::from_secs(5);
 const SPAWN_V2: u32 = 0x5854_5950;
 const CONTROL_FD: RawFd = 3;
 const POSIX_SPAWN_CLOEXEC_DEFAULT: libc::c_int = 0x4000;
@@ -30,6 +31,8 @@ const STATS: u16 = 10;
 const STATS_RESULT: u16 = 11;
 const SHUTDOWN: u16 = 12;
 const SHUTDOWN_RESULT: u16 = 13;
+const SIGNAL: u16 = 14;
+const SIGNAL_RESULT: u16 = 15;
 
 const ERROR_PROTOCOL: u32 = 1;
 const ERROR_SPAWN: u32 = 2;
@@ -38,6 +41,17 @@ const ERROR_POST_EXEC: u32 = 3;
 const CLOSE_KILLED: u32 = 1;
 const CLOSE_ALREADY_EXITED: u32 = 2;
 const CLOSE_STALE: u32 = 3;
+const MAX_SIGNAL: i32 = 31;
+
+fn hello_payload() -> Vec<u8> {
+    format!(
+        "{}|{}|{}",
+        env!("CARGO_PKG_VERSION"),
+        std::env::consts::ARCH,
+        1
+    )
+    .into_bytes()
+}
 
 #[derive(Clone, Debug)]
 struct Frame {
@@ -116,162 +130,207 @@ impl Frame {
 
 fn send_frame(fd: RawFd, frame: &Frame, passed_fd: Option<RawFd>) -> io::Result<()> {
     let bytes = frame.encode()?;
-    let mut iovec = libc::iovec {
-        iov_base: bytes.as_ptr().cast_mut().cast(),
-        iov_len: bytes.len(),
-    };
-    let mut control = [0_usize; 8];
-    let mut message: libc::msghdr = unsafe { std::mem::zeroed() };
-    message.msg_iov = &mut iovec;
-    message.msg_iovlen = 1;
-    if let Some(passed_fd) = passed_fd {
-        message.msg_control = control.as_mut_ptr().cast();
-        message.msg_controllen = unsafe { libc::CMSG_SPACE(size_of::<RawFd>() as _) };
-        let header = unsafe { libc::CMSG_FIRSTHDR(&message) };
-        if header.is_null() {
-            return Err(io::Error::other("missing ancillary header"));
-        }
-        unsafe {
-            (*header).cmsg_level = libc::SOL_SOCKET;
-            (*header).cmsg_type = libc::SCM_RIGHTS;
-            (*header).cmsg_len = libc::CMSG_LEN(size_of::<RawFd>() as _);
-            ptr::copy_nonoverlapping(
-                (&passed_fd as *const RawFd).cast::<u8>(),
-                libc::CMSG_DATA(header),
-                size_of::<RawFd>(),
-            );
-        }
-    }
-    let sent = loop {
-        let sent = unsafe { libc::sendmsg(fd, &message, libc::MSG_NOSIGNAL) };
-        if sent < 0 && io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
-            continue;
-        }
-        if sent <= 0 {
-            return Err(if sent < 0 {
-                io::Error::last_os_error()
-            } else {
-                io::Error::new(io::ErrorKind::WriteZero, "control write returned zero")
-            });
-        }
-        break sent as usize;
-    };
-    let mut offset = sent;
+    let deadline = Instant::now() + FRAME_TIMEOUT;
+    let mut offset = 0;
+    let mut descriptor_pending = passed_fd;
     while offset < bytes.len() {
-        let wrote = unsafe {
-            libc::send(
-                fd,
-                bytes[offset..].as_ptr().cast(),
-                bytes.len() - offset,
-                libc::MSG_NOSIGNAL,
-            )
-        };
-        if wrote > 0 {
-            offset += wrote as usize;
-            continue;
-        }
-        if wrote < 0 && io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
-            continue;
-        }
-        return Err(if wrote < 0 {
-            io::Error::last_os_error()
+        let sent = if let Some(passed_fd) = descriptor_pending {
+            let mut iovec = libc::iovec {
+                iov_base: bytes[offset..].as_ptr().cast_mut().cast(),
+                iov_len: bytes.len() - offset,
+            };
+            let mut control = [0_usize; 8];
+            let mut message: libc::msghdr = unsafe { std::mem::zeroed() };
+            message.msg_iov = &mut iovec;
+            message.msg_iovlen = 1;
+            message.msg_control = control.as_mut_ptr().cast();
+            message.msg_controllen = unsafe { libc::CMSG_SPACE(size_of::<RawFd>() as _) };
+            let header = unsafe { libc::CMSG_FIRSTHDR(&message) };
+            if header.is_null() {
+                return Err(io::Error::other("missing ancillary header"));
+            }
+            unsafe {
+                (*header).cmsg_level = libc::SOL_SOCKET;
+                (*header).cmsg_type = libc::SCM_RIGHTS;
+                (*header).cmsg_len = libc::CMSG_LEN(size_of::<RawFd>() as _);
+                ptr::copy_nonoverlapping(
+                    (&passed_fd as *const RawFd).cast::<u8>(),
+                    libc::CMSG_DATA(header),
+                    size_of::<RawFd>(),
+                );
+                libc::sendmsg(fd, &message, libc::MSG_DONTWAIT | libc::MSG_NOSIGNAL)
+            }
         } else {
-            io::Error::new(io::ErrorKind::WriteZero, "control write returned zero")
-        });
+            unsafe {
+                libc::send(
+                    fd,
+                    bytes[offset..].as_ptr().cast(),
+                    bytes.len() - offset,
+                    libc::MSG_DONTWAIT | libc::MSG_NOSIGNAL,
+                )
+            }
+        };
+        if sent > 0 {
+            offset += sent as usize;
+            descriptor_pending = None;
+            continue;
+        }
+        if sent < 0 {
+            let error = io::Error::last_os_error();
+            if error.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            if error.kind() == io::ErrorKind::WouldBlock {
+                wait_for_io(fd, libc::POLLOUT, deadline)?;
+                continue;
+            }
+            return Err(error);
+        }
+        return Err(io::Error::new(
+            io::ErrorKind::WriteZero,
+            "control write returned zero",
+        ));
     }
     Ok(())
 }
 
 fn receive_frame(fd: RawFd) -> io::Result<Option<(Frame, Option<OwnedFd>)>> {
-    let mut header_bytes = [0_u8; HEADER];
-    let mut iovec = libc::iovec {
-        iov_base: header_bytes.as_mut_ptr().cast(),
-        iov_len: header_bytes.len(),
-    };
-    let mut control = [0_usize; 8];
-    let mut message: libc::msghdr = unsafe { std::mem::zeroed() };
-    message.msg_iov = &mut iovec;
-    message.msg_iovlen = 1;
-    message.msg_control = control.as_mut_ptr().cast();
-    message.msg_controllen = size_of_val(&control) as _;
-    loop {
-        let received = unsafe { libc::recvmsg(fd, &mut message, libc::MSG_WAITALL) };
+    let deadline = Instant::now() + FRAME_TIMEOUT;
+    let mut bytes = vec![0_u8; HEADER];
+    let mut offset = 0;
+    let mut received_fds = Vec::new();
+    while offset < bytes.len() {
+        let mut iovec = libc::iovec {
+            iov_base: bytes[offset..].as_mut_ptr().cast(),
+            iov_len: bytes.len() - offset,
+        };
+        let mut control = [0_usize; 8];
+        let mut message: libc::msghdr = unsafe { std::mem::zeroed() };
+        message.msg_iov = &mut iovec;
+        message.msg_iovlen = 1;
+        message.msg_control = control.as_mut_ptr().cast();
+        message.msg_controllen = size_of_val(&control) as _;
+        let received = unsafe { libc::recvmsg(fd, &mut message, libc::MSG_DONTWAIT) };
         if received == 0 {
-            return Ok(None);
+            return if offset == 0 {
+                Ok(None)
+            } else {
+                Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "partial protocol frame",
+                ))
+            };
         }
         if received < 0 {
             let error = io::Error::last_os_error();
             if error.kind() == io::ErrorKind::Interrupted {
                 continue;
             }
+            if error.kind() == io::ErrorKind::WouldBlock {
+                wait_for_io(fd, libc::POLLIN, deadline)?;
+                continue;
+            }
             return Err(error);
         }
-        if message.msg_flags & libc::MSG_CTRUNC != 0 {
+        collect_received_fds(&message, &mut received_fds)?;
+        offset += received as usize;
+        if offset == HEADER {
+            let length = u32::from_ne_bytes(bytes[8..12].try_into().unwrap()) as usize;
+            if length > MAX_PAYLOAD {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "protocol payload exceeds bound",
+                ));
+            }
+            bytes.resize(HEADER + length, 0);
+        }
+    }
+    if received_fds.len() > 1 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "protocol sent multiple file descriptors",
+        ));
+    }
+    Ok(Some((Frame::decode(&bytes)?, received_fds.pop())))
+}
+
+fn collect_received_fds(message: &libc::msghdr, received_fds: &mut Vec<OwnedFd>) -> io::Result<()> {
+    let mut header = unsafe { libc::CMSG_FIRSTHDR(message) };
+    while !header.is_null() {
+        if unsafe { (*header).cmsg_level != libc::SOL_SOCKET }
+            || unsafe { (*header).cmsg_type != libc::SCM_RIGHTS }
+        {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                "truncated protocol ancillary data",
+                "unexpected protocol ancillary data",
             ));
         }
-        if received as usize != HEADER {
+        let data_length =
+            unsafe { (*header).cmsg_len }.saturating_sub(unsafe { libc::CMSG_LEN(0) }) as usize;
+        if data_length == 0 || !data_length.is_multiple_of(size_of::<RawFd>()) {
             return Err(io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                "partial protocol header",
+                io::ErrorKind::InvalidData,
+                "invalid protocol descriptor payload",
             ));
         }
-        let mut received_fd = None;
-        let header = unsafe { libc::CMSG_FIRSTHDR(&message) };
-        if !header.is_null()
-            && unsafe { (*header).cmsg_level == libc::SOL_SOCKET }
-            && unsafe { (*header).cmsg_type == libc::SCM_RIGHTS }
-            && unsafe { (*header).cmsg_len >= libc::CMSG_LEN(size_of::<RawFd>() as _) }
-        {
+        for offset in (0..data_length).step_by(size_of::<RawFd>()) {
             let mut raw = -1;
             unsafe {
                 ptr::copy_nonoverlapping(
-                    libc::CMSG_DATA(header),
+                    libc::CMSG_DATA(header).add(offset),
                     (&mut raw as *mut RawFd).cast::<u8>(),
                     size_of::<RawFd>(),
                 );
             }
             if raw >= 0 {
-                set_cloexec(raw)?;
-                received_fd = Some(unsafe { OwnedFd::from_raw_fd(raw) });
+                let owned = unsafe { OwnedFd::from_raw_fd(raw) };
+                set_cloexec(owned.as_raw_fd())?;
+                received_fds.push(owned);
             }
         }
-        let length = u32::from_ne_bytes(header_bytes[8..12].try_into().unwrap()) as usize;
-        if length > MAX_PAYLOAD {
+        header = unsafe { libc::CMSG_NXTHDR(message, header) };
+    }
+    if message.msg_flags & (libc::MSG_CTRUNC | libc::MSG_TRUNC) != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "truncated protocol frame or ancillary data",
+        ));
+    }
+    Ok(())
+}
+
+fn wait_for_io(fd: RawFd, events: libc::c_short, deadline: Instant) -> io::Result<()> {
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
             return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "protocol payload exceeds bound",
+                io::ErrorKind::TimedOut,
+                "protocol frame deadline exceeded",
             ));
         }
-        let mut bytes = Vec::with_capacity(HEADER + length);
-        bytes.extend_from_slice(&header_bytes);
-        bytes.resize(HEADER + length, 0);
-        let mut offset = HEADER;
-        while offset < bytes.len() {
-            let read = unsafe {
-                libc::recv(
-                    fd,
-                    bytes[offset..].as_mut_ptr().cast(),
-                    bytes.len() - offset,
-                    0,
-                )
-            };
-            if read > 0 {
-                offset += read as usize;
-                continue;
+        let mut descriptor = libc::pollfd {
+            fd,
+            events,
+            revents: 0,
+        };
+        let timeout = remaining.as_millis().max(1).min(libc::c_int::MAX as u128) as libc::c_int;
+        let ready = unsafe { libc::poll(&mut descriptor, 1, timeout) };
+        if ready > 0 {
+            if descriptor.revents & (libc::POLLERR | libc::POLLNVAL) != 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "protocol control socket failed",
+                ));
             }
-            if read < 0 && io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
-                continue;
-            }
-            return Err(if read == 0 {
-                io::Error::new(io::ErrorKind::UnexpectedEof, "partial protocol payload")
-            } else {
-                io::Error::last_os_error()
-            });
+            return Ok(());
         }
-        return Ok(Some((Frame::decode(&bytes)?, received_fd)));
+        if ready == 0 {
+            continue;
+        }
+        let error = io::Error::last_os_error();
+        if error.kind() != io::ErrorKind::Interrupted {
+            return Err(error);
+        }
     }
 }
 
@@ -388,7 +447,11 @@ fn launch_broker_at(path: &CStr) -> io::Result<Client> {
         sessions: HashMap::new(),
     };
     let (hello, passed) = client.receive()?;
-    if hello.kind != HELLO || hello.aux != VERSION as u32 || passed.is_some() {
+    if hello.kind != HELLO
+        || hello.aux != VERSION as u32
+        || hello.payload != hello_payload()
+        || passed.is_some()
+    {
         unsafe {
             libc::kill(pid, libc::SIGKILL);
             libc::waitpid(pid, ptr::null_mut(), 0);
@@ -686,11 +749,13 @@ struct Broker {
 impl Broker {
     fn run() -> io::Result<()> {
         let control = unsafe { OwnedFd::from_raw_fd(CONTROL_FD) };
+        set_cloexec(control.as_raw_fd())?;
         let kqueue = unsafe { libc::kqueue() };
         if kqueue < 0 {
             return Err(io::Error::last_os_error());
         }
         let kqueue = unsafe { OwnedFd::from_raw_fd(kqueue) };
+        set_cloexec(kqueue.as_raw_fd())?;
         let change = libc::kevent {
             ident: control.as_raw_fd() as usize,
             filter: libc::EVFILT_READ,
@@ -721,6 +786,7 @@ impl Broker {
         };
         let mut hello = Frame::new(HELLO);
         hello.aux = VERSION as u32;
+        hello.payload = hello_payload();
         send_frame(broker.control.as_raw_fd(), &hello, None)?;
         let result = broker.event_loop();
         broker.cleanup_all();
@@ -774,6 +840,7 @@ impl Broker {
             SPAWN => self.handle_spawn(frame)?,
             CLOSE => self.handle_close(frame)?,
             RELEASE => self.handle_release(frame)?,
+            SIGNAL => self.handle_signal(frame)?,
             STATS => self.handle_stats(frame)?,
             SHUTDOWN => {
                 self.cleanup_all();
@@ -875,6 +942,37 @@ impl Broker {
         response.session = frame.session;
         response.code = status;
         response.aux = result;
+        send_frame(self.control.as_raw_fd(), &response, None)
+    }
+
+    fn handle_signal(&mut self, frame: Frame) -> io::Result<()> {
+        let signal = frame.code;
+        if signal <= 0 || signal > MAX_SIGNAL {
+            let mut response = Frame::new(ERROR);
+            response.request = frame.request;
+            response.aux = ERROR_PROTOCOL;
+            response.code = libc::EINVAL;
+            return send_frame(self.control.as_raw_fd(), &response, None);
+        }
+        let delivered = match self.lookup(frame.session) {
+            Some(SlotState::Running { pid }) => {
+                let result = unsafe { libc::kill(-*pid, signal) };
+                if result < 0 && io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH) {
+                    let mut response = Frame::new(ERROR);
+                    response.request = frame.request;
+                    response.aux = ERROR_SPAWN;
+                    response.code = io::Error::last_os_error()
+                        .raw_os_error()
+                        .unwrap_or(libc::EIO);
+                    return send_frame(self.control.as_raw_fd(), &response, None);
+                }
+                result == 0
+            }
+            Some(SlotState::Exited(_)) | Some(SlotState::Vacant) | None => false,
+        };
+        let mut response = Frame::new(SIGNAL_RESULT);
+        response.request = frame.request;
+        response.aux = u32::from(delivered);
         send_frame(self.control.as_raw_fd(), &response, None)
     }
 
@@ -1194,12 +1292,6 @@ unsafe fn exec_target(
         || libc::dup2(slave, libc::STDERR_FILENO) < 0
     {
         child_fail(error_fd);
-    }
-    let maximum = libc::getdtablesize();
-    for fd in 3..maximum {
-        if fd != error_fd {
-            libc::close(fd);
-        }
     }
     if master > 2 && master != error_fd {
         libc::close(master);

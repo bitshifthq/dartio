@@ -4,6 +4,11 @@ library;
 
 import 'dart:ffi';
 
+const controllerAbiVersionExpected = 1;
+
+@Native<Uint32 Function()>(symbol: 'ptyi_abi_version')
+external int controllerAbiVersion();
+
 @Native<Bool Function(Pointer<Void>)>(symbol: 'ptyi_init')
 external bool controllerInit(Pointer<Void> apiData);
 
@@ -78,6 +83,9 @@ external bool controllerResize(
   int pixelWidth,
   int pixelHeight,
 );
+
+@Native<Int32 Function(Uint64, Int32)>(symbol: 'ptyi_signal')
+external int controllerSignal(int handle, int signal);
 
 @Native<Int32 Function(Uint64)>(symbol: 'ptyi_mode')
 external int controllerMode(int handle);

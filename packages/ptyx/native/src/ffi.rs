@@ -4,6 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::ffi::{c_void, CStr, CString};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 #[derive(Clone, Copy)]
@@ -13,8 +14,37 @@ struct Ports {
 }
 
 static RUNTIME: OnceLock<Mutex<IntegratedRuntime>> = OnceLock::new();
+static INIT_LOCK: Mutex<()> = Mutex::new(());
 static PORTS: OnceLock<Mutex<HashMap<u64, Ports>>> = OnceLock::new();
 static LOST_PORTS: OnceLock<Mutex<HashSet<u64>>> = OnceLock::new();
+static COMMAND_INPUT_BYTES: AtomicUsize = AtomicUsize::new(0);
+const COMMAND_INPUT_CAPACITY: usize = 64 * 1024 * 1024;
+
+struct InputAdmission(usize);
+
+impl InputAdmission {
+    fn acquire(bytes: usize) -> Option<Self> {
+        COMMAND_INPUT_BYTES
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                current
+                    .checked_add(bytes)
+                    .filter(|total| *total <= COMMAND_INPUT_CAPACITY)
+            })
+            .ok()
+            .map(|_| Self(bytes))
+    }
+}
+
+impl Drop for InputAdmission {
+    fn drop(&mut self) {
+        COMMAND_INPUT_BYTES.fetch_sub(self.0, Ordering::AcqRel);
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn ptyi_abi_version() -> u32 {
+    1
+}
 
 fn runtime() -> Option<&'static Mutex<IntegratedRuntime>> {
     RUNTIME.get()
@@ -51,22 +81,25 @@ pub unsafe extern "C" fn ptyi_init(api_data: *mut c_void) -> bool {
         if api_data.is_null() || Dart_InitializeApiDL(api_data) != 0 {
             return false;
         }
+        let Ok(_initializing) = INIT_LOCK.lock() else {
+            return false;
+        };
         if RUNTIME.get().is_some() {
             return true;
         }
         let mut runtime = IntegratedRuntime::new();
         let notifications = runtime.take_notifications();
-        if RUNTIME.set(Mutex::new(runtime)).is_err() {
-            return true;
-        }
-        std::thread::Builder::new()
+        let notifier = std::thread::Builder::new()
             .name("ptyx-dart-notifier".to_owned())
             .spawn(move || {
                 while let Ok(notice) = notifications.recv() {
                     dispatch_notice(notice);
                 }
-            })
-            .is_ok()
+            });
+        if notifier.is_err() {
+            return false;
+        }
+        RUNTIME.set(Mutex::new(runtime)).is_ok()
     }))
     .unwrap_or(false)
 }
@@ -162,6 +195,9 @@ pub unsafe extern "C" fn ptyi_write(handle: u64, bytes: *const u8, length: usize
         if bytes.is_null() || length == 0 {
             return 0;
         }
+        let Some(_admission) = InputAdmission::acquire(length) else {
+            return 0;
+        };
         let bytes = std::slice::from_raw_parts(bytes, length).to_vec();
         with_runtime(|runtime| runtime.try_write(handle, bytes)).unwrap_or(0)
     }))
@@ -321,6 +357,16 @@ pub extern "C" fn ptyi_resize(
 }
 
 #[no_mangle]
+pub extern "C" fn ptyi_signal(handle: u64, signal: i32) -> i32 {
+    catch_unwind(AssertUnwindSafe(|| {
+        with_runtime(|runtime| runtime.signal(handle, signal))
+            .flatten()
+            .map_or(-1, i32::from)
+    }))
+    .unwrap_or(-1)
+}
+
+#[no_mangle]
 pub extern "C" fn ptyi_mode(handle: u64) -> i32 {
     catch_unwind(AssertUnwindSafe(|| {
         with_runtime(|runtime| runtime.mode(handle))
@@ -410,6 +456,7 @@ fn dispatch_notice(notice: Notice) {
     let broker_lost = matches!(notice, Notice::BrokerLost(_));
     let handle = match &notice {
         Notice::Output { handle, .. }
+        | Notice::InputFailed(handle)
         | Notice::BrokerLost(handle)
         | Notice::OutputDone(handle)
         | Notice::Exit(handle) => *handle,
@@ -439,6 +486,7 @@ fn dispatch_notice(notice: Notice) {
             Notice::WaitFailed { waiter, .. } => {
                 ptyx_dart_post_integer(entry.event, ((waiter << 3) | 5) as i64)
             }
+            Notice::InputFailed(_) => ptyx_dart_post_integer(entry.event, (handle << 3) as i64),
             Notice::BrokerLost(_) => {
                 ptyx_dart_post_integer(entry.event, ((handle << 3) | 7) as i64)
             }

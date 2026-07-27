@@ -80,6 +80,7 @@ final class NativeSession implements PtySession {
   var _creditScheduled = false;
   Timer? _modeTimer;
   PtyTermMode? _lastMode;
+  var _unchangedModeSamples = 0;
 
   @override
   PtyCapabilities get capabilities => PtyCapabilities(
@@ -208,7 +209,11 @@ final class NativeSession implements PtySession {
     if (_close != null || _exit.isCompleted) {
       return false;
     }
-    return controllerClose(_handle);
+    final result = controllerSignal(_handle, signal.signalNumber);
+    if (result < 0) {
+      throw const PtyException('native signal delivery failed');
+    }
+    return result == 1;
   }
 
   @override
@@ -336,6 +341,14 @@ final class NativeSession implements PtySession {
     }
   }
 
+  void _completeInputFailure() {
+    if (!_inputDone.isCompleted) {
+      _inputDone.completeError(
+        const PtyInputException('accepted input was not fully written'),
+      );
+    }
+  }
+
   void _completeOutput() {
     if (!_outputDone.isCompleted) {
       _outputDone.complete();
@@ -365,7 +378,14 @@ final class NativeSession implements PtySession {
 
   Future<void> _closeNative(Completer<void> completion) async {
     _cancelOutput();
-    controllerClose(_handle);
+    controllerSignal(_handle, ProcessSignal.sigterm.signalNumber);
+    try {
+      await _exit.future.timeout(const Duration(milliseconds: 250));
+    } on TimeoutException {
+      controllerClose(_handle);
+    } on Object {
+      controllerClose(_handle);
+    }
     _completeExit();
     try {
       await Future.wait<Object?>([_exit.future, _outputDone.future]);
@@ -398,24 +418,36 @@ final class NativeSession implements PtySession {
     if (_modeTimer != null || _close != null) {
       return;
     }
-    void observe() {
-      final current = _readMode();
-      if (current != null && current != _lastMode) {
-        _lastMode = current;
-        _modeController.add(current);
-      }
-    }
-
-    scheduleMicrotask(observe);
-    _modeTimer = Timer.periodic(
-      const Duration(milliseconds: 10),
-      (_) => observe(),
-    );
+    scheduleMicrotask(_observeMode);
   }
 
   void _stopModeObservation() {
     _modeTimer?.cancel();
     _modeTimer = null;
+    _unchangedModeSamples = 0;
+  }
+
+  void _observeMode() {
+    if (!_modeController.hasListener || _close != null) {
+      _stopModeObservation();
+      return;
+    }
+    final current = _readMode();
+    if (current != null && current != _lastMode) {
+      _lastMode = current;
+      _unchangedModeSamples = 0;
+      _modeController.add(current);
+    } else {
+      _unchangedModeSamples++;
+    }
+    final milliseconds = switch (_unchangedModeSamples) {
+      <= 10 => 10,
+      <= 20 => 25,
+      <= 40 => 50,
+      <= 80 => 100,
+      _ => 250,
+    };
+    _modeTimer = Timer(Duration(milliseconds: milliseconds), _observeMode);
   }
 }
 
@@ -428,6 +460,12 @@ final class _PendingWaiter {
 
 final class _ControllerRuntime {
   _ControllerRuntime._() : _output = ReceivePort(), _events = ReceivePort() {
+    final abi = controllerAbiVersion();
+    if (abi != controllerAbiVersionExpected) {
+      throw PtyInfrastructureException(
+        'native ABI mismatch: expected $controllerAbiVersionExpected, got $abi',
+      );
+    }
     if (!controllerInit(NativeApi.initializeApiDLData)) {
       throw const PtyInfrastructureException(
         'native controller initialization failed',
@@ -477,6 +515,8 @@ final class _ControllerRuntime {
     final kind = message & 7;
     final payload = message >> 3;
     switch (kind) {
+      case 0:
+        _sessions[payload]?._completeInputFailure();
       case 1 || 2:
         _waiters.remove(payload)?.completion.complete();
       case 3:
