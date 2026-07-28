@@ -66,8 +66,6 @@ const _functionNames = {
   'ptyi_write': 'controllerWrite',
   'ptyi_credit_async': 'controllerCredit',
   'ptyi_pause': 'controllerPause',
-  'ptyi_wait_capacity': 'controllerWaitCapacity',
-  'ptyi_wait_flush': 'controllerWaitFlush',
   'ptyi_exit_status': 'controllerExitStatus',
   'ptyi_pid': 'controllerPid',
   'ptyi_size': 'controllerSize',

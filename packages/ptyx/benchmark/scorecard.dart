@@ -398,7 +398,7 @@ Future<Map<String, Object?>> _interactiveRoundTrips(int repetitions) async {
     for (var i = 0; i < repetitions; i++) {
       final value = _interactiveByte(i);
       final stopwatch = Stopwatch()..start();
-      await session.write(Uint8List.fromList([value]));
+      session.write(Uint8List.fromList([value]));
       final received = Platform.isWindows
           ? await _readReport(bytes, 'PTYX-INPUT ${i + 1} $value')
           : await bytes.readByte().timeout(_timeout);
@@ -425,8 +425,7 @@ Future<Map<String, Object?>> _outputThroughput(int byteCount) async {
   var received = 0;
   final stopwatch = Stopwatch()..start();
   try {
-    await session.write(Uint8List.fromList(const [1]));
-    await session.flush();
+    session.write(Uint8List.fromList(const [1]));
     while (received < byteCount) {
       final chunk = await bytes.readChunk().timeout(_timeout);
       if (chunk == null) {
@@ -483,7 +482,7 @@ head -c $byteCount /dev/zero
         throw StateError('transport child did not emit READY');
       }
     }
-    await session.write(Uint8List.fromList(const [1]));
+    session.write(Uint8List.fromList(const [1]));
     final stopwatch = Stopwatch()..start();
     var received = 0;
     while (received < byteCount) {
@@ -521,7 +520,8 @@ Future<Map<String, Object?>> _inputThroughput(int byteCount) async {
     while (sent < byteCount) {
       final count = min(chunk.length, byteCount - sent);
       _fillPattern(chunk, sent, count);
-      await session.write(
+      await _writeAfterBackpressure(
+        session,
         count == chunk.length ? chunk : chunk.sublist(0, count),
       );
       sent += count;
@@ -622,7 +622,8 @@ while ($received -lt {bytes}) {
     var sent = 0;
     while (sent < byteCount) {
       final count = min(chunk.length, byteCount - sent);
-      await session.write(
+      await _writeAfterBackpressure(
+        session,
         count == chunk.length ? chunk : chunk.sublist(0, count),
       );
       sent += count;
@@ -668,12 +669,12 @@ Future<Map<String, Object?>> _bidirectionalThroughput(int byteCount) async {
       while (sent < byteCount) {
         final count = min(chunk.length, byteCount - sent);
         _fillPattern(chunk, sent, count);
-        await session.write(
+        await _writeAfterBackpressure(
+          session,
           count == chunk.length ? chunk : chunk.sublist(0, count),
         );
         sent += count;
       }
-      await session.flush();
     });
     final receiver = Future<void>(() async {
       while (received < byteCount) {
@@ -733,8 +734,7 @@ Future<Map<String, Object?>> _pauseResume(int byteCount) async {
     onDone: done.complete,
   );
   subscription.pause();
-  await session.write(Uint8List.fromList(const [1]));
-  await session.flush();
+  session.write(Uint8List.fromList(const [1]));
   final rssBefore = ProcessInfo.currentRss;
   await Future<void>.delayed(const Duration(milliseconds: 250));
   final rssWhilePaused = ProcessInfo.currentRss;
@@ -769,8 +769,7 @@ Future<Map<String, Object?>> _windowsTerminalOutput(
   var observed = 0;
   final stopwatch = Stopwatch()..start();
   try {
-    await session.write(Uint8List.fromList(const [1]));
-    await session.flush();
+    session.write(Uint8List.fromList(const [1]));
     while (true) {
       final chunk = await bytes.readChunk().timeout(_timeout);
       if (chunk == null) break;
@@ -816,8 +815,7 @@ Future<Map<String, Object?>> _windowsPauseResume(int byteCount) async {
     onDone: done.complete,
   );
   subscription.pause();
-  await session.write(Uint8List.fromList(const [1]));
-  await session.flush();
+  session.write(Uint8List.fromList(const [1]));
   final rssBefore = ProcessInfo.currentRss;
   await Future<void>.delayed(const Duration(milliseconds: 250));
   final rssWhilePaused = ProcessInfo.currentRss;
@@ -853,7 +851,7 @@ Future<Map<String, Object?>> _discardOutput(int byteCount) async {
   try {
     await bytes.cancel();
     session.discardOutput();
-    await session.write(Uint8List.fromList(const [1]));
+    session.write(Uint8List.fromList(const [1]));
     final exitCode = await session.exitCode.timeout(_timeout);
     stopwatch.stop();
     return {
@@ -870,8 +868,7 @@ Future<Map<String, Object?>> _noListener(int byteCount) async {
   final session = await _spawnFixture('output-raw', ['$byteCount']);
   final before = await _resourceSnapshot();
   try {
-    await session.write(Uint8List.fromList(const [1]));
-    await session.flush();
+    session.write(Uint8List.fromList(const [1]));
     await Future<void>.delayed(const Duration(milliseconds: 250));
     final bounded = await _resourceSnapshot();
     final stopwatch = Stopwatch()..start();
@@ -910,17 +907,21 @@ Future<Map<String, Object?>> _inputSaturation(int capacity) async {
     final payload = Uint8List(capacity);
     _fillPattern(payload, 0, payload.length);
     final resourceBefore = await _resourceSnapshot();
-    await activeSession.write(payload);
+    activeSession.write(payload);
     final resourceAtCapacity = await _resourceSnapshot();
     final second = Uint8List(capacity);
     _fillPattern(second, capacity, second.length);
     final stopwatch = Stopwatch()..start();
-    final capacityRecovery = activeSession.write(second);
+    try {
+      activeSession.write(second);
+      throw StateError('saturated input accepted beyond its byte budget');
+    } on PtyBackpressureException {
+      // Expected saturation is part of this benchmark's measured contract.
+    }
     gate.createSync();
-    await capacityRecovery.timeout(_timeout);
+    await _writeAfterBackpressure(activeSession, second);
     stopwatch.stop();
     final resourceAfterRecovery = await _resourceSnapshot();
-    await activeSession.flush().timeout(_timeout);
     final expectedReport = 'OK ${capacity * 2}';
     final report = await _readReport(activeBytes, expectedReport);
     if (report != expectedReport) {
@@ -943,6 +944,24 @@ Future<Map<String, Object?>> _inputSaturation(int capacity) async {
   }
 }
 
+Future<void> _writeAfterBackpressure(
+  PtySession session,
+  Uint8List bytes,
+) async {
+  final deadline = DateTime.now().add(_timeout);
+  while (true) {
+    try {
+      session.write(bytes);
+      return;
+    } on PtyBackpressureException {
+      if (DateTime.now().isAfter(deadline)) {
+        rethrow;
+      }
+      await Future<void>.delayed(Duration.zero);
+    }
+  }
+}
+
 Future<Map<String, Object?>> _fairness(
   int sessionCount,
   int repetitions,
@@ -961,7 +980,7 @@ Future<Map<String, Object?>> _fairness(
           Future<void>(() async {
             final value = _interactiveByte(round + index);
             final stopwatch = Stopwatch()..start();
-            await pairs[index].session.write(Uint8List.fromList([value]));
+            pairs[index].session.write(Uint8List.fromList([value]));
             final received = Platform.isWindows
                 ? await _readReport(
                     pairs[index].bytes,
@@ -1036,9 +1055,8 @@ Future<Map<String, Object?>> _activeOutputFairness(
     }
     final resourcesBefore = await _resourceSnapshot();
     for (final pair in pairs) {
-      await pair.session.write(Uint8List.fromList(const [1]));
+      pair.session.write(Uint8List.fromList(const [1]));
     }
-    await Future.wait(pairs.map((pair) => pair.session.flush()));
     final elapsed = List<int>.filled(sessionCount, 0);
     final transfers = [
       for (var sessionIndex = 0; sessionIndex < sessionCount; sessionIndex++)

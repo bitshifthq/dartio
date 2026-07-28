@@ -95,8 +95,7 @@ Future<void> main(List<String> arguments) async {
       longSession.resize(
         PtySize(rows: 24 + cycles % 8, columns: 80 + cycles % 16),
       );
-      await _writeFixtureInput(longSession, interactive);
-      await longSession.flush().timeout(_operationTimeout);
+      _writeFixtureInput(longSession, interactive);
       if (Platform.isWindows) {
         await _expectReport(
           longOutput,
@@ -230,8 +229,7 @@ Future<void> _warmLongLivedSession() async {
   );
   try {
     await _expectReady(output);
-    await session.write(Uint8List.fromList(const [65]));
-    await session.flush();
+    session.write(Uint8List.fromList(const [65]));
     if (Platform.isWindows) {
       await _expectReport(output, 'PTYX-INPUT 1 65', -1);
     } else {
@@ -274,11 +272,8 @@ Future<int> _runCycle(int cycle) async {
               }
             }
           });
-    await _writeFixtureInput(session, input);
-    await Future.wait([
-      session.flush().timeout(_operationTimeout),
-      outputDone.timeout(_operationTimeout),
-    ]);
+    _writeFixtureInput(session, input);
+    await outputDone.timeout(_operationTimeout);
     final exitCode = await session.exitCode.timeout(_operationTimeout);
     if (exitCode != 0) {
       throw StateError('cycle $cycle child exited with $exitCode');
@@ -309,8 +304,9 @@ Future<void> _expectReport(
   throw StateError('cycle $cycle ended before child report $report');
 }
 
-Future<void> _writeFixtureInput(PtySession session, Uint8List bytes) =>
-    session.write(bytes).timeout(_operationTimeout);
+void _writeFixtureInput(PtySession session, Uint8List bytes) {
+  session.write(bytes);
+}
 
 Future<PtySession> _spawnFixture(String operation, int byteCount) async {
   final fixture = Platform.environment['PTYX_FIXTURE_EXECUTABLE'];
@@ -328,7 +324,6 @@ Future<PtySession> _spawnFixture(String operation, int byteCount) async {
       maxBufferedOutput: 64 * 1024,
     ),
   ).timeout(_operationTimeout);
-  unawaited(session.inputDone.catchError((Object _) {}));
   return session;
 }
 

@@ -47,31 +47,30 @@ remains.
 The session exposes one bounded input operation:
 
 ```dart
-await session.write(bytes);
-await session.flush();
+session.write(bytes);
 ```
 
-`write` waits asynchronously for enough capacity and then accepts the complete
-byte list. A byte list larger than the configured maximum is rejected as an
-invalid request instead of waiting forever. Close, child exit, or input
-failure completes pending writes with the corresponding typed exception.
-Concurrent calls are serialized by invocation order, including when an earlier
-call is waiting for capacity.
+`write` synchronously accepts the complete byte list into owned native storage
+or rejects it without accepting any bytes. A byte list larger than the
+configured maximum is invalid. Temporary queue exhaustion throws
+`PtyBackpressureException` and leaves the session usable. The operation never
+waits for the child, native writer, descriptor readiness, or queue capacity.
 
 The acceptance linearization point is the successful queue reservation under
-the native input sequence lock. Completing `write` does not mean that the child
-consumed the bytes. The asynchronous API is deliberate: a synchronous write
-could preserve bounded memory under saturation only by blocking the Dart
-isolate or exposing a retry-oriented would-block result.
-
-`flush` captures the last accepted input sequence at call time. It completes
-when the native writer has passed every byte through that sequence to the PTY
-master endpoint. It does not claim that the slave line discipline or child
-consumed the bytes. A permanent write failure completes affected flushes and
-the input completion future with `PtyInputException`.
+the native input lock. Returning does not mean that the operating system, slave
+line discipline, or child consumed the bytes. Callers establish application
+progress from terminal output or their application protocol.
 
 Input queue capacity includes every accepted byte not yet passed to the PTY.
 It is bounded by configuration and cannot be expanded by a large write.
+
+Interrupted and temporarily unavailable native writes are retried internally.
+An unrecoverable endpoint failure makes later writes throw the same sticky
+`PtyInputException`, while output, exit observation, signaling, metadata, and
+cleanup remain available. Safely buffered output is delivered before the input
+failure becomes the terminal output event. `close` completes cleanup before
+reporting a retained input failure. Infrastructure or ownership loss remains a
+whole-session failure.
 
 ## Output
 

@@ -45,7 +45,7 @@ For a repeated integrity and cleanup run, pass the duration in seconds:
 dart run tool/soak.dart 86400 --output=soak-24h.json
 ```
 
-The soak checks every byte on every spawn/write/flush/exit/close cycle and
+The soak checks every byte on every spawn/write/exit/close cycle and
 samples the complete Dart/controller/broker/child process tree during steady
 state. It waits up to three seconds for process, thread, and descriptor or
 handle counts to return to their warmed baseline. Peak RSS growth is limited
@@ -191,7 +191,7 @@ The production scorecard covers:
 - sustained output, sustained input, and simultaneous bidirectional traffic;
 - small interactive writes and first-byte latency;
 - output pause/resume and explicit discard;
-- bounded-input saturation, capacity wake latency, and flush;
+- bounded-input saturation, rejection latency, and recovery after drain;
 - mixed quiet and noisy sessions, fairness, and quiet-session tail latency;
 - resize and mode-observation overhead;
 - normal exit, forced close, descendant cleanup, and resource return.

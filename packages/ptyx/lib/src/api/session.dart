@@ -66,13 +66,6 @@ abstract interface class PtySession {
   /// can complete before trailing [output].
   Future<PtyExitStatus> get exitStatus;
 
-  /// Completes when input reaches a terminal state.
-  ///
-  /// It completes normally when input is closed deliberately, or when session
-  /// shutdown or direct-child exit resolves every accepted byte. It completes
-  /// with [PtyInputException] when accepted input can no longer be written.
-  Future<void> get inputDone;
-
   /// Platform-specific features available to this session.
   PtyCapabilities get capabilities;
 
@@ -168,21 +161,18 @@ abstract interface class PtySession {
   /// [PtyClosedException] after [close].
   void resize(PtySize size);
 
-  /// Accepts all of [data] in invocation order.
+  /// Accepts all of [data] into bounded native storage in invocation order.
   ///
-  /// The future waits without blocking the isolate when bounded native input
-  /// capacity is unavailable. Completion means the complete buffer was
-  /// accepted, not that the child consumed it. Keep [data] unchanged until the
-  /// future completes.
+  /// Returning means the complete buffer was copied and accepted, not that the
+  /// child consumed it. The caller may mutate [data] immediately afterward.
   ///
   /// Throws [PtyInvalidArgumentException] when [data] is empty or larger than
-  /// the configured input bound, [PtyInputException] after terminal input
-  /// failure, and [PtyClosedException] after [close].
-  Future<void> write(Uint8List data);
-
-  /// Waits until every write accepted before this call reaches the PTY master.
+  /// the configured input bound, [PtyBackpressureException] when the complete
+  /// buffer cannot be accepted without waiting, [PtyInputException] after
+  /// terminal input failure, and [PtyClosedException] after [close].
   ///
-  /// Throws [PtyInputException] when accepted input cannot be written and
-  /// [PtyClosedException] after [close].
-  Future<void> flush();
+  /// ```dart
+  /// session.write(Uint8List.fromList('status\n'.codeUnits));
+  /// ```
+  void write(Uint8List data);
 }

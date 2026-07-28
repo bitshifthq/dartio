@@ -281,7 +281,7 @@ void main() {
           session,
         ).map<List<int>>((chunk) => chunk).transform(utf8.decoder).join();
 
-        await session.write(Uint8List.fromList(const [1]));
+        session.write(Uint8List.fromList(const [1]));
         final text = await output.timeout(longTimeout);
 
         expect(text, contains('PTYX-OUTPUT-OK $byteCount'));
@@ -339,7 +339,7 @@ void main() {
             'output',
             arguments: const ['$byteCount'],
           );
-          await session.write(Uint8List.fromList(const [1]));
+          session.write(Uint8List.fromList(const [1]));
 
           final exitBeforeListen = await session.exitCode.timeout(
             const Duration(milliseconds: 500),
@@ -484,7 +484,7 @@ void main() {
       test('sends bytes to child input', () async {
         final session = await spawnScript(inputEcho);
 
-        await session.write(Uint8List.fromList(utf8.encode('ping\n')));
+        session.write(Uint8List.fromList(utf8.encode('ping\n')));
         final bytes = await fixtureOutput(
           session,
         ).expand((chunk) => chunk).take(4).toList().timeout(shortTimeout);
@@ -513,15 +513,13 @@ void main() {
           for (var index = 0; index < count; index++) {
             chunk[index] = 32 + (((sent + index) * 31 + 17) % 95);
           }
-          await session.write(
+          session.write(
             count == chunk.length
                 ? chunk
                 : Uint8List.sublistView(chunk, 0, count),
           );
           sent += count;
         }
-        await session.flush();
-
         final report = <int>[];
         while (await output.moveNext().timeout(shortTimeout)) {
           if (output.current == 10) break;
@@ -535,8 +533,8 @@ void main() {
         final session = await spawnScript(inputEcho);
         await session.close();
 
-        await expectLater(
-          session.write(Uint8List.fromList(const [1])),
+        expect(
+          () => session.write(Uint8List.fromList(const [1])),
           throwsA(isA<PtyClosedException>()),
         );
       });
@@ -606,7 +604,7 @@ void main() {
 
         await nextLine(lines);
         session.resize(const PtySize(rows: 42, columns: 120));
-        await session.write(Uint8List.fromList(const [1]));
+        session.write(Uint8List.fromList(const [1]));
         final line = await nextLine(lines);
 
         expect(line, '42 120');

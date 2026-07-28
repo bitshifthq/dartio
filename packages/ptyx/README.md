@@ -57,24 +57,21 @@ receives from that backend.
 ## Backpressure
 
 Input and output memory are bounded per session. `write` accepts a complete
-buffer in invocation order and waits asynchronously when input capacity is
-temporarily exhausted. It throws `PtyInputException` after permanent input
-failure. `flush` completes after all earlier accepted bytes have reached the
-PTY master:
+buffer in invocation order and copies it into native storage before returning.
+Temporary saturation throws `PtyBackpressureException` without accepting any
+bytes or failing the session:
 
 ```dart
-await session.write(Uint8List.fromList('status\n'.codeUnits));
-await session.flush();
+session.write(Uint8List.fromList('status\n'.codeUnits));
 ```
 
-For an interactive owner, listen to output before writing and keep bytes
-unmodified:
+For an interactive owner, listen to output before writing. Accepted buffers
+may be reused or mutated immediately:
 
 ```dart
 final outputDone = session.output.forEach(stdout.add);
 await for (final bytes in stdin) {
-  await session.write(Uint8List.fromList(bytes));
-  await session.flush();
+  session.write(Uint8List.fromList(bytes));
 }
 await outputDone;
 ```
@@ -83,9 +80,6 @@ An output-heavy child can block normally when `output` has no listener or its
 subscription is paused. Listen before awaiting `exitCode` when output matters.
 If it does not matter, call `discardOutput()`; canceling an output subscription
 has the same drain-and-discard effect.
-
-`inputDone` completes normally after deliberate shutdown and with a
-`PtyInputException` if already accepted input cannot be written.
 
 Resize is synchronous bounded metadata work:
 
@@ -147,13 +141,15 @@ Operational and validated-input errors derive from `PtyException`:
 - `PtyInvalidArgumentException` means a value is outside the native contract.
 - `PtyClosedException` means the operation requires a live session.
 - `PtyUnsupportedException` means the native capability does not exist.
-- `PtyInputException` reports terminal input failure or an impossible capacity
-  transition after bytes were accepted.
+- `PtyBackpressureException` means one write was rejected without failing the
+  session because bounded native input storage was full.
+- `PtyInputException` reports an unrecoverable terminal input failure.
 - `PtyInfrastructureException` reports controller or Unix broker loss.
 
-Output read failures are delivered on `output`; input failures use `inputDone`;
-spawn, resize, metadata, exit observation, and close report through their own
-operation.
+Output read failures are delivered on `output`. Permanent input failures become
+sticky for later writes, are delivered after safely buffered output, and are
+retained by `close`. Spawn, resize, metadata, exit observation, and close
+otherwise report through their own operation.
 
 ## Security
 

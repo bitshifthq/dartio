@@ -9,7 +9,7 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 #[cfg(target_os = "macos")]
 use std::ptr;
 use std::sync::mpsc::{self, Receiver, SyncSender};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -21,27 +21,16 @@ const OUTPUT_DELAY: Duration = Duration::from_millis(1);
 const COMMAND_QUANTUM: usize = 64;
 const COMMAND_CAPACITY: usize = 1024;
 const NOTICE_CAPACITY: usize = 4096;
-const WAITER_CAPACITY: usize = 1024;
 const ACTIVATION_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Notice {
     Output { handle: u64, bytes: Vec<u8> },
-    Capacity { handle: u64, waiter: u64 },
-    Flush { handle: u64, waiter: u64 },
-    WaitFailed { handle: u64, waiter: u64 },
     InputFailed(u64),
     OutputFailed(u64),
     BrokerLost(u64),
     OutputDone(u64),
     Exit(u64),
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum WaitResult {
-    Ready,
-    Armed,
-    Failed,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -59,7 +48,6 @@ pub struct RuntimeCounters {
 struct QueuedInput {
     bytes: Vec<u8>,
     offset: usize,
-    sequence: u64,
 }
 
 struct QueuedOutput {
@@ -67,18 +55,51 @@ struct QueuedOutput {
     offset: usize,
 }
 
+pub(crate) struct InputAdmission {
+    capacity: usize,
+    state: Mutex<InputAdmissionState>,
+}
+
+struct InputAdmissionState {
+    bytes: usize,
+    open: bool,
+}
+
+impl InputAdmission {
+    fn new(capacity: usize) -> Self {
+        Self {
+            capacity,
+            state: Mutex::new(InputAdmissionState {
+                bytes: 0,
+                open: true,
+            }),
+        }
+    }
+
+    fn release(&self, bytes: usize) {
+        if let Ok(mut state) = self.state.lock() {
+            debug_assert!(bytes <= state.bytes);
+            state.bytes = state.bytes.saturating_sub(bytes);
+        }
+    }
+
+    fn close(&self) {
+        if let Ok(mut state) = self.state.lock() {
+            state.open = false;
+        }
+    }
+}
+
 struct Session {
     broker_session: u64,
     pid: libc::pid_t,
     master: OwnedFd,
-    input_capacity: usize,
+    admission: Arc<InputAdmission>,
     input_bytes: usize,
     input: VecDeque<QueuedInput>,
-    capacity_waiters: HashMap<u64, usize>,
-    flush_waiters: HashMap<u64, u64>,
-    input_failed_from: Option<u64>,
-    next_sequence: u64,
-    flushed_sequence: u64,
+    input_failed: bool,
+    input_failure_pending: bool,
+    input_failure_notified: bool,
     output_capacity: usize,
     output_bytes: usize,
     output: VecDeque<QueuedOutput>,
@@ -100,19 +121,21 @@ struct Session {
 }
 
 impl Session {
-    fn from_broker(broker: BrokerSession, input_capacity: usize, output_capacity: usize) -> Self {
+    fn from_broker(
+        broker: BrokerSession,
+        admission: Arc<InputAdmission>,
+        output_capacity: usize,
+    ) -> Self {
         Self {
             broker_session: broker.id,
             pid: broker.pid,
             master: broker.master,
-            input_capacity,
+            admission,
             input_bytes: 0,
             input: VecDeque::new(),
-            capacity_waiters: HashMap::new(),
-            flush_waiters: HashMap::new(),
-            input_failed_from: None,
-            next_sequence: 1,
-            flushed_sequence: 0,
+            input_failed: false,
+            input_failure_pending: false,
+            input_failure_notified: false,
             output_capacity,
             output_bytes: 0,
             output: VecDeque::new(),
@@ -134,58 +157,13 @@ impl Session {
         }
     }
 
-    fn try_write(&mut self, bytes: Vec<u8>) -> Result<u64, Vec<u8>> {
-        if self.close_started
-            || self.input_failed_from.is_some()
-            || bytes.is_empty()
-            || self.input_bytes.saturating_add(bytes.len()) > self.input_capacity
-        {
+    fn enqueue_write(&mut self, bytes: Vec<u8>) -> Result<(), Vec<u8>> {
+        if self.close_started || self.input_failed || bytes.is_empty() {
             return Err(bytes);
         }
-        let sequence = self.next_sequence;
-        self.next_sequence = self.next_sequence.saturating_add(1);
         self.input_bytes += bytes.len();
-        self.input.push_back(QueuedInput {
-            bytes,
-            offset: 0,
-            sequence,
-        });
-        Ok(sequence)
-    }
-
-    fn wait_capacity(&mut self, required: usize, waiter: u64) -> WaitResult {
-        if self.close_started || self.input_failed_from.is_some() || required > self.input_capacity
-        {
-            return WaitResult::Failed;
-        }
-        if required <= self.input_capacity - self.input_bytes {
-            return WaitResult::Ready;
-        }
-        if self.capacity_waiters.len() >= WAITER_CAPACITY
-            || self.capacity_waiters.contains_key(&waiter)
-        {
-            return WaitResult::Failed;
-        }
-        self.capacity_waiters.insert(waiter, required);
-        WaitResult::Armed
-    }
-
-    fn wait_flush(&mut self, sequence: u64, waiter: u64) -> WaitResult {
-        if sequence <= self.flushed_sequence {
-            return WaitResult::Ready;
-        }
-        if self.close_started
-            || self
-                .input_failed_from
-                .is_some_and(|failed| sequence >= failed)
-        {
-            return WaitResult::Failed;
-        }
-        if self.flush_waiters.len() >= WAITER_CAPACITY || self.flush_waiters.contains_key(&waiter) {
-            return WaitResult::Failed;
-        }
-        self.flush_waiters.insert(waiter, sequence);
-        WaitResult::Armed
+        self.input.push_back(QueuedInput { bytes, offset: 0 });
+        Ok(())
     }
 
     fn pull(&mut self, maximum: usize) -> Vec<u8> {
@@ -249,23 +227,11 @@ pub(crate) enum Command {
     Write {
         handle: u64,
         bytes: Vec<u8>,
-        reply: ReplySender<i64>,
+        admission: Arc<InputAdmission>,
     },
     CreditAsync {
         handle: u64,
         bytes: usize,
-    },
-    WaitCapacity {
-        handle: u64,
-        required: usize,
-        waiter: u64,
-        reply: ReplySender<WaitResult>,
-    },
-    WaitFlush {
-        handle: u64,
-        sequence: u64,
-        waiter: u64,
-        reply: ReplySender<WaitResult>,
     },
     Pause {
         handle: u64,
@@ -334,6 +300,7 @@ impl WakeWriter {
 
 pub struct IntegratedRuntime {
     commands: SyncSender<Command>,
+    admissions: Arc<Mutex<HashMap<u64, Arc<InputAdmission>>>>,
     notices: Mutex<Option<Receiver<Notice>>>,
     wake: WakeWriter,
     thread: Mutex<Option<JoinHandle<()>>>,
@@ -367,6 +334,8 @@ impl IntegratedRuntime {
         let broker =
             BrokerOwner::launch(&broker_path, command_sender.clone(), broker_reactor_wake)?;
         let broker_client = broker.client();
+        let admissions = Arc::new(Mutex::new(HashMap::new()));
+        let reactor_admissions = Arc::clone(&admissions);
         let thread = thread::Builder::new()
             .name("ptyx-integrated-reactor".to_owned())
             .spawn(move || {
@@ -376,10 +345,12 @@ impl IntegratedRuntime {
                     command_receiver,
                     notice_sender,
                     broker_client,
+                    reactor_admissions,
                 )
             })?;
         Ok(Self {
             commands: command_sender,
+            admissions,
             notices: Mutex::new(Some(notice_receiver)),
             wake: WakeWriter(write),
             thread: Mutex::new(Some(thread)),
@@ -431,13 +402,40 @@ impl IntegratedRuntime {
         self.request_result(|reply| Command::Activate { handle, reply })?
     }
 
-    pub fn try_write(&self, handle: u64, bytes: Vec<u8>) -> i64 {
-        self.request_result(|reply| Command::Write {
+    pub fn write(&self, handle: u64, bytes: Vec<u8>) -> i64 {
+        let admission = match self
+            .admissions
+            .lock()
+            .ok()
+            .and_then(|admissions| admissions.get(&handle).cloned())
+        {
+            Some(admission) => admission,
+            None => return -1,
+        };
+        let length = bytes.len();
+        let mut state = match admission.state.lock() {
+            Ok(state) => state,
+            Err(_) => return -1,
+        };
+        if !state.open {
+            return -1;
+        }
+        if length == 0 || state.bytes.saturating_add(length) > admission.capacity {
+            return 0;
+        }
+        state.bytes += length;
+        let command = Command::Write {
             handle,
             bytes,
-            reply,
-        })
-        .unwrap_or(-1)
+            admission: Arc::clone(&admission),
+        };
+        if self.commands.try_send(command).is_err() {
+            state.bytes -= length;
+            return 0;
+        }
+        drop(state);
+        self.wake.wake();
+        1
     }
 
     pub fn credit_async(&self, handle: u64, bytes: usize) -> bool {
@@ -450,26 +448,6 @@ impl IntegratedRuntime {
         }
         self.wake.wake();
         true
-    }
-
-    pub fn wait_capacity(&self, handle: u64, required: usize, waiter: u64) -> WaitResult {
-        self.request_result(|reply| Command::WaitCapacity {
-            handle,
-            required,
-            waiter,
-            reply,
-        })
-        .unwrap_or(WaitResult::Failed)
-    }
-
-    pub fn wait_flush(&self, handle: u64, sequence: u64, waiter: u64) -> WaitResult {
-        self.request_result(|reply| Command::WaitFlush {
-            handle,
-            sequence,
-            waiter,
-            reply,
-        })
-        .unwrap_or(WaitResult::Failed)
     }
 
     pub fn pause(&self, handle: u64, paused: bool) -> bool {
@@ -531,16 +509,39 @@ impl IntegratedRuntime {
     }
 
     pub fn close(&self, handle: u64) -> bool {
+        if let Some(admission) = self
+            .admissions
+            .lock()
+            .ok()
+            .and_then(|admissions| admissions.get(&handle).cloned())
+        {
+            admission.close();
+        }
         self.request_result(|reply| Command::Close { handle, reply })
             .unwrap_or(false)
     }
 
     pub fn destroy(&self, handle: u64) -> bool {
-        self.request_result(|reply| Command::Destroy { handle, reply })
-            .unwrap_or(false)
+        let destroyed = self
+            .request_result(|reply| Command::Destroy { handle, reply })
+            .unwrap_or(false);
+        if destroyed {
+            if let Ok(mut admissions) = self.admissions.lock() {
+                admissions.remove(&handle);
+            }
+        }
+        destroyed
     }
 
     pub fn try_abandon(&self, handle: u64) -> bool {
+        if let Some(admission) = self
+            .admissions
+            .lock()
+            .ok()
+            .and_then(|admissions| admissions.get(&handle).cloned())
+        {
+            admission.close();
+        }
         if self.commands.try_send(Command::Abandon { handle }).is_err() {
             return false;
         }
@@ -592,6 +593,7 @@ fn reactor(
     commands: Receiver<Command>,
     notices: SyncSender<Notice>,
     broker: BrokerClient,
+    admissions: Arc<Mutex<HashMap<u64, Arc<InputAdmission>>>>,
 ) {
     let mut sessions: GenerationRegistry<Session> = GenerationRegistry::new();
     let mut pending_broker_exits = HashMap::new();
@@ -662,6 +664,7 @@ fn reactor(
                 &mut pending_broker_exits,
                 &mut counters,
                 &broker,
+                &admissions,
             );
             shutdown = requested_shutdown;
             if more_commands {
@@ -696,6 +699,7 @@ fn reactor(
     commands: Receiver<Command>,
     notices: SyncSender<Notice>,
     broker: BrokerClient,
+    admissions: Arc<Mutex<HashMap<u64, Arc<InputAdmission>>>>,
 ) {
     let epoll = unsafe { libc::epoll_create1(libc::EPOLL_CLOEXEC) };
     if epoll < 0 {
@@ -765,6 +769,7 @@ fn reactor(
                     &mut pending_broker_exits,
                     &mut counters,
                     &broker,
+                    &admissions,
                 );
                 shutdown |= requested_shutdown;
                 if more_commands {
@@ -803,6 +808,7 @@ fn reactor(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn process_commands(
     kqueue: RawFd,
     commands: &Receiver<Command>,
@@ -811,6 +817,7 @@ fn process_commands(
     pending_broker_exits: &mut HashMap<u64, i32>,
     counters: &mut RuntimeCounters,
     broker_client: &BrokerClient,
+    admissions: &Arc<Mutex<HashMap<u64, Arc<InputAdmission>>>>,
 ) -> (bool, bool) {
     let mut processed = 0;
     for _ in 0..COMMAND_QUANTUM {
@@ -825,11 +832,17 @@ fn process_commands(
                 output_capacity,
                 reply,
             } => {
-                let mut session = Session::from_broker(broker, input_capacity, output_capacity);
+                let admission = Arc::new(InputAdmission::new(input_capacity));
+                let mut session =
+                    Session::from_broker(broker, Arc::clone(&admission), output_capacity);
                 session.exit_status = pending_broker_exits
                     .remove(&session.broker_session)
                     .map(i64::from);
-                let result = Ok(sessions.insert(session));
+                let handle = sessions.insert(session);
+                if let Ok(mut values) = admissions.lock() {
+                    values.insert(handle, admission);
+                }
+                let result = Ok(handle);
                 let _ = reply.send(result);
             }
             Command::Activate { handle, reply } => {
@@ -849,6 +862,9 @@ fn process_commands(
                     if let Some(session) = sessions.get_mut(handle) {
                         session.active = true;
                         session.activation_deadline = None;
+                        if session.input_failure_pending {
+                            notify_input_failure(handle, session, notices, counters);
+                        }
                     }
                     read_ready(kqueue, handle, notices, sessions, counters);
                     if sessions
@@ -868,28 +884,26 @@ fn process_commands(
             Command::Write {
                 handle,
                 bytes,
-                reply,
+                admission,
             } => {
-                let sequence = match sessions.get_mut(handle) {
-                    None => -1,
-                    Some(session)
-                        if session.close_started || session.input_failed_from.is_some() =>
-                    {
-                        -1
+                let length = bytes.len();
+                let accepted = if let Some(session) = sessions.get_mut(handle) {
+                    let accepted = session.enqueue_write(bytes).is_ok();
+                    if !accepted {
+                        admission.release(length);
+                        notify_input_failure(handle, session, notices, counters);
                     }
-                    Some(session) => session
-                        .try_write(bytes)
-                        .ok()
-                        .and_then(|sequence| i64::try_from(sequence).ok())
-                        .unwrap_or(0),
+                    accepted
+                } else {
+                    admission.release(length);
+                    false
                 };
-                if sequence > 0 {
+                if accepted {
                     if let Some(session) = sessions.get_mut(handle).filter(|session| session.active)
                     {
                         let _ = update_write_filter(kqueue, handle, session, true);
                     }
                 }
-                let _ = reply.send(sequence);
             }
             Command::CreditAsync { handle, bytes } => {
                 if sessions
@@ -899,32 +913,6 @@ fn process_commands(
                 {
                     refresh_output(kqueue, handle, notices, sessions, counters);
                 }
-            }
-            Command::WaitCapacity {
-                handle,
-                required,
-                waiter,
-                reply,
-            } => {
-                let result = sessions
-                    .get_mut(handle)
-                    .map_or(WaitResult::Failed, |session| {
-                        session.wait_capacity(required, waiter)
-                    });
-                let _ = reply.send(result);
-            }
-            Command::WaitFlush {
-                handle,
-                sequence,
-                waiter,
-                reply,
-            } => {
-                let result = sessions
-                    .get_mut(handle)
-                    .map_or(WaitResult::Failed, |session| {
-                        session.wait_flush(sequence, waiter)
-                    });
-                let _ = reply.send(result);
             }
             Command::Pause {
                 handle,
@@ -1004,7 +992,7 @@ fn process_commands(
             }
             Command::Close { handle, reply } => {
                 let closed = sessions.get_mut(handle).is_some_and(|session| {
-                    fail_input_waiters(handle, session, notices, counters);
+                    fail_input(handle, session, notices, counters);
                     close_session(session, broker_client)
                 });
                 let _ = reply.send(closed);
@@ -1025,10 +1013,10 @@ fn process_commands(
                     session.abandoned = true;
                     session.active = false;
                     session.paused = false;
+                    session.admission.close();
+                    session.admission.release(session.input_bytes);
                     session.input.clear();
                     session.input_bytes = 0;
-                    session.capacity_waiters.clear();
-                    session.flush_waiters.clear();
                     session.output.clear();
                     session.output_bytes = 0;
                     session.output_outstanding = 0;
@@ -1049,7 +1037,7 @@ fn process_commands(
                     if let Some(session) = sessions.get_mut(handle) {
                         session.exit_status = Some(i64::from(status));
                         if !session.abandoned {
-                            fail_input_waiters(handle, session, notices, counters);
+                            fail_input(handle, session, notices, counters);
                         }
                     }
                     read_ready(kqueue, handle, notices, sessions, counters);
@@ -1238,7 +1226,7 @@ fn read_ready(
         }
         if result == 0 {
             session.output_eof = true;
-            fail_input_waiters(handle, session, notices, counters);
+            fail_input(handle, session, notices, counters);
             break;
         }
         let error = io::Error::last_os_error();
@@ -1250,7 +1238,7 @@ fn read_ready(
         }
         if error.raw_os_error() == Some(libc::EIO) {
             session.output_eof = true;
-            fail_input_waiters(handle, session, notices, counters);
+            fail_input(handle, session, notices, counters);
         } else {
             session.output_eof = true;
             session.output_failed = true;
@@ -1272,7 +1260,6 @@ fn write_ready(
     };
     let mut bytes = 0;
     let mut syscalls = 0;
-    let mut progressed = false;
     while bytes < BYTE_QUANTUM && syscalls < SYSCALL_QUANTUM {
         let Some(front) = session.input.front_mut() else {
             break;
@@ -1293,11 +1280,10 @@ fn write_ready(
             let amount = result as usize;
             counters.write_bytes += amount as u64;
             bytes += amount;
-            progressed = true;
             front.offset += amount;
             session.input_bytes -= amount;
+            session.admission.release(amount);
             if front.offset == front.bytes.len() {
-                session.flushed_sequence = front.sequence;
                 session.input.pop_front();
             }
             continue;
@@ -1310,78 +1296,42 @@ fn write_ready(
             if error.kind() == io::ErrorKind::WouldBlock {
                 break;
             }
-            fail_input_waiters(handle, session, notices, counters);
+            fail_input(handle, session, notices, counters);
         }
         break;
     }
     if session.input.is_empty() {
         let _ = update_write_filter(kqueue, handle, session, false);
     }
-    if progressed {
-        notify_waiters(handle, session, notices, counters);
-    }
 }
 
-fn fail_input_waiters(
+fn fail_input(
     handle: u64,
     session: &mut Session,
     notices: &SyncSender<Notice>,
     counters: &mut RuntimeCounters,
 ) {
-    let first_failure = session.input_failed_from.is_none();
-    let accepted_input_pending = !session.input.is_empty()
-        || session
-            .flush_waiters
-            .values()
-            .any(|sequence| *sequence > session.flushed_sequence);
-    session.input_failed_from.get_or_insert(
-        session
-            .input
-            .front()
-            .map_or(session.flushed_sequence.saturating_add(1), |input| {
-                input.sequence
-            }),
-    );
+    let accepted_input_pending = !session.input.is_empty();
+    session.input_failed = true;
+    session.admission.close();
+    session.admission.release(session.input_bytes);
     session.input.clear();
     session.input_bytes = 0;
-    let waiters: Vec<_> = session
-        .capacity_waiters
-        .drain()
-        .map(|(waiter, _)| waiter)
-        .chain(session.flush_waiters.drain().map(|(waiter, _)| waiter))
-        .collect();
-    for waiter in waiters {
-        send_notice(notices, Notice::WaitFailed { handle, waiter }, counters);
-    }
-    if first_failure && accepted_input_pending {
-        send_notice(notices, Notice::InputFailed(handle), counters);
+    if accepted_input_pending {
+        notify_input_failure(handle, session, notices, counters);
     }
 }
 
-fn notify_waiters(
+fn notify_input_failure(
     handle: u64,
     session: &mut Session,
     notices: &SyncSender<Notice>,
     counters: &mut RuntimeCounters,
 ) {
-    let available = session.input_capacity - session.input_bytes;
-    let capacity_waiters: Vec<_> = session
-        .capacity_waiters
-        .iter()
-        .filter_map(|(&waiter, &required)| (required <= available).then_some(waiter))
-        .collect();
-    for waiter in capacity_waiters {
-        session.capacity_waiters.remove(&waiter);
-        send_notice(notices, Notice::Capacity { handle, waiter }, counters);
-    }
-    let flush_waiters: Vec<_> = session
-        .flush_waiters
-        .iter()
-        .filter_map(|(&waiter, &sequence)| (sequence <= session.flushed_sequence).then_some(waiter))
-        .collect();
-    for waiter in flush_waiters {
-        session.flush_waiters.remove(&waiter);
-        send_notice(notices, Notice::Flush { handle, waiter }, counters);
+    session.input_failure_pending = true;
+    if !session.input_failure_notified {
+        session.input_failure_notified = true;
+        send_notice(notices, Notice::InputFailed(handle), counters);
     }
 }
 
@@ -1473,12 +1423,14 @@ fn close_session(session: &mut Session, broker: &BrokerClient) -> bool {
         return true;
     }
     if session.exit_status.is_some() && session.output_eof {
+        session.admission.close();
         session.close_started = true;
         return true;
     }
     if broker.close_async(session.broker_session).is_err() {
         return false;
     }
+    session.admission.close();
     session.close_started = true;
     true
 }
@@ -1494,6 +1446,8 @@ fn reap_abandoned(sessions: &mut GenerationRegistry<Session>, broker: &BrokerCli
             {
                 session.abandoned = true;
                 session.activation_deadline = None;
+                session.admission.close();
+                session.admission.release(session.input_bytes);
                 session.input.clear();
                 session.input_bytes = 0;
                 session.output.clear();
@@ -1544,7 +1498,7 @@ fn fail_all(
     for handle in sessions.handles() {
         if let Some(mut session) = sessions.remove(handle) {
             session.close_started = true;
-            fail_input_waiters(handle, &mut session, notices, counters);
+            fail_input(handle, &mut session, notices, counters);
             force_terminal_group(session.master.as_raw_fd(), session.pid);
             let _ = broker.abort_async(session.broker_session);
             send_notice(notices, Notice::BrokerLost(handle), counters);
@@ -1689,13 +1643,13 @@ fn submit(kqueue: RawFd, change: &libc::kevent) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        fail_input_waiters, notify_waiters, Notice, QueuedOutput, RuntimeCounters, Session,
-        WaitResult, OUTPUT_BATCH,
+        fail_input, notify_input_failure, InputAdmission, Notice, QueuedOutput, RuntimeCounters,
+        Session, OUTPUT_BATCH,
     };
     use crate::broker_client::BrokerSession;
     use std::collections::VecDeque;
     use std::fs::File;
-    use std::sync::mpsc;
+    use std::sync::{mpsc, Arc};
 
     fn session(input_capacity: usize) -> Session {
         Session::from_broker(
@@ -1704,103 +1658,43 @@ mod tests {
                 pid: 1,
                 master: File::open("/dev/null").unwrap().into(),
             },
-            input_capacity,
+            Arc::new(InputAdmission::new(input_capacity)),
             1024,
         )
     }
 
     #[test]
-    fn retains_every_concurrent_capacity_and_flush_waiter() {
+    fn terminal_input_failure_rejects_future_writes() {
         let mut session = session(4);
+        assert!(session.enqueue_write(vec![1, 2, 3, 4]).is_ok());
         session.input_bytes = 4;
-        session.next_sequence = 2;
-
-        assert_eq!(session.wait_capacity(1, 11), WaitResult::Armed);
-        assert_eq!(session.wait_capacity(1, 12), WaitResult::Armed);
-        assert_eq!(session.wait_flush(1, 21), WaitResult::Armed);
-        assert_eq!(session.wait_flush(1, 22), WaitResult::Armed);
-
-        assert_eq!(session.capacity_waiters.len(), 2);
-        assert_eq!(session.flush_waiters.len(), 2);
-    }
-
-    #[test]
-    fn rejects_an_impossible_capacity_wait_without_arming_it() {
-        let mut session = session(4);
-
-        assert_eq!(session.wait_capacity(5, 31), WaitResult::Failed);
-        assert!(session.capacity_waiters.is_empty());
-    }
-
-    #[test]
-    fn notifies_every_ready_concurrent_waiter() {
-        let mut session = session(4);
-        assert!(session.try_write(vec![1, 2, 3, 4]).is_ok());
-        assert_eq!(session.wait_capacity(1, 11), WaitResult::Armed);
-        assert_eq!(session.wait_capacity(1, 12), WaitResult::Armed);
-        assert_eq!(session.wait_flush(1, 21), WaitResult::Armed);
-        assert_eq!(session.wait_flush(1, 22), WaitResult::Armed);
-        session.input_bytes = 0;
-        session.flushed_sequence = 1;
+        session.admission.state.lock().unwrap().bytes = 4;
         let (sender, receiver) = mpsc::sync_channel(8);
         let mut counters = RuntimeCounters::default();
 
-        notify_waiters(7, &mut session, &sender, &mut counters);
+        fail_input(7, &mut session, &sender, &mut counters);
 
-        let mut notices: Vec<_> = receiver.try_iter().collect();
-        notices.sort_by_key(|notice| match notice {
-            Notice::Capacity { waiter, .. } | Notice::Flush { waiter, .. } => *waiter,
-            _ => 0,
-        });
-        assert_eq!(
-            notices,
-            vec![
-                Notice::Capacity {
-                    handle: 7,
-                    waiter: 11,
-                },
-                Notice::Capacity {
-                    handle: 7,
-                    waiter: 12,
-                },
-                Notice::Flush {
-                    handle: 7,
-                    waiter: 21,
-                },
-                Notice::Flush {
-                    handle: 7,
-                    waiter: 22,
-                },
-            ]
-        );
+        assert_eq!(receiver.try_recv(), Ok(Notice::InputFailed(7)));
+        assert!(session.enqueue_write(vec![1]).is_err());
     }
 
     #[test]
-    fn terminal_input_failure_fails_every_waiter_and_rejects_future_writes() {
+    fn admitted_write_rejected_during_failure_is_reported_once() {
         let mut session = session(4);
-        session.input_bytes = 4;
-        assert_eq!(session.wait_capacity(1, 11), WaitResult::Armed);
-        assert_eq!(session.wait_capacity(1, 12), WaitResult::Armed);
-        assert_eq!(session.wait_flush(1, 21), WaitResult::Armed);
-        assert_eq!(session.wait_flush(1, 22), WaitResult::Armed);
+        session.active = true;
+        session.admission.state.lock().unwrap().bytes = 1;
         let (sender, receiver) = mpsc::sync_channel(8);
         let mut counters = RuntimeCounters::default();
 
-        fail_input_waiters(7, &mut session, &sender, &mut counters);
+        fail_input(7, &mut session, &sender, &mut counters);
+        assert_eq!(receiver.try_recv(), Err(mpsc::TryRecvError::Empty));
+        assert!(session.enqueue_write(vec![1]).is_err());
+        session.admission.release(1);
+        notify_input_failure(7, &mut session, &sender, &mut counters);
+        notify_input_failure(7, &mut session, &sender, &mut counters);
 
-        let mut input_failed = false;
-        let mut waiters = Vec::new();
-        for notice in receiver.try_iter() {
-            match notice {
-                Notice::WaitFailed { handle: 7, waiter } => waiters.push(waiter),
-                Notice::InputFailed(7) => input_failed = true,
-                other => panic!("unexpected notice: {other:?}"),
-            }
-        }
-        waiters.sort_unstable();
-        assert_eq!(waiters, vec![11, 12, 21, 22]);
-        assert!(input_failed);
-        assert!(session.try_write(vec![1]).is_err());
+        assert_eq!(receiver.try_recv(), Ok(Notice::InputFailed(7)));
+        assert_eq!(receiver.try_recv(), Err(mpsc::TryRecvError::Empty));
     }
 
     #[test]
@@ -1859,10 +1753,9 @@ mod tests {
     }
 
     #[test]
-    fn generated_input_sequences_are_all_or_reject_and_ordered() {
+    fn generated_input_is_all_or_reject_and_ordered() {
         let mut session = session(257);
         let mut expected = VecDeque::new();
-        let mut accepted_sequences = Vec::new();
         let mut state = 0xa841_3f69_7c2d_50be_u64;
 
         for step in 0..10_000 {
@@ -1880,27 +1773,30 @@ mod tests {
             let length = 1 + state as usize % 64;
             let bytes: Vec<_> = (0..length).map(|index| (step + index) as u8).collect();
             let before = session.input_bytes;
-            match session.try_write(bytes.clone()) {
-                Ok(sequence) => {
+            let result = if before + bytes.len() <= session.admission.capacity {
+                session.enqueue_write(bytes.clone())
+            } else {
+                Err(bytes.clone())
+            };
+            match result {
+                Ok(()) => {
                     assert_eq!(session.input_bytes, before + bytes.len());
                     expected.push_back(bytes);
-                    accepted_sequences.push(sequence);
                 }
                 Err(rejected) => {
                     assert_eq!(rejected, bytes);
                     assert_eq!(session.input_bytes, before);
                 }
             }
-            assert!(session.input_bytes <= session.input_capacity);
+            assert!(session.input_bytes <= session.admission.capacity);
         }
 
-        assert!(accepted_sequences.windows(2).all(|pair| pair[0] < pair[1]));
         for queued in &session.input {
             assert_eq!(Some(&queued.bytes), expected.pop_front().as_ref());
         }
         assert!(expected.is_empty());
 
         session.close_started = true;
-        assert!(session.try_write(vec![1]).is_err());
+        assert!(session.enqueue_write(vec![1]).is_err());
     }
 }

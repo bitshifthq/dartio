@@ -85,9 +85,9 @@ equivalent language comparison.
   prefix as initialized, and copies that exact prefix into its owned queue;
   it never zero-fills unread capacity. Filter changes occur only on state
   transitions.
-- Child exit, PTY EOF, close, and terminal write failure resolve every
-  accepted input sequence and every capacity or flush waiter with completion
-  or typed failure. Once input fails, later writes cannot be accepted.
+- Child exit, PTY EOF, close, and terminal write failure either deliver every
+  accepted input byte or retain and report a typed terminal input failure.
+  Once input fails, later writes cannot be accepted.
 - Handles are never reused after generation exhaustion. A retired slot remains
   retired instead of wrapping a stale generation back into validity.
 - A session is destroyed only after its child identity is no longer owned,

@@ -34,25 +34,6 @@ void main() {
     return Platform.isWindows ? windows : posix;
   }
 
-  Future<void> expectBytes(
-    StreamIterator<int> bytes,
-    List<int> expected,
-  ) async {
-    for (final byte in expected) {
-      expect(await bytes.moveNext(), isTrue);
-      expect(bytes.current, byte);
-    }
-  }
-
-  Future<String> readLine(StreamIterator<int> bytes) async {
-    final line = <int>[];
-    while (await bytes.moveNext()) {
-      if (bytes.current == 10) break;
-      line.add(bytes.current);
-    }
-    return utf8.decode(line).trim();
-  }
-
   test('spawn is asynchronous and publishes a fully routed session', () async {
     final Future<PtySession> pending = PtySession.spawn(
       shell(
@@ -121,55 +102,23 @@ void main() {
     timeout: const Timeout(Duration(minutes: 2)),
   );
 
-  test(
-    'write preserves invocation order while input is saturated',
-    () async {
-      const capacity = 1024 * 1024;
-      final temporary = Directory.systemTemp.createTempSync(
-        'ptyx-write-order-',
-      );
-      addTearDown(() => temporary.deleteSync(recursive: true));
-      final gate = File('${temporary.path}/release');
-      final fixture = File('benchmark/fixture.dart').absolute.path;
-      final session = await PtySession.spawn(
-        PtySpawnOptions(
-          executable: Platform.resolvedExecutable,
-          arguments: [
-            fixture,
-            'gated-input-verify',
-            '${capacity * 2 + 1}',
-            gate.path,
-          ],
-          initialSize: size,
-          maxBufferedOutput: 64 * 1024,
-        ),
-      );
-      addTearDown(session.close);
-      final output = StreamIterator(
-        fixtureOutput(session).expand((chunk) => chunk),
-      );
-      addTearDown(output.cancel);
-      await expectBytes(output, utf8.encode('READY'));
-      final first = Uint8List(capacity);
-      final second = Uint8List(capacity);
-      for (var index = 0; index < capacity; index++) {
-        first[index] = 32 + ((index * 31 + 17) % 95);
-        second[index] = 32 + (((capacity + index) * 31 + 17) % 95);
-      }
-      final last = Uint8List.fromList([32 + (((capacity * 2) * 31 + 17) % 95)]);
+  test('write rejects saturation without failing the session', () async {
+    const capacity = 1024 * 1024;
+    final session = await PtySession.spawn(
+      shell(
+        r'stty raw -echo; printf ready; kill -STOP $$; sleep 10',
+        inputCapacity: capacity,
+      ),
+    );
+    addTearDown(session.close);
+    await fixtureOutput(session).first;
+    session.write(Uint8List(capacity));
 
-      await session.write(first);
-      final secondWrite = session.write(second);
-      final lastWrite = session.write(last);
-      gate.createSync();
-      await Future.wait([secondWrite, lastWrite]);
-      final report = await readLine(output);
-
-      expect(report, 'OK ${capacity * 2 + 1}');
-    },
-    testOn: 'posix',
-    timeout: const Timeout(Duration(minutes: 2)),
-  );
+    expect(
+      () => session.write(Uint8List(capacity)),
+      throwsA(isA<PtyBackpressureException>()),
+    );
+  }, testOn: 'posix');
 
   test('oversized writes fail without waiting for capacity', () async {
     final session = await PtySession.spawn(
@@ -179,8 +128,8 @@ void main() {
     );
     addTearDown(session.close);
 
-    await expectLater(
-      session.write(Uint8List(4097)),
+    expect(
+      () => session.write(Uint8List(4097)),
       throwsA(isA<PtyInvalidArgumentException>()),
     );
   });
@@ -195,60 +144,40 @@ void main() {
         inputCapacity: capacity,
       ),
     );
-    addTearDown(session.close);
+    addTearDown(() => session.close().onError<PtyInputException>((_, _) {}));
     await fixtureOutput(session).first;
-    final inputDone = expectLater(
-      session.inputDone,
-      throwsA(isA<PtyInputException>()),
-    );
-
-    await session.write(Uint8List(capacity));
+    session.write(Uint8List(capacity));
     expect(session.kill(ProcessSignal.sigkill), isTrue);
 
     await session.exitCode;
-    await inputDone;
-    await expectLater(
-      session.write(Uint8List(1)),
+    expect(
+      () => session.write(Uint8List(1)),
       throwsA(isA<PtyInputException>()),
     );
   });
 
-  test(
-    'close fails pending input operations with their public identity',
-    () async {
-      const capacity = 1024 * 1024;
-      final session = await PtySession.spawn(
-        shell(
-          r'stty raw -echo; printf ready; kill -STOP $$; sleep 10',
-          inputCapacity: capacity,
+  test('write throws its closed identity after close', () async {
+    const capacity = 1024 * 1024;
+    final session = await PtySession.spawn(
+      shell(
+        r'stty raw -echo; printf ready; kill -STOP $$; sleep 10',
+        inputCapacity: capacity,
+      ),
+    );
+    await fixtureOutput(session).first;
+    await session.close();
+
+    expect(
+      () => session.write(Uint8List(capacity)),
+      throwsA(
+        isA<PtyClosedException>().having(
+          (error) => error.operation,
+          'operation',
+          'write',
         ),
-      );
-      await fixtureOutput(session).first;
-      await session.write(Uint8List(capacity));
-
-      Future<void> expectClosed(Future<void> future, String operation) =>
-          expectLater(
-            future,
-            throwsA(
-              isA<PtyClosedException>().having(
-                (error) => error.operation,
-                'operation',
-                operation,
-              ),
-            ),
-          );
-
-      final flushFailure = expectClosed(session.flush(), 'flush');
-      final writeFailure = expectClosed(
-        session.write(Uint8List(capacity)),
-        'write',
-      );
-
-      await session.close();
-      await Future.wait([flushFailure, writeFailure]);
-    },
-    testOn: 'posix',
-  );
+      ),
+    );
+  }, testOn: 'posix');
 
   test(
     'spawn validation is typed and stable with assertions enabled',

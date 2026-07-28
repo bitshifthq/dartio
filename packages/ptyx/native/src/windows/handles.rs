@@ -212,7 +212,6 @@ pub(crate) struct IoOperation {
     overlapped: OVERLAPPED,
     pub(crate) buffer: Vec<u8>,
     pub(crate) offset: usize,
-    pub(crate) sequence: u64,
     pub(crate) kind: IoKind,
 }
 
@@ -226,17 +225,15 @@ impl IoOperation {
             overlapped: unsafe { zeroed() },
             buffer: vec![0; capacity],
             offset: 0,
-            sequence: 0,
             kind: IoKind::Read,
         })
     }
 
-    pub(crate) fn write(buffer: Vec<u8>, sequence: u64) -> Pin<Box<Self>> {
+    pub(crate) fn write(buffer: Vec<u8>) -> Pin<Box<Self>> {
         Box::pin(Self {
             overlapped: unsafe { zeroed() },
             buffer,
             offset: 0,
-            sequence,
             kind: IoKind::Write,
         })
     }

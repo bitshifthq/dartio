@@ -21,9 +21,9 @@ mod oneshot;
 mod windows;
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-pub(crate) use integrated::{IntegratedRuntime, Notice, WaitResult};
+pub(crate) use integrated::{IntegratedRuntime, Notice};
 #[cfg(windows)]
-pub(crate) use windows::{IntegratedRuntime, Notice, WaitResult};
+pub(crate) use windows::{IntegratedRuntime, Notice};
 
 struct Slot<T> {
     generation: u32,

@@ -4,10 +4,10 @@
 
 - Replaced synchronous construction with asynchronous native PTY session
   creation and a staged publication barrier.
-- Replaced unbounded synchronous input with ordered asynchronous `write`,
-  `flush`, and `inputDone`.
-- Added bounded, lossless input and output with internal capacity waiting,
-  flush, explicit output discard, and typed terminal input failure.
+- Added a synchronous `write` acceptance API backed by bounded native queues,
+  FIFO delivery, buffer ownership transfer, typed recoverable backpressure,
+  and sticky terminal input failure. Removed the superseded input readiness,
+  flush, and input-completion APIs.
 - Added typed `exitStatus` while retaining `exitCode`, including complete
   unsigned 32-bit Windows process exit codes.
 - Set the Windows runtime floor to build 26100, the first ConPTY implementation
@@ -19,7 +19,7 @@
   native status, and safe context.
 - Added shared native reactors, a hardened Unix spawn/reaping broker, and
   generation-checked session ownership.
-- Added ABI version 5 generated bindings, staged-route publication, an
+- Added ABI version 6 generated bindings, staged-route publication, an
   individual-isolate owner supervisor, and guaranteed native finalization with
   post/finalizer serialization for isolate loss; added lifecycle and security
   documentation, ABI/runtime/fault contract tests, a

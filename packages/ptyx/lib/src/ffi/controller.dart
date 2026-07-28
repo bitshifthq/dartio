@@ -127,19 +127,8 @@ external int controllerTtyName(
   int capacity,
 );
 
-/// Wait registration result: 0 failed, 1 ready, 2 armed.
-@ffi.Native<ffi.Int32 Function(ffi.Uint64, ffi.Size, ffi.Uint64)>(
-  symbol: 'ptyi_wait_capacity',
-)
-external int controllerWaitCapacity(int handle, int required, int waiter);
-
-@ffi.Native<ffi.Int32 Function(ffi.Uint64, ffi.Uint64, ffi.Uint64)>(
-  symbol: 'ptyi_wait_flush',
-)
-external int controllerWaitFlush(int handle, int sequence, int waiter);
-
-/// Returns a positive accepted-input sequence, zero for temporary backpressure,
-/// or -1 when the session can never accept more input.
+/// Returns one after admission, zero for temporary backpressure, or -1 when the
+/// session can never accept more input.
 @ffi.Native<ffi.Int64 Function(ffi.Uint64, ffi.Pointer<ffi.Uint8>, ffi.Size)>(
   symbol: 'ptyi_write',
 )
@@ -149,4 +138,4 @@ external int controllerWrite(
   int length,
 );
 
-const int controllerAbiVersionExpected = 5;
+const int controllerAbiVersionExpected = 6;

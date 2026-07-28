@@ -2,7 +2,7 @@ import 'dart:convert';
 import 'dart:ffi';
 import 'dart:io';
 
-const _expectedAbi = 5;
+const _expectedAbi = 6;
 const _symbols = [
   'ptyi_abi_version',
   'ptyi_capabilities',
@@ -15,8 +15,6 @@ const _symbols = [
   'ptyi_write',
   'ptyi_credit_async',
   'ptyi_pause',
-  'ptyi_wait_capacity',
-  'ptyi_wait_flush',
   'ptyi_exit_status',
   'ptyi_pid',
   'ptyi_size',

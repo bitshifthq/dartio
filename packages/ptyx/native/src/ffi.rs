@@ -1,4 +1,4 @@
-use super::{IntegratedRuntime, Notice, WaitResult};
+use super::{IntegratedRuntime, Notice};
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use crate::broker_client::BrokerSpawn;
 #[cfg(windows)]
@@ -39,7 +39,6 @@ const MAX_SESSION_CAPACITY: usize = 64 * 1024 * 1024;
 const MAX_SPAWN_PAYLOAD: usize = 64 * 1024;
 const MAX_ARGUMENTS: usize = 256;
 const MAX_ENVIRONMENT: usize = 4096;
-const MAX_WAITER: u64 = i64::MAX as u64 >> 3;
 
 thread_local! {
     static LAST_ERROR_CODE: Cell<i32> = const { Cell::new(0) };
@@ -106,7 +105,7 @@ impl Drop for InputAdmission {
 
 #[no_mangle]
 pub extern "C" fn ptyi_abi_version() -> u32 {
-    5
+    6
 }
 
 #[no_mangle]
@@ -492,7 +491,7 @@ pub unsafe extern "C" fn ptyi_write(handle: u64, bytes: *const u8, length: usize
             return 0;
         };
         let bytes = std::slice::from_raw_parts(bytes, length).to_vec();
-        let result = with_runtime(|runtime| runtime.try_write(handle, bytes)).unwrap_or(-1);
+        let result = with_runtime(|runtime| runtime.write(handle, bytes)).unwrap_or(-1);
         if result < 0 {
             set_last_error_code(libc::EPIPE);
         } else {
@@ -517,40 +516,6 @@ pub extern "C" fn ptyi_pause(handle: u64, paused: bool) -> bool {
         with_runtime(|runtime| runtime.pause(handle, paused)).unwrap_or(false)
     }))
     .unwrap_or(false)
-}
-
-#[no_mangle]
-pub extern "C" fn ptyi_wait_capacity(handle: u64, required: usize, waiter: u64) -> i32 {
-    catch_unwind(AssertUnwindSafe(|| {
-        if waiter == 0 || waiter > MAX_WAITER {
-            return 0;
-        }
-        wait_result(with_runtime(|runtime| {
-            runtime.wait_capacity(handle, required, waiter)
-        }))
-    }))
-    .unwrap_or(0)
-}
-
-#[no_mangle]
-pub extern "C" fn ptyi_wait_flush(handle: u64, sequence: u64, waiter: u64) -> i32 {
-    catch_unwind(AssertUnwindSafe(|| {
-        if waiter == 0 || waiter > MAX_WAITER {
-            return 0;
-        }
-        wait_result(with_runtime(|runtime| {
-            runtime.wait_flush(handle, sequence, waiter)
-        }))
-    }))
-    .unwrap_or(0)
-}
-
-fn wait_result(result: Option<WaitResult>) -> i32 {
-    match result {
-        Some(WaitResult::Ready) => 1,
-        Some(WaitResult::Armed) => 2,
-        Some(WaitResult::Failed) | None => 0,
-    }
 }
 
 #[no_mangle]
@@ -701,9 +666,6 @@ fn dispatch_notice(notice: Notice) {
         | Notice::BrokerLost(handle)
         | Notice::OutputDone(handle)
         | Notice::Exit(handle) => *handle,
-        Notice::Capacity { handle, .. }
-        | Notice::Flush { handle, .. }
-        | Notice::WaitFailed { handle, .. } => *handle,
     };
     let Some(entry) = ports()
         .lock()
@@ -717,15 +679,6 @@ fn dispatch_notice(notice: Notice) {
         match notice {
             Notice::Output { bytes, .. } => {
                 ptyx_dart_post_bytes(entry.output, handle as i64, bytes.as_ptr(), bytes.len())
-            }
-            Notice::Capacity { waiter, .. } => {
-                ptyx_dart_post_integer(entry.event, ((waiter << 3) | 1) as i64)
-            }
-            Notice::Flush { waiter, .. } => {
-                ptyx_dart_post_integer(entry.event, ((waiter << 3) | 2) as i64)
-            }
-            Notice::WaitFailed { waiter, .. } => {
-                ptyx_dart_post_integer(entry.event, ((waiter << 3) | 5) as i64)
             }
             Notice::InputFailed(_) => ptyx_dart_post_integer(entry.event, (handle << 3) as i64),
             Notice::OutputFailed(_) => {

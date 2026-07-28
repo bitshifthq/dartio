@@ -98,7 +98,6 @@ final class NativeSession implements PtySession, Finalizable {
     // These completion channels are optional to observe. Retain their error
     // for callers without reporting it as an unhandled zone error first.
     _exit.future.ignore();
-    _inputDone.future.ignore();
   }
 
   static Future<NativeSession> spawn(PtySpawnOptions options) async {
@@ -237,17 +236,13 @@ final class NativeSession implements PtySession, Finalizable {
   final StreamController<PtyTermMode> _modeController;
   final _exit = Completer<int>();
   final _outputDone = Completer<void>();
-  final _inputDone = Completer<void>();
   final int _inputCapacity;
   final Duration _gracefulCloseTimeout;
   Completer<void>? _close;
-  var _lastSequence = 0;
   var _pendingCredit = 0;
   final Queue<Uint8List> _pendingOutput = Queue();
-  final Queue<_PendingWrite> _pendingWrites = Queue();
   var _paused = true;
   var _outputCancelled = false;
-  var _writing = false;
   var _infrastructureLost = false;
   Object? _terminalFailure;
   PtyInputException? _inputFailure;
@@ -278,9 +273,6 @@ final class NativeSession implements PtySession, Finalizable {
         ? PtyExited(code)
         : PtySignaled(-code);
   }
-
-  @override
-  Future<void> get inputDone => _inputDone.future;
 
   @override
   PtyTermMode? get mode {
@@ -371,14 +363,16 @@ final class NativeSession implements PtySession, Finalizable {
     }
   }
 
-  bool _tryWrite(Uint8List data, String operation) {
+  @override
+  void write(Uint8List data) {
+    const operation = 'write';
     _validateWrite(data, operation);
-    final sequence = using((arena) {
+    final result = using((arena) {
       final pointer = arena<Uint8>(data.length);
       pointer.asTypedList(data.length).setAll(0, data);
       return controllerWrite(_handle, pointer, data.length);
     });
-    if (sequence < 0) {
+    if (result < 0) {
       final nativeCode = controllerLastErrorCode();
       final failure = PtyInputException(
         'session can no longer accept input',
@@ -388,11 +382,12 @@ final class NativeSession implements PtySession, Finalizable {
       _inputFailure ??= failure;
       throw _inputError(operation, _inputFailure!);
     }
-    if (sequence == 0) {
-      return false;
+    if (result == 0) {
+      throw PtyBackpressureException(
+        'bounded native input storage is full',
+        context: '${data.length} bytes rejected',
+      );
     }
-    _lastSequence = sequence;
-    return true;
   }
 
   void _validateWrite(Uint8List data, String operation) {
@@ -414,72 +409,6 @@ final class NativeSession implements PtySession, Finalizable {
         context: '${data.length} bytes exceeds $_inputCapacity bytes',
       );
     }
-  }
-
-  Future<void> _waitForInputCapacity(int byteCount, String operation) {
-    _checkOpen(operation);
-    final inputFailure = _inputFailure;
-    if (inputFailure != null) {
-      throw _inputError(operation, inputFailure);
-    }
-    if (byteCount <= 0 || byteCount > _inputCapacity) {
-      throw PtyInvalidArgumentException(
-        'requested input capacity is outside this session limit',
-        operation: operation,
-        context: '$byteCount bytes requested; limit is $_inputCapacity bytes',
-      );
-    }
-    return _runtime._wait(
-      _handle,
-      operation,
-      (waiter) => controllerWaitCapacity(_handle, byteCount, waiter),
-    );
-  }
-
-  @override
-  Future<void> write(Uint8List data) {
-    final completion = Completer<void>();
-    try {
-      _validateWrite(data, 'write');
-    } on Object catch (error, stackTrace) {
-      completion.completeError(error, stackTrace);
-      return completion.future;
-    }
-    _pendingWrites.addLast(_PendingWrite(data, completion));
-    if (!_writing) {
-      _writing = true;
-      unawaited(_drainWrites());
-    }
-    return completion.future;
-  }
-
-  Future<void> _drainWrites() async {
-    while (_pendingWrites.isNotEmpty) {
-      final pending = _pendingWrites.removeFirst();
-      try {
-        while (!_tryWrite(pending.data, 'write')) {
-          await _waitForInputCapacity(pending.data.length, 'write');
-        }
-        pending.completion.complete();
-      } on Object catch (error, stackTrace) {
-        pending.completion.completeError(error, stackTrace);
-      }
-    }
-    _writing = false;
-  }
-
-  @override
-  Future<void> flush() {
-    _checkOpen('flush');
-    final inputFailure = _inputFailure;
-    if (inputFailure != null) {
-      throw _inputError('flush', inputFailure);
-    }
-    return _runtime._wait(
-      _handle,
-      'flush',
-      (waiter) => controllerWaitFlush(_handle, _lastSequence, waiter),
-    );
   }
 
   @override
@@ -619,9 +548,6 @@ final class NativeSession implements PtySession, Finalizable {
     });
     if (status != null) {
       _exit.complete(status);
-      if (!_inputDone.isCompleted) {
-        _inputDone.complete();
-      }
     } else {
       _exit.completeError(
         const PtyExitException('native child status was unavailable'),
@@ -633,19 +559,6 @@ final class NativeSession implements PtySession, Finalizable {
     _inputFailure ??= const PtyInputException(
       'accepted input was not fully written',
     );
-    if (!_inputDone.isCompleted) {
-      _inputDone.completeError(_inputFailure!);
-    }
-  }
-
-  PtyException _waitFailure(String operation) {
-    if (_close != null) {
-      return PtyClosedException('session closed', operation: operation);
-    }
-    final failure = _inputFailure;
-    return failure == null
-        ? PtyInputException('terminal input failure', operation: operation)
-        : _inputError(operation, failure);
   }
 
   PtyInputException _inputError(String operation, PtyInputException failure) =>
@@ -661,6 +574,10 @@ final class NativeSession implements PtySession, Finalizable {
       _outputDone.complete();
     }
     if (!_outputController.isClosed) {
+      final inputFailure = _inputFailure;
+      if (inputFailure != null) {
+        _outputController.addError(inputFailure);
+      }
       unawaited(_outputController.close());
     }
   }
@@ -684,12 +601,8 @@ final class NativeSession implements PtySession, Finalizable {
     // a stale native callback while the isolate itself is shutting down.
     _sessionFinalizer.detach(this);
     _sessionRegistryFinalizer.detach(this);
-    _runtime._failWaiters(_handle, error);
     if (!_exit.isCompleted) {
       _exit.completeError(error);
-    }
-    if (!_inputDone.isCompleted) {
-      _inputDone.completeError(error);
     }
     if (!_outputDone.isCompleted) {
       _outputDone.complete();
@@ -713,6 +626,10 @@ final class NativeSession implements PtySession, Finalizable {
     final terminalFailure = _terminalFailure;
     if (terminalFailure != null) {
       recordFailure(terminalFailure);
+    }
+    final inputFailure = _inputFailure;
+    if (inputFailure != null) {
+      recordFailure(inputFailure);
     }
     if (!_infrastructureLost && !_exit.isCompleted) {
       controllerSignal(_handle, ProcessSignal.sigterm.signalNumber);
@@ -767,9 +684,6 @@ final class NativeSession implements PtySession, Finalizable {
     }
 
     try {
-      if (!_inputDone.isCompleted) {
-        _inputDone.complete();
-      }
       _runtime._removeSession(_handle);
       _stopModeObservation();
       await _modeController.close();
@@ -846,21 +760,6 @@ final class NativeSession implements PtySession, Finalizable {
   }
 }
 
-final class _PendingWaiter {
-  const _PendingWaiter(this.handle, this.operation, this.completion);
-
-  final int handle;
-  final String operation;
-  final Completer<void> completion;
-}
-
-final class _PendingWrite {
-  const _PendingWrite(this.data, this.completion);
-
-  final Uint8List data;
-  final Completer<void> completion;
-}
-
 final class _ControllerRuntime {
   _ControllerRuntime._() {
     final abi = controllerAbiVersion();
@@ -884,9 +783,7 @@ final class _ControllerRuntime {
 
   late final RawReceivePort _notifications;
   final Map<int, WeakReference<NativeSession>> _sessions = {};
-  final Map<int, _PendingWaiter> _waiters = {};
   final Map<int, int> _credit = {};
-  var _nextWaiter = 1;
   SendPort? _supervisor;
   Future<SendPort>? _supervisorStart;
   var _pendingSpawns = 0;
@@ -988,10 +885,6 @@ final class _ControllerRuntime {
       return;
     }
     _credit.remove(handle);
-    _failWaiters(
-      handle,
-      const PtyClosedException('session is no longer reachable'),
-    );
     if (_sessions.isEmpty) {
       _scheduleIdleRelease();
     }
@@ -1008,26 +901,6 @@ final class _ControllerRuntime {
         _stopSupervisorIfIdle();
       }
     });
-  }
-
-  Future<void> _wait(
-    int handle,
-    String operation,
-    int Function(int waiter) register,
-  ) async {
-    final waiter = _nextWaiter++;
-    final completion = Completer<void>();
-    _waiters[waiter] = _PendingWaiter(handle, operation, completion);
-    switch (register(waiter)) {
-      case 1:
-        _waiters.remove(waiter);
-      case 2:
-        await completion.future;
-      default:
-        _waiters.remove(waiter);
-        throw _session(handle)?._waitFailure(operation) ??
-            PtyInputException('terminal input failure', operation: operation);
-    }
   }
 
   void _onNotification(Object? message) {
@@ -1047,23 +920,12 @@ final class _ControllerRuntime {
     switch (kind) {
       case 0:
         _session(payload)?._completeInputFailure();
-      case 1 || 2:
-        _waiters.remove(payload)?.completion.complete();
+      case 1 || 2 || 5:
+        return;
       case 3:
         _session(payload)?._completeExit();
       case 4:
         _session(payload)?._completeOutput();
-      case 5:
-        final waiter = _waiters.remove(payload);
-        if (waiter != null) {
-          waiter.completion.completeError(
-            _session(waiter.handle)?._waitFailure(waiter.operation) ??
-                PtyInputException(
-                  'terminal input failure',
-                  operation: waiter.operation,
-                ),
-          );
-        }
       case 6:
         _session(payload)?._completeOutputFailure();
       case 7:
@@ -1085,16 +947,6 @@ final class _ControllerRuntime {
       _removeSession(handle);
     }
     return session;
-  }
-
-  void _failWaiters(int handle, Object error) {
-    final tokens = _waiters.entries
-        .where((entry) => entry.value.handle == handle)
-        .map((entry) => entry.key)
-        .toList(growable: false);
-    for (final token in tokens) {
-      _waiters.remove(token)?.completion.completeError(error);
-    }
   }
 }
 

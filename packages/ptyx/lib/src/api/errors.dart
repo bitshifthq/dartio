@@ -17,6 +17,9 @@ enum PtyErrorCategory {
   /// Accepted terminal input failed.
   input,
 
+  /// Bounded terminal input storage could not accept one complete write.
+  backpressure,
+
   /// Terminal output failed.
   output,
 
@@ -138,6 +141,22 @@ class PtyInputException extends PtyException {
 
   @override
   String get _name => 'PtyInputException';
+}
+
+/// Thrown when one complete write cannot fit in bounded native input storage.
+///
+/// No bytes from the rejected invocation are accepted. The session remains
+/// usable, so a later write may succeed after the native writer makes progress.
+final class PtyBackpressureException extends PtyException {
+  const PtyBackpressureException(
+    super.message, {
+    super.operation = 'write',
+    super.nativeCode,
+    super.context,
+  }) : super(category: PtyErrorCategory.backpressure);
+
+  @override
+  String get _name => 'PtyBackpressureException';
 }
 
 /// Thrown when the native controller or Unix broker becomes unavailable.

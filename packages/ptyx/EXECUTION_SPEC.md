@@ -260,7 +260,7 @@ Document:
 - session and sub-resource states;
 - operation ordering and linearization points;
 - spawn completion;
-- write acceptance, capacity, flush, and failure;
+- synchronous write acceptance, bounded capacity, backpressure, and failure;
 - output listen, pause, resume, cancel, EOF, and errors;
 - child exit versus trailing output;
 - signal, resize, and metadata behavior;
@@ -416,10 +416,11 @@ required by the project documentation rules.
 The Dart API must:
 
 - make spawn asynchronous;
-- keep an allocation-conscious bounded fast path inside asynchronous writes
-  without hiding partial acceptance;
-- make input acceptance and input flush awaitable;
-- separate input failure, output failure, exit failure, and close failure;
+- make input admission synchronous, bounded, all-or-reject, and independent of
+  reactor progress;
+- keep native partial writes and temporary backpressure below the public API;
+- separate direction-scoped input failure, output failure, exit failure, and
+  close failure;
 - expose capabilities instead of ambiguous `null` or fabricated equivalence;
 - make drain-and-discard explicit and easy;
 - preserve raw bytes without encoding or line-ending assumptions;

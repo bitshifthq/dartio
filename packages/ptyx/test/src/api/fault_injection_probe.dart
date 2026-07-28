@@ -82,7 +82,6 @@ Future<void> _exerciseBrokerLoss() async {
 
   await outputFailure.timeout(const Duration(seconds: 5));
   await _expectInfrastructure(session.exitCode);
-  await _expectInfrastructure(session.inputDone);
   await _expectInfrastructure(session.close());
   final deadline = DateTime.now().add(const Duration(seconds: 5));
   while (await _processRunning(pid) && DateTime.now().isBefore(deadline)) {

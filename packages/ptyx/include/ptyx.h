@@ -18,7 +18,7 @@
 #define PTYX_EXPORT __attribute__((visibility("default")))
 #endif
 
-#define PTYX_ABI_VERSION 5u
+#define PTYX_ABI_VERSION 6u
 
 PTYX_EXPORT uint32_t ptyi_abi_version(void);
 /**
@@ -56,8 +56,8 @@ PTYX_EXPORT bool ptyi_activate(
     int64_t event_port);
 
 /**
- * Returns a positive accepted-input sequence, zero for temporary backpressure,
- * or -1 when the session can never accept more input.
+ * Returns one after admission, zero for temporary backpressure, or -1 when the
+ * session can never accept more input.
  */
 PTYX_EXPORT int64_t ptyi_write(
     uint64_t handle,
@@ -66,16 +66,6 @@ PTYX_EXPORT int64_t ptyi_write(
 
 PTYX_EXPORT bool ptyi_credit_async(uint64_t handle, size_t bytes);
 PTYX_EXPORT bool ptyi_pause(uint64_t handle, bool paused);
-
-/** Wait registration result: 0 failed, 1 ready, 2 armed. */
-PTYX_EXPORT int32_t ptyi_wait_capacity(
-    uint64_t handle,
-    size_t required,
-    uint64_t waiter);
-PTYX_EXPORT int32_t ptyi_wait_flush(
-    uint64_t handle,
-    uint64_t sequence,
-    uint64_t waiter);
 
 PTYX_EXPORT bool ptyi_exit_status(uint64_t handle, int64_t* status);
 PTYX_EXPORT int64_t ptyi_pid(uint64_t handle);

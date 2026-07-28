@@ -111,15 +111,15 @@ The public API must be:
 - byte-oriented at the transport boundary;
 - idiomatic for Dart;
 - difficult to misuse accidentally;
-- explicit about asynchronous completion and backpressure;
+- explicit about admission, backpressure, and delayed failure;
 - capability-driven where behavior cannot be portable;
 - fully documented, including errors and ordering.
 
 Potentially unbounded OS or lifecycle operations must be asynchronous. Process
-spawn, input writes that may wait for capacity, input flush, and session close
-belong in this category. A synchronous operation is acceptable only when it
-performs bounded work and cannot wait on a child, worker, descriptor, handle,
-queue, or external resource.
+spawn and session close belong in this category. Input admission is synchronous
+only because it performs bounded validation, ownership transfer, and queue
+insertion without waiting on a child, worker, descriptor, handle, or queue
+capacity.
 
 The default API must require no performance tuning. An advanced configuration
 surface may expose policy choices that callers need to enforce resource or
@@ -171,23 +171,26 @@ Each write must either be accepted in full into a bounded owned queue or be
 rejected in full. Partial acceptance must not be hidden.
 
 Accepted writes preserve invocation order. Native partial writes,
-interruptions, temporary readiness failures, and capacity waiting must be
-handled internally without changing that order. Completing the write operation
-means that `ptyx` accepted the bytes, not that the child consumed them.
+interruptions, and temporary readiness failures must be handled internally
+without changing that order. Returning from the write operation means that
+`ptyx` accepted the bytes, not that the child consumed them.
 
 The API must provide:
 
-- one all-or-reject asynchronous write operation with an allocation-conscious
-  fast path when capacity is immediately available;
-- a flush operation that observes completion of all preceding accepted input;
-- a dedicated way to observe terminal write failure.
-
-Successful flush means that the native writer passed the bytes to the
-pseudo-terminal master endpoint. It does not mean that the slave line
-discipline or child process consumed them.
+- one synchronous, all-or-reject write operation that transfers ownership into
+  bounded native storage without waiting for capacity;
+- a recoverable, typed backpressure error when the complete input cannot be
+  admitted;
+- sticky direction-scoped input failure after an unrecoverable native write
+  error, observable through a later write, terminal output, or close.
 
 Queue exhaustion must produce explicit backpressure. It must not cause
-unbounded growth or silent loss.
+unbounded growth, session failure, blocking admission, or silent loss.
+
+Temporary native write conditions are handled internally. An unrecoverable
+write failure disables input but does not terminate output, exit observation,
+signaling, metadata, or cleanup. Whole-session failure is reserved for loss of
+infrastructure or ownership that makes continued operation unsafe.
 
 ## Lifecycle and ownership
 
@@ -245,10 +248,11 @@ Errors must identify:
   details.
 
 Spawn, resize, metadata access, and queue rejection report their own failures.
-An asynchronous native write failure uses the input or session failure
-mechanism, not the output stream. Output read failures affect output. Wait
-failures affect exit observation. Mode-observation failures affect mode
-observation. Cleanup failures affect close.
+A delayed native input failure is retained for later writes and close and,
+after safely buffered bytes, becomes the terminal output event so it remains
+observable without a separate input-completion API. Output read failures
+affect output. Wait failures affect exit observation. Mode-observation
+failures affect mode observation. Cleanup failures affect close.
 
 An operation must distinguish an unavailable capability, a state in which the
 operation no longer applies, and a failed native attempt. For example, an
@@ -461,7 +465,7 @@ least:
 - arguments, environment, and working directory;
 - terminal size and resize;
 - byte input and output;
-- buffering, backpressure, input readiness, and flush;
+- buffering, synchronous acceptance, backpressure, and terminal input failure;
 - exit, signals, process groups, and job cleanup;
 - terminal metadata and modes;
 - errors, cancellation, and isolate loss;
