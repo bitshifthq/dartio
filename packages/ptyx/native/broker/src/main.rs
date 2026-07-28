@@ -996,26 +996,8 @@ impl Broker {
         }
 
         let session = self.allocate_slot(spawned.pid);
-        let early_exit = match self.register_process(spawned.pid, session) {
-            Ok(()) => None,
-            Err(error) if error.raw_os_error() == Some(libc::ESRCH) => {
-                // A short-lived child can disappear from kqueue lookup before
-                // waitid exposes its status. ESRCH proves there is no live
-                // process to register, so wait for the already-committed exit
-                // instead of converting the publication race into a spawn
-                // failure.
-                let exit = await_exit(spawned.pid)?;
-                if let Some((index, generation)) = split_session(session) {
-                    let slot = &mut self.slots[index];
-                    if slot.generation == generation {
-                        slot.state = SlotState::Exited {
-                            exit,
-                            pid: spawned.pid,
-                        };
-                    }
-                }
-                Some(exit)
-            }
+        let early_exit = match self.register_or_observe_exit(spawned.pid, session) {
+            Ok(exit) => exit,
             Err(error) => {
                 self.vacate(session);
                 kill_and_reap(spawned.pid);
@@ -1026,6 +1008,17 @@ impl Broker {
                 return send_frame(self.control.as_raw_fd(), &response, None);
             }
         };
+        if let Some(exit) = early_exit {
+            if let Some((index, generation)) = split_session(session) {
+                let slot = &mut self.slots[index];
+                if slot.generation == generation {
+                    slot.state = SlotState::Exited {
+                        exit,
+                        pid: spawned.pid,
+                    };
+                }
+            }
+        }
         let mut response = Frame::new(SPAWN_OK);
         response.request = frame.request;
         response.session = session;
@@ -1046,6 +1039,40 @@ impl Broker {
             send_frame(self.control.as_raw_fd(), &notification, None)?;
         }
         Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    fn register_or_observe_exit(
+        &self,
+        pid: libc::pid_t,
+        session: u64,
+    ) -> io::Result<Option<ExitStatus>> {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match self.register_process(pid, session) {
+                Ok(()) => return Ok(None),
+                Err(error) if error.raw_os_error() == Some(libc::ESRCH) => {
+                    if let Some(exit) = observe_exit(pid)? {
+                        return Ok(Some(exit));
+                    }
+                    if Instant::now() >= deadline {
+                        return Err(error);
+                    }
+                    thread::sleep(Duration::from_millis(1));
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn register_or_observe_exit(
+        &self,
+        pid: libc::pid_t,
+        session: u64,
+    ) -> io::Result<Option<ExitStatus>> {
+        self.register_process(pid, session)?;
+        Ok(None)
     }
 
     fn handle_close(&mut self, frame: Frame) -> io::Result<()> {
