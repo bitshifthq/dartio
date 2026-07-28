@@ -373,12 +373,14 @@ Review correctly rejected the model as runtime proof. It also found:
 - the slice had no C ABI or Dart port-loss evidence.
 
 That prototype therefore required Windows build 26100 or newer. The selected
-production implementation later replaced the detached cleanup design with a
-bounded closer pool, 128-session admission, and process-lifetime quarantine,
-allowing the ConPTY introduction floor of build 17763. It also uses random
-first-instance secured pipes, exact UTF-16 environment handling, and exact
-exit-code observation. Windows x64 and arm64 runtime qualification remain
-explicit missing evidence; cross-compilation is not a substitute.
+production implementation replaced the detached cleanup design with a bounded
+closer pool, 128-session admission, and process-lifetime quarantine. Retained
+Server 2022 testing later confirmed that pre-26100 ConPTY still leaked one
+process handle per completed session, so production keeps the build 26100
+floor. It also uses random first-instance secured pipes, exact UTF-16
+environment handling, and exact exit-code observation. Windows x64 and arm64
+runtime qualification remain explicit missing evidence; cross-compilation is
+not a substitute.
 
 ## Candidate B selection
 

@@ -129,6 +129,8 @@ system:
   device name.
 - Windows uses ConPTY. Unix signal and terminal-mode semantics are unavailable;
   `kill` terminates the owned job using Windows process semantics.
+- Windows requires build 26100 or newer so pseudoconsole shutdown is
+  nonblocking and all per-session resources can be reclaimed.
 - ConPTY resize uses cell dimensions. Pixel dimensions remain cached metadata.
 
 The implementation targets Linux, macOS, and Windows on x64 and arm64.

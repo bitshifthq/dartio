@@ -88,7 +88,7 @@ struct QueuedOutput {
 
 struct Session {
     input_pipe: OwnedHandle,
-    output_pipe: Option<OwnedHandle>,
+    output_pipe: OwnedHandle,
     pseudoconsole: Option<OwnedPseudoConsole>,
     process: OwnedHandle,
     job: OwnedHandle,
@@ -139,7 +139,7 @@ impl Session {
     ) -> Self {
         Self {
             input_pipe: spawned.input,
-            output_pipe: Some(spawned.output),
+            output_pipe: spawned.output,
             pseudoconsole: Some(spawned.pseudoconsole),
             process: spawned.process,
             job: spawned.job,
@@ -1273,13 +1273,7 @@ fn process_commands(
 }
 
 fn associate_session(iocp: &Arc<OwnedHandle>, handle: u64, session: &Session) -> io::Result<()> {
-    for pipe in [
-        &session.input_pipe,
-        session
-            .output_pipe
-            .as_ref()
-            .expect("new session owns its output pipe"),
-    ] {
+    for pipe in [&session.input_pipe, &session.output_pipe] {
         let associated =
             unsafe { CreateIoCompletionPort(pipe.raw(), iocp.raw(), handle as usize, 0) };
         if associated.is_null() {
@@ -1465,11 +1459,7 @@ fn ensure_read(
     counters.read_syscalls += 1;
     let submitted = unsafe {
         ReadFile(
-            session
-                .output_pipe
-                .as_ref()
-                .expect("active read owns its output pipe")
-                .raw(),
+            session.output_pipe.raw(),
             operation.buffer.as_mut_ptr(),
             capacity as u32,
             null_mut(),
@@ -1556,8 +1546,6 @@ fn start_pseudoconsole_close(
 ) {
     if session.pseudoconsole_close_started
         || session.exit_status.is_none()
-        || !session.output_eof
-        || session.read.is_some()
         || (session.paused && !session.close_started)
     {
         return;
@@ -1565,10 +1553,6 @@ fn start_pseudoconsole_close(
     let Some(pseudoconsole) = session.pseudoconsole.take() else {
         return;
     };
-    // Pre-26100 ConPTY requires the host output endpoint to be closed or
-    // continuously drained while HPCON closes. EOF proves the final read
-    // completed, so close the endpoint before dispatching ClosePseudoConsole.
-    session.output_pipe.take();
     let Some(permit) = session.close_permit.take() else {
         quarantine_pseudoconsole(pseudoconsole, None);
         session.cleanup_failed = true;

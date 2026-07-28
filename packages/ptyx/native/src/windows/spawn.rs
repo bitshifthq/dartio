@@ -35,9 +35,10 @@ use windows_sys::Win32::System::IO::{GetOverlappedResult, OVERLAPPED};
 
 use super::handles::{AttributeList, OwnedHandle, OwnedPseudoConsole, PipeSecurity};
 
-// ConPTY first shipped in Windows 10 version 1809. Older releases cannot
-// satisfy the package contract because CreatePseudoConsole is unavailable.
-const MINIMUM_WINDOWS_BUILD: u32 = 17_763;
+// Build 26100 made ClosePseudoConsole nonblocking. Older implementations can
+// retain a process handle per session even after the child, pipes, HPCON, and
+// job are closed, so they cannot satisfy the package cleanup contract.
+const MINIMUM_WINDOWS_BUILD: u32 = 26_100;
 const FILE_FLAG_FIRST_PIPE_INSTANCE: u32 = 0x0008_0000;
 static PIPE_FALLBACK_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 

@@ -996,15 +996,32 @@ impl Broker {
         }
 
         let session = self.allocate_slot(spawned.pid);
-        if let Err(error) = self.register_process(spawned.pid, session) {
-            self.vacate(session);
-            kill_and_reap(spawned.pid);
-            let mut response = Frame::new(ERROR);
-            response.request = frame.request;
-            response.aux = ERROR_POST_EXEC;
-            response.code = error.raw_os_error().unwrap_or(libc::EIO);
-            return send_frame(self.control.as_raw_fd(), &response, None);
-        }
+        let early_exit = match self.register_process(spawned.pid, session) {
+            Ok(()) => None,
+            Err(error) => match observe_exit(spawned.pid)? {
+                Some(exit) => {
+                    if let Some((index, generation)) = split_session(session) {
+                        let slot = &mut self.slots[index];
+                        if slot.generation == generation {
+                            slot.state = SlotState::Exited {
+                                exit,
+                                pid: spawned.pid,
+                            };
+                        }
+                    }
+                    Some(exit)
+                }
+                None => {
+                    self.vacate(session);
+                    kill_and_reap(spawned.pid);
+                    let mut response = Frame::new(ERROR);
+                    response.request = frame.request;
+                    response.aux = ERROR_POST_EXEC;
+                    response.code = error.raw_os_error().unwrap_or(libc::EIO);
+                    return send_frame(self.control.as_raw_fd(), &response, None);
+                }
+            },
+        };
         let mut response = Frame::new(SPAWN_OK);
         response.request = frame.request;
         response.session = session;
@@ -1017,6 +1034,12 @@ impl Broker {
             self.kill_running(session);
             self.reap_blocking(session);
             return Err(error);
+        }
+        if let Some(exit) = early_exit {
+            let mut notification = Frame::new(EXIT);
+            notification.session = session;
+            notification.code = exit.code;
+            send_frame(self.control.as_raw_fd(), &notification, None)?;
         }
         Ok(())
     }

@@ -19,13 +19,14 @@ useful build evidence but is not runtime qualification.
 
 ## Windows floor
 
-ConPTY is required, so the runtime floor is Windows 10 version 1809, build
-17763. Older pseudoconsole implementations may block during close. `ptyx`
-therefore performs `ClosePseudoConsole` on a bounded process-wide closer pool
-and limits admission to 128 live or quarantined sessions. A timed-out close
-retains ownership until the worker returns or process shutdown reclaims it.
-Windows client and Server SKUs still require separate retained runtime
-qualification.
+The runtime floor is build 26100, where `ClosePseudoConsole` became
+nonblocking. Retained Windows Server 2022 evidence showed that its older
+ConPTY implementation retained one process handle per completed session even
+after the child, pipes, HPCON, and job were closed. Supporting that build
+would violate the package cleanup contract. `ptyx` still performs
+`ClosePseudoConsole` on a bounded process-wide closer pool and limits
+admission to 128 live or quarantined sessions. Windows client and Server SKUs
+require separate retained runtime qualification.
 
 ## Unix helper
 
