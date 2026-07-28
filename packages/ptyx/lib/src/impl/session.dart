@@ -204,7 +204,11 @@ final class NativeSession implements PtySession, Finalizable {
         _SessionRegistryToken(runtime, handle),
         detach: session,
       );
-      if (!controllerActivate(handle, runtime.outputPort, runtime.eventPort)) {
+      if (!controllerActivate(
+        handle,
+        runtime.notificationPort,
+        runtime.notificationPort,
+      )) {
         runtime._removeSession(handle);
         controllerClose(handle);
         throw const PtyInfrastructureException(
@@ -876,14 +880,15 @@ final class _ControllerRuntime {
         'native controller initialization failed',
       );
     }
-    _output = RawReceivePort(_onOutput)..keepIsolateAlive = false;
-    _events = RawReceivePort(_onEvent)..keepIsolateAlive = false;
+    // Output and terminal notices must share one port. Native sends them in
+    // order, but Dart does not preserve ordering across separate ports; an EOF
+    // notice could otherwise overtake the final output chunk.
+    _notifications = RawReceivePort(_onNotification)..keepIsolateAlive = false;
   }
 
   static final instance = _ControllerRuntime._();
 
-  late final RawReceivePort _output;
-  late final RawReceivePort _events;
+  late final RawReceivePort _notifications;
   final Map<int, WeakReference<NativeSession>> _sessions = {};
   final Map<int, _PendingWaiter> _waiters = {};
   final Map<int, int> _credit = {};
@@ -893,8 +898,7 @@ final class _ControllerRuntime {
   var _pendingSpawns = 0;
   var _idleReleaseScheduled = false;
 
-  int get outputPort => _output.sendPort.nativePort;
-  int get eventPort => _events.sendPort.nativePort;
+  int get notificationPort => _notifications.sendPort.nativePort;
 
   Future<SendPort> _beginSpawn() async {
     _pendingSpawns++;
@@ -987,8 +991,7 @@ final class _ControllerRuntime {
 
   void _addSession(NativeSession session) {
     _sessions[session._handle] = WeakReference(session);
-    _output.keepIsolateAlive = true;
-    _events.keepIsolateAlive = true;
+    _notifications.keepIsolateAlive = true;
   }
 
   void _removeSession(int handle) {
@@ -1012,8 +1015,7 @@ final class _ControllerRuntime {
     Timer.run(() {
       _idleReleaseScheduled = false;
       if (_sessions.isEmpty && _pendingSpawns == 0) {
-        _output.keepIsolateAlive = false;
-        _events.keepIsolateAlive = false;
+        _notifications.keepIsolateAlive = false;
         _stopSupervisorIfIdle();
       }
     });
@@ -1039,10 +1041,12 @@ final class _ControllerRuntime {
     }
   }
 
-  void _onOutput(Object? message) {
+  void _onNotification(Object? message) {
     if (message case [final int handle, final Uint8List bytes]) {
       _session(handle)?._onOutput(bytes);
+      return;
     }
+    _onEvent(message);
   }
 
   void _onEvent(Object? message) {

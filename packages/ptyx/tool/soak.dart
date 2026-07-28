@@ -394,19 +394,35 @@ $ids = [System.Collections.Generic.HashSet[uint32]]::new()
 do {
   $before = $ids.Count
   foreach ($process in $all) {
+    # Exclude this sampler before walking descendants. Including it and then
+    # removing only its PID can retain transient CIM helper processes.
+    if ([uint32]$process.ProcessId -eq [uint32]$PID) {
+      continue
+    }
     if ($ids.Contains([uint32]$process.ParentProcessId)) {
       [void]$ids.Add([uint32]$process.ProcessId)
     }
   }
 } while ($ids.Count -ne $before)
-[void]$ids.Remove([uint32]$PID)
-$processes = Get-Process -Id @($ids) -ErrorAction SilentlyContinue
-$cpu = ($processes | Measure-Object CPU -Sum).Sum
-$rss = ($processes | Measure-Object WorkingSet64 -Sum).Sum
-$handles = ($processes | Measure-Object HandleCount -Sum).Sum
-$threads = ($processes | ForEach-Object { $_.Threads.Count } |
-  Measure-Object -Sum).Sum
-"$([int64]($cpu * 1000000))|$([int64]$rss)|$([int64]$handles)|$([int64]$threads)|$($processes.Count)"
+# Aggregate the same CIM snapshot used to establish ancestry. Resolving the
+# collected numeric IDs again with Get-Process can attach a recycled child PID
+# to an unrelated process while short-lived PTY children are churning.
+$processes = @($all | Where-Object {
+  $ids.Contains([uint32]$_.ProcessId) -and
+    [uint32]$_.ProcessId -ne [uint32]$PID
+})
+[uint64]$cpu100ns = 0
+[uint64]$rss = 0
+[uint64]$handles = 0
+[uint64]$threads = 0
+foreach ($process in $processes) {
+  $cpu100ns += [uint64]$process.KernelModeTime
+  $cpu100ns += [uint64]$process.UserModeTime
+  $rss += [uint64]$process.WorkingSetSize
+  $handles += [uint64]$process.HandleCount
+  $threads += [uint64]$process.ThreadCount
+}
+"$([int64]($cpu100ns / 10))|$([int64]$rss)|$([int64]$handles)|$([int64]$threads)|$($processes.Count)"
 ''',
       ],
       environment: {'PTYX_RESOURCE_ROOT_PID': '$pid'},

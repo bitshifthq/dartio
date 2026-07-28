@@ -266,9 +266,9 @@ void main() {
 
         final received = await fixtureOutput(
           session,
-        ).expand((chunk) => chunk).take(byteCount).length.timeout(longTimeout);
+        ).expand((chunk) => chunk).toList().timeout(longTimeout);
 
-        expect(received, byteCount);
+        expect(received, hasLength(byteCount));
       }, testOn: 'posix');
 
       test('observes the final state of large ConPTY output', () async {
