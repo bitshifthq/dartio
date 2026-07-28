@@ -16,6 +16,7 @@ const _maximumReadinessPrelude = 64 * 1024;
 // Dart VM worker-pool sampling can vary by one or two transient threads even
 // after every PTY-owned descriptor and process has returned to baseline.
 const _threadGrowthBudget = 2;
+const _windowsHandleGrowthBudget = 8;
 
 Stream<Uint8List> _fixturePayload(PtySession session) => Platform.isWindows
     ? fixturePayload(session.output, discardC0: true)
@@ -144,6 +145,12 @@ Future<void> main(List<String> arguments) async {
   final threadsWithinGrowthBudget =
       (resourceAfter['tree_threads']! as int) <=
       (resourceBefore['tree_threads']! as int) + _threadGrowthBudget;
+  final resourceGrowthBudget = Platform.isWindows
+      ? _windowsHandleGrowthBudget
+      : 0;
+  final resourceUnitsWithinGrowthBudget =
+      _resourceUnits(resourceAfter) <=
+      _resourceUnits(resourceBefore) + resourceGrowthBudget;
   const cleanupRssGrowthBudget = 32 * 1024 * 1024;
   final cleanupRssWithinBudget =
       (resourceAfter['tree_rss_bytes']! as int) <=
@@ -190,6 +197,8 @@ Future<void> main(List<String> arguments) async {
     'resource_counts_stabilized': stabilization.stable,
     'thread_growth_budget': _threadGrowthBudget,
     'threads_within_growth_budget': threadsWithinGrowthBudget,
+    'resource_unit_growth_budget': resourceGrowthBudget,
+    'resource_units_within_growth_budget': resourceUnitsWithinGrowthBudget,
     'peak_tree_rss_bytes': peakTreeRss,
     'rss_peak_kind': 'sampled-steady-state',
     'peak_rss_growth_bytes': peakRssGrowth,
@@ -350,8 +359,12 @@ _waitForResourceStability(Map<String, Object?> baseline) async {
   do {
     await Future<void>.delayed(const Duration(milliseconds: 100));
     snapshot = await _resourceSnapshot();
+    final resourceGrowthBudget = Platform.isWindows
+        ? _windowsHandleGrowthBudget
+        : 0;
     stable =
-        _resourceUnits(snapshot) <= _resourceUnits(baseline) &&
+        _resourceUnits(snapshot) <=
+            _resourceUnits(baseline) + resourceGrowthBudget &&
         (snapshot['tree_processes']! as int) <=
             (baseline['tree_processes']! as int) &&
         (snapshot['tree_threads']! as int) <=

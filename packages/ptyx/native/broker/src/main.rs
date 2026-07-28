@@ -825,41 +825,30 @@ impl Broker {
 
     #[cfg(target_os = "macos")]
     fn event_loop(&mut self) -> io::Result<()> {
+        let control_change = libc::kevent {
+            ident: self.control.as_raw_fd() as usize,
+            filter: libc::EVFILT_READ,
+            flags: libc::EV_ADD | libc::EV_ENABLE,
+            fflags: 0,
+            data: 0,
+            udata: ptr::null_mut(),
+        };
+        if unsafe {
+            libc::kevent(
+                self.kqueue.as_raw_fd(),
+                &control_change,
+                1,
+                ptr::null_mut(),
+                0,
+                ptr::null(),
+            )
+        } < 0
+        {
+            return Err(io::Error::last_os_error());
+        }
         loop {
-            let mut control = libc::pollfd {
-                fd: self.control.as_raw_fd(),
-                events: libc::POLLIN,
-                revents: 0,
-            };
-            let ready = unsafe { libc::poll(&mut control, 1, 10) };
-            if ready < 0 {
-                let error = io::Error::last_os_error();
-                if error.kind() == io::ErrorKind::Interrupted {
-                    continue;
-                }
-                return Err(error);
-            }
-            if control.revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0 {
-                return Ok(());
-            }
-            if ready > 0 {
-                match receive_frame(self.control.as_raw_fd())? {
-                    Some((frame, passed)) => {
-                        drop(passed);
-                        if !self.handle_request(frame)? {
-                            return Ok(());
-                        }
-                    }
-                    None => return Ok(()),
-                }
-            }
-
             let mut events: [MaybeUninit<libc::kevent>; 32] =
                 unsafe { MaybeUninit::uninit().assume_init() };
-            let timeout = libc::timespec {
-                tv_sec: 0,
-                tv_nsec: 0,
-            };
             let count = unsafe {
                 libc::kevent(
                     self.kqueue.as_raw_fd(),
@@ -867,7 +856,7 @@ impl Broker {
                     0,
                     events.as_mut_ptr().cast(),
                     events.len() as i32,
-                    &timeout,
+                    ptr::null(),
                 )
             };
             if count < 0 {
@@ -879,7 +868,22 @@ impl Broker {
             }
             for event in &events[..count as usize] {
                 let event = unsafe { event.assume_init() };
-                if event.filter == libc::EVFILT_PROC {
+                if event.filter == libc::EVFILT_READ
+                    && event.ident == self.control.as_raw_fd() as usize
+                {
+                    if event.flags & libc::EV_ERROR != 0 {
+                        return Err(io::Error::from_raw_os_error(event.data as i32));
+                    }
+                    match receive_frame(self.control.as_raw_fd())? {
+                        Some((frame, passed)) => {
+                            drop(passed);
+                            if !self.handle_request(frame)? {
+                                return Ok(());
+                            }
+                        }
+                        None => return Ok(()),
+                    }
+                } else if event.filter == libc::EVFILT_PROC {
                     self.reap_event(event.udata as usize as u64)?;
                 }
             }
