@@ -1745,11 +1745,9 @@ fn reap_abandoned(
         let removable = sessions
             .get(handle)
             .is_some_and(|session| session.abandoned && session.terminal());
-        if removable {
-            if sessions.remove(handle).is_some() {
-                if let Ok(mut values) = admissions.lock() {
-                    values.remove(&handle);
-                }
+        if removable && sessions.remove(handle).is_some() {
+            if let Ok(mut values) = admissions.lock() {
+                values.remove(&handle);
             }
         }
     }
