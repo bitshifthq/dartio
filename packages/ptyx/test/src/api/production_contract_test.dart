@@ -76,8 +76,14 @@ void main() {
     'fast exits cannot outrun Dart session publication',
     () async {
       for (var iteration = 0; iteration < 100; iteration++) {
-        final session = await PtySession.spawn(shell('exit 7'));
-        expect(await session.exitCode, 7);
+        final options = Platform.isWindows
+            ? shell('exit 7')
+            : const PtySpawnOptions(
+                executable: '/usr/bin/true',
+                initialSize: size,
+              );
+        final session = await PtySession.spawn(options);
+        expect(await session.exitCode, Platform.isWindows ? 7 : 0);
         await session.close();
       }
     },

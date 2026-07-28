@@ -13,6 +13,9 @@ const _size = PtySize(rows: 24, columns: 80);
 const _operationTimeout = Duration(seconds: 30);
 const _ready = [82, 69, 65, 68, 89];
 const _maximumReadinessPrelude = 64 * 1024;
+// Dart VM worker-pool sampling can vary by one or two transient threads even
+// after every PTY-owned descriptor and process has returned to baseline.
+const _threadGrowthBudget = 2;
 
 Stream<Uint8List> _fixturePayload(PtySession session) => Platform.isWindows
     ? fixturePayload(session.output, discardC0: true)
@@ -138,6 +141,9 @@ Future<void> main(List<String> arguments) async {
   final stabilization = await _waitForResourceStability(resourceBefore);
   await progress.record('resource-stabilization-completed');
   final resourceAfter = stabilization.snapshot;
+  final threadsWithinGrowthBudget =
+      (resourceAfter['tree_threads']! as int) <=
+      (resourceBefore['tree_threads']! as int) + _threadGrowthBudget;
   const cleanupRssGrowthBudget = 32 * 1024 * 1024;
   final cleanupRssWithinBudget =
       (resourceAfter['tree_rss_bytes']! as int) <=
@@ -182,6 +188,8 @@ Future<void> main(List<String> arguments) async {
     'resource_after': resourceAfter,
     'resource_stabilization_ms': stabilization.elapsed.inMilliseconds,
     'resource_counts_stabilized': stabilization.stable,
+    'thread_growth_budget': _threadGrowthBudget,
+    'threads_within_growth_budget': threadsWithinGrowthBudget,
     'peak_tree_rss_bytes': peakTreeRss,
     'rss_peak_kind': 'sampled-steady-state',
     'peak_rss_growth_bytes': peakRssGrowth,
@@ -347,7 +355,7 @@ _waitForResourceStability(Map<String, Object?> baseline) async {
         (snapshot['tree_processes']! as int) <=
             (baseline['tree_processes']! as int) &&
         (snapshot['tree_threads']! as int) <=
-            (baseline['tree_threads']! as int);
+            (baseline['tree_threads']! as int) + _threadGrowthBudget;
   } while (!stable && stopwatch.elapsed < const Duration(seconds: 3));
   stopwatch.stop();
   return (snapshot: snapshot, stable: stable, elapsed: stopwatch.elapsed);

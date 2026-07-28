@@ -842,7 +842,7 @@ impl Broker {
             if control.revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0 {
                 return Ok(());
             }
-            if control.revents & libc::POLLIN != 0 {
+            if ready > 0 {
                 match receive_frame(self.control.as_raw_fd())? {
                     Some((frame, passed)) => {
                         drop(passed);

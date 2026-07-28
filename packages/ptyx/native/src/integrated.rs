@@ -594,6 +594,7 @@ fn reactor(
     broker: BrokerClient,
 ) {
     let mut sessions: GenerationRegistry<Session> = GenerationRegistry::new();
+    let mut pending_broker_exits = HashMap::new();
     let mut counters = RuntimeCounters::default();
     let mut rotation = 0;
     loop {
@@ -658,6 +659,7 @@ fn reactor(
                 &commands,
                 &notices,
                 &mut sessions,
+                &mut pending_broker_exits,
                 &mut counters,
                 &broker,
             );
@@ -717,6 +719,7 @@ fn reactor(
     }
 
     let mut sessions: GenerationRegistry<Session> = GenerationRegistry::new();
+    let mut pending_broker_exits = HashMap::new();
     let mut counters = RuntimeCounters::default();
     let mut rotation = 0;
     loop {
@@ -759,6 +762,7 @@ fn reactor(
                     &commands,
                     &notices,
                     &mut sessions,
+                    &mut pending_broker_exits,
                     &mut counters,
                     &broker,
                 );
@@ -804,6 +808,7 @@ fn process_commands(
     commands: &Receiver<Command>,
     notices: &SyncSender<Notice>,
     sessions: &mut GenerationRegistry<Session>,
+    pending_broker_exits: &mut HashMap<u64, i32>,
     counters: &mut RuntimeCounters,
     broker_client: &BrokerClient,
 ) -> (bool, bool) {
@@ -820,11 +825,11 @@ fn process_commands(
                 output_capacity,
                 reply,
             } => {
-                let result = Ok(sessions.insert(Session::from_broker(
-                    broker,
-                    input_capacity,
-                    output_capacity,
-                )));
+                let mut session = Session::from_broker(broker, input_capacity, output_capacity);
+                session.exit_status = pending_broker_exits
+                    .remove(&session.broker_session)
+                    .map(i64::from);
+                let result = Ok(sessions.insert(session));
                 let _ = reply.send(result);
             }
             Command::Activate { handle, reply } => {
@@ -1051,9 +1056,12 @@ fn process_commands(
                     if sessions.get(handle).is_some_and(|session| session.active) {
                         send_notice(notices, Notice::Exit(handle), counters);
                     }
+                } else {
+                    pending_broker_exits.insert(broker_session, status);
                 }
             }
             Command::BrokerLost => {
+                pending_broker_exits.clear();
                 fail_all(notices, sessions, counters, broker_client);
             }
             Command::Shutdown => return (true, false),

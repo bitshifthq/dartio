@@ -23,7 +23,7 @@ use windows_sys::Win32::System::IO::{
     CancelIoEx, CreateIoCompletionPort, GetQueuedCompletionStatus, PostQueuedCompletionStatus,
 };
 
-use self::handles::{IoOperation, OwnedHandle, OwnedProcessWait, OwnedPseudoConsole};
+use self::handles::{IoOperation, OwnedHandle, OwnedPseudoConsole};
 pub(crate) use self::spawn::BrokerSpawn;
 use crate::oneshot::{self, Sender as ReplySender};
 use crate::GenerationRegistry;
@@ -40,7 +40,6 @@ const SESSION_NOTICE_RESERVATIONS: usize = 4;
 const CLOSE_ADMISSION_CAPACITY: usize = 128;
 const QUARANTINED_IO_CAPACITY: usize = CLOSE_ADMISSION_CAPACITY * 2;
 const ACTIVATION_TIMEOUT: Duration = Duration::from_secs(5);
-const EXIT_KEY_TAG: usize = 1_usize << (usize::BITS - 1);
 const CLOSE_KEY_TAG: usize = 1_usize << (usize::BITS - 2);
 static QUARANTINED_IO_OPERATIONS: AtomicUsize = AtomicUsize::new(0);
 static QUARANTINED_PSEUDOCONSOLES: AtomicUsize = AtomicUsize::new(0);
@@ -92,7 +91,6 @@ struct Session {
     output_pipe: OwnedHandle,
     pseudoconsole: Option<OwnedPseudoConsole>,
     process: OwnedHandle,
-    process_wait: Option<OwnedProcessWait>,
     job: OwnedHandle,
     close_permit: Option<ClosePermit>,
     notice_reservations: Vec<NoticeReservation>,
@@ -144,7 +142,6 @@ impl Session {
             output_pipe: spawned.output,
             pseudoconsole: Some(spawned.pseudoconsole),
             process: spawned.process,
-            process_wait: None,
             job: spawned.job,
             close_permit: Some(close_permit),
             notice_reservations,
@@ -940,6 +937,14 @@ fn reactor(
             &mut sessions,
             &mut counters,
         );
+        poll_process_exits(
+            iocp.raw(),
+            &iocp_sender,
+            &closer,
+            &notices,
+            &mut sessions,
+            &mut counters,
+        );
         let timeout = output_timeout(&sessions);
         let mut transferred = 0;
         let mut key = 0;
@@ -987,19 +992,6 @@ fn reactor(
             }
         }
         counters.reactor_events += 1;
-        if key & EXIT_KEY_TAG != 0 {
-            let handle = (key & !EXIT_KEY_TAG) as u64;
-            handle_process_exit(
-                iocp.raw(),
-                &iocp_sender,
-                handle,
-                &closer,
-                &notices,
-                &mut sessions,
-                &mut counters,
-            );
-            continue;
-        }
         let handle = key as u64;
         let error = (succeeded == 0).then(io::Error::last_os_error);
         handle_io_completion(
@@ -1280,11 +1272,7 @@ fn process_commands(
     false
 }
 
-fn associate_session(
-    iocp: &Arc<OwnedHandle>,
-    handle: u64,
-    session: &mut Session,
-) -> io::Result<()> {
+fn associate_session(iocp: &Arc<OwnedHandle>, handle: u64, session: &Session) -> io::Result<()> {
     for pipe in [&session.input_pipe, &session.output_pipe] {
         let associated =
             unsafe { CreateIoCompletionPort(pipe.raw(), iocp.raw(), handle as usize, 0) };
@@ -1292,12 +1280,39 @@ fn associate_session(
             return Err(io::Error::last_os_error());
         }
     }
-    session.process_wait = Some(OwnedProcessWait::register(
-        session.process.raw(),
-        Arc::clone(iocp),
-        handle as usize | EXIT_KEY_TAG,
-    )?);
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn poll_process_exits(
+    iocp: HANDLE,
+    iocp_sender: &IocpSender,
+    closer: &CloserPool,
+    notices: &NoticeEmitter,
+    sessions: &mut GenerationRegistry<Session>,
+    counters: &mut RuntimeCounters,
+) {
+    let exited: Vec<_> = sessions
+        .handles()
+        .into_iter()
+        .filter(|handle| {
+            sessions.get(*handle).is_some_and(|session| {
+                session.exit_status.is_none()
+                    && unsafe { WaitForSingleObject(session.process.raw(), 0) } == WAIT_OBJECT_0
+            })
+        })
+        .collect();
+    for handle in exited {
+        handle_process_exit(
+            iocp,
+            iocp_sender,
+            handle,
+            closer,
+            notices,
+            sessions,
+            counters,
+        );
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1810,6 +1825,7 @@ fn reap_abandoned(
 }
 
 fn output_timeout(sessions: &GenerationRegistry<Session>) -> u32 {
+    const PROCESS_POLL_INTERVAL_MS: u32 = 10;
     let output_deadline = sessions
         .handles()
         .into_iter()
@@ -1829,17 +1845,22 @@ fn output_timeout(sessions: &GenerationRegistry<Session>) -> u32 {
         (left, right) => left.or(right),
     };
     let Some(deadline) = deadline else {
-        return INFINITE;
+        return if sessions.handles().is_empty() {
+            INFINITE
+        } else {
+            PROCESS_POLL_INTERVAL_MS
+        };
     };
     let now = Instant::now();
     if deadline <= now {
         return 0;
     }
-    deadline
+    (deadline
         .duration_since(now)
         .as_millis()
         .max(1)
-        .min(u128::from(u32::MAX - 1)) as u32
+        .min(u128::from(u32::MAX - 1)) as u32)
+        .min(PROCESS_POLL_INTERVAL_MS)
 }
 
 fn send_lifecycle_notice(

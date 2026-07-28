@@ -3,24 +3,19 @@ use std::io;
 use std::mem::{size_of, zeroed};
 use std::pin::Pin;
 use std::ptr::{null, null_mut};
-use std::sync::Arc;
 
-use windows_sys::Win32::Foundation::{
-    CloseHandle, GetLastError, LocalFree, ERROR_IO_PENDING, HANDLE, INVALID_HANDLE_VALUE,
-    WAIT_OBJECT_0,
-};
+use windows_sys::Win32::Foundation::{CloseHandle, LocalFree, HANDLE, INVALID_HANDLE_VALUE};
 use windows_sys::Win32::Security::Authorization::{
     ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
 };
 use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
 use windows_sys::Win32::System::Console::{ClosePseudoConsole, HPCON};
 use windows_sys::Win32::System::Threading::{
-    CreateEventW, DeleteProcThreadAttributeList, InitializeProcThreadAttributeList,
-    RegisterWaitForSingleObject, UnregisterWaitEx, UpdateProcThreadAttribute, WaitForSingleObject,
-    INFINITE, LPPROC_THREAD_ATTRIBUTE_LIST, PROC_THREAD_ATTRIBUTE_JOB_LIST,
-    PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, WT_EXECUTEONLYONCE,
+    DeleteProcThreadAttributeList, InitializeProcThreadAttributeList, UpdateProcThreadAttribute,
+    LPPROC_THREAD_ATTRIBUTE_LIST, PROC_THREAD_ATTRIBUTE_JOB_LIST,
+    PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE,
 };
-use windows_sys::Win32::System::IO::{PostQueuedCompletionStatus, OVERLAPPED};
+use windows_sys::Win32::System::IO::OVERLAPPED;
 
 pub(crate) struct OwnedHandle(HANDLE);
 
@@ -53,83 +48,6 @@ impl Drop for OwnedHandle {
         unsafe {
             CloseHandle(self.0);
         }
-    }
-}
-
-struct ProcessWaitContext {
-    completion_port: Arc<OwnedHandle>,
-    completion_key: usize,
-}
-
-pub(crate) struct OwnedProcessWait {
-    wait: HANDLE,
-    context: *mut ProcessWaitContext,
-}
-
-// The registered wait and its callback context are transferred to the reactor
-// thread. Drop synchronously unregisters the callback before freeing context.
-unsafe impl Send for OwnedProcessWait {}
-
-impl OwnedProcessWait {
-    pub(crate) fn register(
-        process: HANDLE,
-        completion_port: Arc<OwnedHandle>,
-        completion_key: usize,
-    ) -> io::Result<Self> {
-        let context = Box::into_raw(Box::new(ProcessWaitContext {
-            completion_port,
-            completion_key,
-        }));
-        let mut wait = null_mut();
-        let registered = unsafe {
-            RegisterWaitForSingleObject(
-                &mut wait,
-                process,
-                Some(post_process_exit),
-                context.cast(),
-                INFINITE,
-                WT_EXECUTEONLYONCE,
-            )
-        };
-        if registered == 0 {
-            unsafe {
-                drop(Box::from_raw(context));
-            }
-            return Err(io::Error::last_os_error());
-        }
-        Ok(Self { wait, context })
-    }
-}
-
-impl Drop for OwnedProcessWait {
-    fn drop(&mut self) {
-        let completion = OwnedHandle::new(unsafe { CreateEventW(null(), 1, 0, null()) });
-        let unregistered = completion.as_ref().is_ok_and(|completion| {
-            let result = unsafe { UnregisterWaitEx(self.wait, completion.raw()) };
-            let pending = result == 0 && unsafe { GetLastError() } == ERROR_IO_PENDING;
-            (result != 0 || pending)
-                && unsafe { WaitForSingleObject(completion.raw(), INFINITE) } == WAIT_OBJECT_0
-        });
-        // A signaled completion event proves no callback can still access the
-        // context. If the event could not be created, retain the synchronous
-        // fallback used by the API for the same guarantee.
-        if unregistered || unsafe { UnregisterWaitEx(self.wait, INVALID_HANDLE_VALUE) } != 0 {
-            unsafe {
-                drop(Box::from_raw(self.context));
-            }
-        }
-    }
-}
-
-unsafe extern "system" fn post_process_exit(context: *mut c_void, _timed_out: bool) {
-    let context = unsafe { &*context.cast::<ProcessWaitContext>() };
-    unsafe {
-        PostQueuedCompletionStatus(
-            context.completion_port.raw(),
-            0,
-            context.completion_key,
-            null_mut(),
-        );
     }
 }
 
