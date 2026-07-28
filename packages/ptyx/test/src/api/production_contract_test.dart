@@ -72,6 +72,37 @@ void main() {
     expect(String.fromCharCodes(output), 'ready');
   });
 
+  test('spawn executes a snapshot of caller-owned collections', () async {
+    final arguments = [
+      File('benchmark/fixture.dart').absolute.path,
+      'environment',
+      'PTYX_SPAWN_SNAPSHOT',
+    ];
+    final environment = {'PTYX_SPAWN_SNAPSHOT': 'original'};
+    final pending = PtySession.spawn(
+      PtySpawnOptions(
+        executable: Platform.resolvedExecutable,
+        arguments: arguments,
+        environment: environment,
+        environmentMode: .replace,
+        initialSize: size,
+      ),
+    );
+    arguments
+      ..[1] = 'exit'
+      ..[2] = '99';
+    environment['PTYX_SPAWN_SNAPSHOT'] = 'mutated';
+
+    final session = await pending;
+    addTearDown(session.close);
+    final output = await fixtureOutput(
+      session,
+    ).expand((chunk) => chunk).toList();
+
+    expect(utf8.decode(output), 'original|');
+    expect(await session.exitCode, 0);
+  });
+
   test(
     'fast exits cannot outrun Dart session publication',
     () async {

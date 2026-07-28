@@ -20,9 +20,6 @@ final _sessionRegistryFinalizer = Finalizer<_SessionRegistryToken>((token) {
   token.runtime._removeSession(token.handle);
 });
 const _terminalDrainTimeout = Duration(seconds: 15);
-const _supervisorBegin = 0;
-const _supervisorStaged = 1;
-const _supervisorSpawnEnd = 2;
 const _supervisorRemove = 3;
 const _supervisorOwnerExit = 4;
 const _supervisorIdle = 5;
@@ -47,26 +44,12 @@ Future<void> _superviseOwner(SendPort ready) async {
   final startupDeadline = Timer(_supervisorStartupTimeout, commands.close);
   ready.send(commands.sendPort);
   final handles = <int>{};
-  final removedHandles = <int>{};
-  var pendingSpawns = 0;
   var ownerExited = false;
   var idle = false;
   await for (final message in commands) {
     switch (message) {
-      case [_supervisorBegin, final SendPort acknowledgement]:
-        pendingSpawns++;
-        acknowledgement.send(null);
-      case [_supervisorStaged, final int handle]:
-        if (!removedHandles.remove(handle)) {
-          handles.add(handle);
-        }
-      case [_supervisorSpawnEnd]:
-        pendingSpawns--;
       case [_supervisorRemove, final int handle]:
-        final wasTracked = handles.remove(handle);
-        if (!wasTracked && pendingSpawns != 0) {
-          removedHandles.add(handle);
-        }
+        handles.remove(handle);
       case [_supervisorOwnerExit]:
         ownerExited = true;
       case [_supervisorIdle]:
@@ -81,22 +64,21 @@ Future<void> _superviseOwner(SendPort ready) async {
         final SendPort reply,
       ]:
         try {
-          final result = _spawnNative(
-            options,
-            workingDirectory,
-            commands.sendPort,
-          );
+          final result = _spawnNative(options, workingDirectory);
+          if (result.handle != 0) {
+            handles.add(result.handle);
+          }
           reply.send([result.handle, result.nativeCode]);
         } on Object catch (error, stackTrace) {
           reply.send([error, stackTrace.toString()]);
         }
     }
-    if (ownerExited && pendingSpawns == 0) {
+    if (ownerExited) {
       for (final handle in handles) {
         controllerAbandon(handle);
       }
       commands.close();
-    } else if (idle && pendingSpawns == 0 && handles.isEmpty) {
+    } else if (idle && handles.isEmpty) {
       commands.close();
     }
   }
@@ -120,8 +102,20 @@ final class NativeSession implements PtySession, Finalizable {
   }
 
   static Future<NativeSession> spawn(PtySpawnOptions options) async {
-    final workingDirectory = options.workingDirectory ?? Directory.current.path;
-    _validateSpawnOptions(options, workingDirectory);
+    final snapshot = PtySpawnOptions(
+      executable: options.executable,
+      arguments: List.unmodifiable(options.arguments),
+      environment: Map.unmodifiable(options.environment),
+      environmentMode: options.environmentMode,
+      workingDirectory: options.workingDirectory,
+      initialSize: options.initialSize,
+      maxBufferedInput: options.maxBufferedInput,
+      maxBufferedOutput: options.maxBufferedOutput,
+      gracefulCloseTimeout: options.gracefulCloseTimeout,
+    );
+    final workingDirectory =
+        snapshot.workingDirectory ?? Directory.current.path;
+    _validateSpawnOptions(snapshot, workingDirectory);
     final runtime = _ControllerRuntime.instance;
     final supervisor = await runtime._beginSpawn();
     var handle = 0;
@@ -132,7 +126,7 @@ final class NativeSession implements PtySession, Finalizable {
       try {
         supervisor.send([
           _supervisorSpawn,
-          options,
+          snapshot,
           workingDirectory,
           reply.sendPort,
         ]);
@@ -188,8 +182,8 @@ final class NativeSession implements PtySession, Finalizable {
       session = NativeSession._(
         runtime,
         handle,
-        options.maxBufferedInput,
-        options.gracefulCloseTimeout,
+        snapshot.maxBufferedInput,
+        snapshot.gracefulCloseTimeout,
         output,
         modes,
       );
@@ -903,12 +897,7 @@ final class _ControllerRuntime {
   Future<SendPort> _beginSpawn() async {
     _pendingSpawns++;
     try {
-      final supervisor = await _ensureSupervisor();
-      final acknowledgement = ReceivePort();
-      supervisor.send([_supervisorBegin, acknowledgement.sendPort]);
-      await acknowledgement.first;
-      acknowledgement.close();
-      return supervisor;
+      return await _ensureSupervisor();
     } on Object {
       _pendingSpawns--;
       rethrow;
@@ -1112,72 +1101,64 @@ final class _ControllerRuntime {
 ({int handle, int? nativeCode}) _spawnNative(
   PtySpawnOptions options,
   String workingDirectory,
-  SendPort supervisor,
 ) {
-  try {
-    return using((arena) {
-      Pointer<Char> nativeString(String value) {
-        if (value.contains('\u0000')) {
-          throw ArgumentError.value(value, 'value', 'must not contain NUL');
-        }
-        final bytes = utf8.encode(value);
-        final result = arena<Char>(bytes.length + 1);
-        result.cast<Uint8>().asTypedList(bytes.length + 1)
-          ..setRange(0, bytes.length, bytes)
-          ..[bytes.length] = 0;
-        return result;
+  return using((arena) {
+    Pointer<Char> nativeString(String value) {
+      if (value.contains('\u0000')) {
+        throw ArgumentError.value(value, 'value', 'must not contain NUL');
       }
+      final bytes = utf8.encode(value);
+      final result = arena<Char>(bytes.length + 1);
+      result.cast<Uint8>().asTypedList(bytes.length + 1)
+        ..setRange(0, bytes.length, bytes)
+        ..[bytes.length] = 0;
+      return result;
+    }
 
-      Pointer<Pointer<Char>> nativeStrings(List<String> values) {
-        if (values.isEmpty) {
-          return nullptr;
-        }
-        final result = arena<Pointer<Char>>(values.length);
-        for (var index = 0; index < values.length; index++) {
-          result[index] = nativeString(values[index]);
-        }
-        return result;
+    Pointer<Pointer<Char>> nativeStrings(List<String> values) {
+      if (values.isEmpty) {
+        return nullptr;
       }
+      final result = arena<Pointer<Char>>(values.length);
+      for (var index = 0; index < values.length; index++) {
+        result[index] = nativeString(values[index]);
+      }
+      return result;
+    }
 
-      final executable = nativeString(options.executable);
-      final arguments = nativeStrings(options.arguments);
-      final inheritEnvironment =
-          options.environmentMode == PtyEnvironmentMode.inherit;
-      final environment = _effectiveEnvironment(options);
-      for (final key in environment.keys) {
-        if (key.isEmpty || key.contains('=') || key.contains('\u0000')) {
-          throw ArgumentError.value(key, 'environment key', 'is invalid');
-        }
+    final executable = nativeString(options.executable);
+    final arguments = nativeStrings(options.arguments);
+    final inheritEnvironment =
+        options.environmentMode == PtyEnvironmentMode.inherit;
+    final environment = _effectiveEnvironment(options);
+    for (final key in environment.keys) {
+      if (key.isEmpty || key.contains('=') || key.contains('\u0000')) {
+        throw ArgumentError.value(key, 'environment key', 'is invalid');
       }
-      final environmentValues = environment.entries
-          .map((entry) => '${entry.key}=${entry.value}')
-          .toList(growable: false);
-      final nativeEnvironment = nativeStrings(environmentValues);
-      final cwd = nativeString(workingDirectory);
-      final handle = controllerSpawn(
-        executable,
-        arguments,
-        options.arguments.length,
-        nativeEnvironment,
-        environmentValues.length,
-        inheritEnvironment,
-        cwd,
-        options.initialSize.rows,
-        options.initialSize.columns,
-        options.initialSize.pixelWidth,
-        options.initialSize.pixelHeight,
-        options.maxBufferedInput,
-        options.maxBufferedOutput,
-      );
-      final nativeCode = handle == 0 ? controllerLastErrorCode() : 0;
-      if (handle != 0) {
-        supervisor.send([_supervisorStaged, handle]);
-      }
-      return (handle: handle, nativeCode: nativeCode == 0 ? null : nativeCode);
-    });
-  } finally {
-    supervisor.send(const [_supervisorSpawnEnd]);
-  }
+    }
+    final environmentValues = environment.entries
+        .map((entry) => '${entry.key}=${entry.value}')
+        .toList(growable: false);
+    final nativeEnvironment = nativeStrings(environmentValues);
+    final cwd = nativeString(workingDirectory);
+    final handle = controllerSpawn(
+      executable,
+      arguments,
+      options.arguments.length,
+      nativeEnvironment,
+      environmentValues.length,
+      inheritEnvironment,
+      cwd,
+      options.initialSize.rows,
+      options.initialSize.columns,
+      options.initialSize.pixelWidth,
+      options.initialSize.pixelHeight,
+      options.maxBufferedInput,
+      options.maxBufferedOutput,
+    );
+    final nativeCode = handle == 0 ? controllerLastErrorCode() : 0;
+    return (handle: handle, nativeCode: nativeCode == 0 ? null : nativeCode);
+  });
 }
 
 void _validateSpawnOptions(PtySpawnOptions options, String workingDirectory) {
