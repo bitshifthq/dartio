@@ -2053,12 +2053,9 @@ fn kill_and_reap(pid: libc::pid_t) {
 fn count_open_fds() -> usize {
     #[cfg(target_os = "macos")]
     {
-        // Reading /dev/fd temporarily contributes the directory descriptor to
-        // its own listing, so exclude that one entry from the stable count.
         open_descriptor_numbers()
-            .expect("/dev/fd must enumerate process descriptors")
+            .expect("proc_pidinfo must enumerate process descriptors")
             .len()
-            .saturating_sub(1)
     }
     #[cfg(target_os = "linux")]
     let maximum = unsafe { libc::getdtablesize() };
@@ -2072,17 +2069,45 @@ fn count_open_fds() -> usize {
 
 #[cfg(target_os = "macos")]
 fn open_descriptor_numbers() -> io::Result<Vec<RawFd>> {
-    std::fs::read_dir("/dev/fd")?
-        .map(|entry| {
-            let name = entry?.file_name();
-            name.to_string_lossy().parse::<RawFd>().map_err(|error| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("invalid /dev/fd entry {name:?}: {error}"),
-                )
-            })
-        })
-        .collect()
+    let entry_size = size_of::<libc::proc_fdinfo>();
+    let mut capacity = 32_usize;
+    loop {
+        let buffer_size = capacity
+            .checked_mul(entry_size)
+            .and_then(|size| libc::c_int::try_from(size).ok())
+            .ok_or_else(|| io::Error::other("descriptor list exceeds proc_pidinfo bounds"))?;
+        let mut entries = Vec::<libc::proc_fdinfo>::with_capacity(capacity);
+        let bytes = unsafe {
+            libc::proc_pidinfo(
+                libc::getpid(),
+                libc::PROC_PIDLISTFDS,
+                0,
+                entries.as_mut_ptr().cast(),
+                buffer_size,
+            )
+        };
+        if bytes < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let bytes = bytes as usize;
+        if !bytes.is_multiple_of(entry_size) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "proc_pidinfo returned a partial descriptor entry",
+            ));
+        }
+        let count = bytes / entry_size;
+        if count == capacity {
+            capacity = capacity
+                .checked_mul(2)
+                .ok_or_else(|| io::Error::other("descriptor list capacity overflow"))?;
+            continue;
+        }
+        unsafe {
+            entries.set_len(count);
+        }
+        return Ok(entries.into_iter().map(|entry| entry.proc_fd).collect());
+    }
 }
 
 fn process_exists(pid: libc::pid_t) -> bool {
@@ -2185,11 +2210,10 @@ fn child_inspect() {
         .count();
     #[cfg(target_os = "macos")]
     let extra = open_descriptor_numbers()
-        .expect("/dev/fd must enumerate child descriptors")
+        .expect("proc_pidinfo must enumerate child descriptors")
         .into_iter()
         .filter(|fd| *fd > libc::STDERR_FILENO)
-        .count()
-        .saturating_sub(1);
+        .count();
     print!(
         "controlling={controlling} extra_fds={extra} pid={pid} sid={sid} pgrp={pgrp} \
          foreground={foreground} foreground_errno={foreground_error} tty_fd={tty_fd} \
