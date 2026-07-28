@@ -1025,6 +1025,14 @@ impl Broker {
     }
 
     fn handle_request(&mut self, frame: Frame) -> io::Result<bool> {
+        if cfg!(debug_assertions) {
+            eprintln!(
+                "broker_request kind={} request={} jobs={}",
+                frame.kind,
+                frame.request,
+                self.running_jobs()
+            );
+        }
         match frame.kind {
             SPAWN => self.handle_spawn(frame)?,
             CLOSE => self.handle_close(frame)?,
@@ -1051,6 +1059,9 @@ impl Broker {
     }
 
     fn handle_spawn(&mut self, frame: Frame) -> io::Result<()> {
+        if cfg!(debug_assertions) {
+            eprintln!("broker_spawn request={} stage=decode", frame.request);
+        }
         let request = match decode_spawn(&frame.payload) {
             Ok(value) => value,
             Err(error) => {
@@ -1061,6 +1072,9 @@ impl Broker {
                 return send_frame(self.control.as_raw_fd(), &response, None);
             }
         };
+        if cfg!(debug_assertions) {
+            eprintln!("broker_spawn request={} stage=target", frame.request);
+        }
         let spawned = match spawn_target(&request) {
             Ok(value) => value,
             Err(error) => {
@@ -1071,6 +1085,12 @@ impl Broker {
                 return send_frame(self.control.as_raw_fd(), &response, None);
             }
         };
+        if cfg!(debug_assertions) {
+            eprintln!(
+                "broker_spawn request={} stage=target-complete pid={}",
+                frame.request, spawned.pid
+            );
+        }
         if request.inject {
             kill_and_reap(spawned.pid);
             self.injected_cleanups += 1;
@@ -1094,6 +1114,9 @@ impl Broker {
                 return send_frame(self.control.as_raw_fd(), &response, None);
             }
         };
+        if cfg!(debug_assertions) {
+            eprintln!("broker_spawn request={} stage=registered", frame.request);
+        }
         if let Some(exit) = early_exit {
             if let Some((index, generation)) = split_session(session) {
                 let slot = &mut self.slots[index];
@@ -1117,6 +1140,9 @@ impl Broker {
             self.kill_running(session);
             self.reap_blocking(session);
             return Err(error);
+        }
+        if cfg!(debug_assertions) {
+            eprintln!("broker_spawn request={} stage=response", frame.request);
         }
         if let Some(exit) = early_exit {
             let mut notification = Frame::new(EXIT);
