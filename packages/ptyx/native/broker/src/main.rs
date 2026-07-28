@@ -1158,7 +1158,7 @@ impl Broker {
             unsafe {
                 libc::kill(-pid, libc::SIGKILL);
             }
-            if wait_exact(pid).is_err() {
+            if reap_exact(pid).is_err() {
                 return false;
             }
             self.vacate(frame.session);
@@ -1964,6 +1964,27 @@ fn wait_exact(pid: libc::pid_t) -> io::Result<i32> {
             continue;
         }
         return Err(error);
+    }
+}
+
+fn reap_exact(pid: libc::pid_t) -> io::Result<()> {
+    let mut information = MaybeUninit::<libc::siginfo_t>::zeroed();
+    loop {
+        let result = unsafe {
+            libc::waitid(
+                libc::P_PID,
+                pid as libc::id_t,
+                information.as_mut_ptr(),
+                libc::WEXITED,
+            )
+        };
+        if result == 0 {
+            return Ok(());
+        }
+        let error = io::Error::last_os_error();
+        if error.kind() != io::ErrorKind::Interrupted {
+            return Err(error);
+        }
     }
 }
 
