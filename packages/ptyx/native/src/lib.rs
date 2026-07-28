@@ -11,6 +11,7 @@ const MAX_NOTICE_GENERATION: u32 = ((i64::MAX as u64 >> 3) >> 32) as u32;
 mod broker_client;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod broker_materializer;
+mod event;
 mod ffi;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod integrated;
@@ -22,10 +23,11 @@ pub(crate) const WRITE_INFRASTRUCTURE_FAILURE: i64 = -2;
 #[cfg(windows)]
 mod windows;
 
+pub(crate) use event::Notice;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-pub(crate) use integrated::{IntegratedRuntime, Notice};
+pub(crate) use integrated::IntegratedRuntime;
 #[cfg(windows)]
-pub(crate) use windows::{IntegratedRuntime, Notice};
+pub(crate) use windows::IntegratedRuntime;
 
 struct Slot<T> {
     generation: u32,

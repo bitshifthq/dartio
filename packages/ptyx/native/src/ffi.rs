@@ -244,7 +244,7 @@ fn initialize_runtime() -> bool {
     let notifier = std::thread::Builder::new()
         .name("ptyx-dart-notifier".to_owned())
         .spawn(move || {
-            while let Ok(notice) = notifications.recv() {
+            while let Some((_, notice)) = notifications.recv() {
                 dispatch_notice(notice);
             }
         });

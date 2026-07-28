@@ -6,7 +6,7 @@ use std::io;
 use std::pin::Pin;
 use std::ptr::null_mut;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::mpsc::{self, Receiver, Sender, SyncSender, TrySendError};
+use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -25,8 +25,9 @@ use windows_sys::Win32::System::IO::{
 
 use self::handles::{IoOperation, OwnedHandle, OwnedPseudoConsole};
 pub(crate) use self::spawn::BrokerSpawn;
+use crate::event::{self, Receiver as EventReceiver, Sender as EventSender};
 use crate::oneshot::{self, Sender as ReplySender};
-use crate::{GenerationRegistry, WRITE_INFRASTRUCTURE_FAILURE};
+use crate::{GenerationRegistry, Notice, WRITE_INFRASTRUCTURE_FAILURE};
 
 const BYTE_QUANTUM: usize = 64 * 1024;
 const INTERACTIVE_BATCH: usize = 256;
@@ -42,16 +43,6 @@ const ACTIVATION_TIMEOUT: Duration = Duration::from_secs(5);
 const CLOSE_KEY_TAG: usize = 1_usize << (usize::BITS - 2);
 static QUARANTINED_IO_OPERATIONS: AtomicUsize = AtomicUsize::new(0);
 static QUARANTINED_PSEUDOCONSOLES: AtomicUsize = AtomicUsize::new(0);
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum Notice {
-    Output { handle: u64, bytes: Vec<u8> },
-    InputFailed(u64),
-    OutputFailed(u64),
-    BrokerLost(u64),
-    OutputDone(u64),
-    Exit(u64),
-}
 
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct RuntimeCounters {
@@ -454,7 +445,7 @@ impl Drop for NoticeReservation {
 
 #[derive(Clone)]
 struct NoticeEmitter {
-    sender: Sender<Notice>,
+    sender: EventSender<Notice>,
     budget: Arc<NoticeBudget>,
 }
 
@@ -475,7 +466,7 @@ impl NoticeEmitter {
     ) -> bool {
         // Every queued notice owns a reservation, so this nonblocking channel
         // contains at most NOTICE_CAPACITY values despite being unbounded.
-        if self.sender.send(notice).is_err() {
+        if self.sender.send(notice.handle(), notice).is_err() {
             return false;
         }
         reservation.transfer();
@@ -485,17 +476,17 @@ impl NoticeEmitter {
 }
 
 pub(crate) struct NoticeReceiver {
-    receiver: Receiver<Notice>,
+    receiver: EventReceiver<Notice>,
     budget: Arc<NoticeBudget>,
     iocp: IocpSender,
 }
 
 impl NoticeReceiver {
-    pub(crate) fn recv(&self) -> Result<Notice, mpsc::RecvError> {
+    pub(crate) fn recv(&self) -> Option<(u64, Notice)> {
         let notice = self.receiver.recv()?;
         self.budget.release();
         let _ = self.iocp.post_command();
-        Ok(notice)
+        Some(notice)
     }
 }
 
@@ -631,7 +622,7 @@ impl IntegratedRuntime {
         })?);
         let iocp_sender = IocpSender(Arc::clone(&iocp));
         let (command_sender, command_receiver) = mpsc::sync_channel(COMMAND_CAPACITY);
-        let (notice_sender, notice_receiver) = mpsc::channel();
+        let (notice_sender, notice_receiver) = event::channel();
         let notice_budget = NoticeBudget::new(NOTICE_CAPACITY);
         let notice_emitter = NoticeEmitter {
             sender: notice_sender,

@@ -1,7 +1,8 @@
 use super::{dup_cloexec, set_cloexec, set_nonblocking, GenerationRegistry};
 use crate::broker_client::{BrokerClient, BrokerOwner, BrokerSession, BrokerSpawn};
+use crate::event::{self, Receiver as EventReceiver, Sender as EventSender};
 use crate::oneshot::{self, Sender as ReplySender};
-use crate::WRITE_INFRASTRUCTURE_FAILURE;
+use crate::{Notice, WRITE_INFRASTRUCTURE_FAILURE};
 use std::collections::{HashMap, VecDeque};
 use std::ffi::CString;
 use std::io;
@@ -21,18 +22,7 @@ const OUTPUT_BATCH: usize = 64 * 1024;
 const OUTPUT_DELAY: Duration = Duration::from_millis(1);
 const COMMAND_QUANTUM: usize = 64;
 const COMMAND_CAPACITY: usize = 1024;
-const NOTICE_CAPACITY: usize = 4096;
 const ACTIVATION_TIMEOUT: Duration = Duration::from_secs(5);
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum Notice {
-    Output { handle: u64, bytes: Vec<u8> },
-    InputFailed(u64),
-    OutputFailed(u64),
-    BrokerLost(u64),
-    OutputDone(u64),
-    Exit(u64),
-}
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct RuntimeCounters {
@@ -302,7 +292,7 @@ impl WakeWriter {
 pub struct IntegratedRuntime {
     commands: SyncSender<Command>,
     admissions: Arc<Mutex<HashMap<u64, Arc<InputAdmission>>>>,
-    notices: Mutex<Option<Receiver<Notice>>>,
+    notices: Mutex<Option<EventReceiver<Notice>>>,
     wake: WakeWriter,
     thread: Mutex<Option<JoinHandle<()>>>,
     broker: BrokerOwner,
@@ -327,7 +317,7 @@ impl IntegratedRuntime {
         set_nonblocking(write.as_raw_fd())?;
         let reactor_wake = dup_cloexec(write.as_raw_fd())?;
         let (command_sender, command_receiver) = mpsc::sync_channel(COMMAND_CAPACITY);
-        let (notice_sender, notice_receiver) = mpsc::sync_channel(NOTICE_CAPACITY);
+        let (notice_sender, notice_receiver) = event::channel();
         let broker_reactor_wake = dup_cloexec(write.as_raw_fd())?;
         let materialized = crate::broker_materializer::broker_path()?;
         let broker_path = CString::new(materialized.as_os_str().as_encoded_bytes())
@@ -359,7 +349,7 @@ impl IntegratedRuntime {
         })
     }
 
-    pub fn take_notifications(&self) -> Option<Receiver<Notice>> {
+    pub fn take_notifications(&self) -> Option<EventReceiver<Notice>> {
         self.notices.lock().ok()?.take()
     }
 
@@ -572,7 +562,7 @@ fn reactor(
     wake: OwnedFd,
     self_wake: OwnedFd,
     commands: Receiver<Command>,
-    notices: SyncSender<Notice>,
+    notices: EventSender<Notice>,
     broker: BrokerClient,
     admissions: Arc<Mutex<HashMap<u64, Arc<InputAdmission>>>>,
 ) {
@@ -678,7 +668,7 @@ fn reactor(
     wake: OwnedFd,
     self_wake: OwnedFd,
     commands: Receiver<Command>,
-    notices: SyncSender<Notice>,
+    notices: EventSender<Notice>,
     broker: BrokerClient,
     admissions: Arc<Mutex<HashMap<u64, Arc<InputAdmission>>>>,
 ) {
@@ -793,7 +783,7 @@ fn reactor(
 fn process_commands(
     kqueue: RawFd,
     commands: &Receiver<Command>,
-    notices: &SyncSender<Notice>,
+    notices: &EventSender<Notice>,
     sessions: &mut GenerationRegistry<Session>,
     pending_broker_exits: &mut HashMap<u64, i32>,
     counters: &mut RuntimeCounters,
@@ -1157,7 +1147,7 @@ fn set_filter(
 fn read_ready(
     kqueue: RawFd,
     handle: u64,
-    notices: &SyncSender<Notice>,
+    notices: &EventSender<Notice>,
     sessions: &mut GenerationRegistry<Session>,
     counters: &mut RuntimeCounters,
 ) {
@@ -1232,7 +1222,7 @@ fn read_ready(
 fn write_ready(
     kqueue: RawFd,
     handle: u64,
-    notices: &SyncSender<Notice>,
+    notices: &EventSender<Notice>,
     sessions: &mut GenerationRegistry<Session>,
     counters: &mut RuntimeCounters,
 ) {
@@ -1289,7 +1279,7 @@ fn write_ready(
 fn fail_input(
     handle: u64,
     session: &mut Session,
-    notices: &SyncSender<Notice>,
+    notices: &EventSender<Notice>,
     counters: &mut RuntimeCounters,
 ) {
     let accepted_input_pending = !session.input.is_empty();
@@ -1306,7 +1296,7 @@ fn fail_input(
 fn notify_input_failure(
     handle: u64,
     session: &mut Session,
-    notices: &SyncSender<Notice>,
+    notices: &EventSender<Notice>,
     counters: &mut RuntimeCounters,
 ) {
     session.input_failure_pending = true;
@@ -1319,7 +1309,7 @@ fn notify_input_failure(
 fn refresh_output(
     kqueue: RawFd,
     handle: u64,
-    notices: &SyncSender<Notice>,
+    notices: &EventSender<Notice>,
     sessions: &mut GenerationRegistry<Session>,
     counters: &mut RuntimeCounters,
 ) {
@@ -1390,7 +1380,7 @@ fn output_poll_timeout(sessions: &GenerationRegistry<Session>) -> i32 {
 
 fn refresh_due_outputs(
     kqueue: RawFd,
-    notices: &SyncSender<Notice>,
+    notices: &EventSender<Notice>,
     sessions: &mut GenerationRegistry<Session>,
     counters: &mut RuntimeCounters,
 ) {
@@ -1484,7 +1474,7 @@ fn shutdown_all(
 }
 
 fn fail_all(
-    notices: &SyncSender<Notice>,
+    notices: &EventSender<Notice>,
     sessions: &mut GenerationRegistry<Session>,
     counters: &mut RuntimeCounters,
     broker: &BrokerClient,
@@ -1604,8 +1594,8 @@ unsafe extern "C" {
     fn ptsname_r(fd: libc::c_int, buffer: *mut libc::c_char, length: libc::size_t) -> libc::c_int;
 }
 
-fn send_notice(notices: &SyncSender<Notice>, notice: Notice, counters: &mut RuntimeCounters) {
-    if notices.send(notice).is_ok() {
+fn send_notice(notices: &EventSender<Notice>, notice: Notice, counters: &mut RuntimeCounters) {
+    if notices.send(notice.handle(), notice).is_ok() {
         counters.notifications += 1;
     }
 }
@@ -1680,7 +1670,7 @@ mod tests {
         admit_write, fail_input, notify_input_failure, InputAdmission, Notice, QueuedOutput,
         RuntimeCounters, Session, OUTPUT_BATCH, WRITE_INFRASTRUCTURE_FAILURE,
     };
-    use crate::broker_client::BrokerSession;
+    use crate::{broker_client::BrokerSession, event};
     use std::collections::VecDeque;
     use std::fs::File;
     use std::sync::{mpsc, Arc};
@@ -1704,12 +1694,12 @@ mod tests {
         assert!(session.enqueue_write(vec![1, 2, 3, 4]).is_ok());
         session.input_bytes = 4;
         session.admission.state.lock().unwrap().bytes = 4;
-        let (sender, receiver) = mpsc::sync_channel(8);
+        let (sender, receiver) = event::channel();
         let mut counters = RuntimeCounters::default();
 
         fail_input(7, &mut session, &sender, &mut counters);
 
-        assert_eq!(receiver.try_recv(), Ok(Notice::InputFailed(7)));
+        assert_eq!(receiver.try_recv(), Ok((7, Notice::InputFailed(7))));
         assert!(session.enqueue_write(vec![1]).is_err());
     }
 
@@ -1718,7 +1708,7 @@ mod tests {
         let mut session = session(4);
         session.active = true;
         session.admission.state.lock().unwrap().bytes = 1;
-        let (sender, receiver) = mpsc::sync_channel(8);
+        let (sender, receiver) = event::channel();
         let mut counters = RuntimeCounters::default();
 
         fail_input(7, &mut session, &sender, &mut counters);
@@ -1728,7 +1718,7 @@ mod tests {
         notify_input_failure(7, &mut session, &sender, &mut counters);
         notify_input_failure(7, &mut session, &sender, &mut counters);
 
-        assert_eq!(receiver.try_recv(), Ok(Notice::InputFailed(7)));
+        assert_eq!(receiver.try_recv(), Ok((7, Notice::InputFailed(7))));
         assert_eq!(receiver.try_recv(), Err(mpsc::TryRecvError::Empty));
     }
 
