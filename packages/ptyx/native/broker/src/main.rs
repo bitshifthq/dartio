@@ -197,6 +197,17 @@ fn send_frame(fd: RawFd, frame: &Frame, passed_fd: Option<RawFd>) -> io::Result<
 }
 
 fn receive_frame(fd: RawFd) -> io::Result<Option<(Frame, Option<OwnedFd>)>> {
+    receive_frame_inner(fd, false)
+}
+
+fn receive_frame_blocking(fd: RawFd) -> io::Result<Option<(Frame, Option<OwnedFd>)>> {
+    receive_frame_inner(fd, true)
+}
+
+fn receive_frame_inner(
+    fd: RawFd,
+    block_until_started: bool,
+) -> io::Result<Option<(Frame, Option<OwnedFd>)>> {
     let deadline = Instant::now() + FRAME_TIMEOUT;
     let mut bytes = vec![0_u8; HEADER];
     let mut offset = 0;
@@ -212,7 +223,12 @@ fn receive_frame(fd: RawFd) -> io::Result<Option<(Frame, Option<OwnedFd>)>> {
         message.msg_iovlen = 1;
         message.msg_control = control.as_mut_ptr().cast();
         message.msg_controllen = size_of_val(&control) as _;
-        let received = unsafe { libc::recvmsg(fd, &mut message, libc::MSG_DONTWAIT) };
+        let flags = if block_until_started && offset == 0 {
+            0
+        } else {
+            libc::MSG_DONTWAIT
+        };
+        let received = unsafe { libc::recvmsg(fd, &mut message, flags) };
         if received == 0 {
             return if offset == 0 {
                 Ok(None)
@@ -827,7 +843,7 @@ impl Broker {
     fn event_loop(&mut self) -> io::Result<()> {
         loop {
             if self.running_jobs() == 0 {
-                match receive_frame(self.control.as_raw_fd())? {
+                match receive_frame_blocking(self.control.as_raw_fd())? {
                     Some((frame, passed)) => {
                         drop(passed);
                         if !self.handle_request(frame)? {
