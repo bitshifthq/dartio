@@ -551,6 +551,38 @@ Future<Map<String, Object?>> _inputThroughput(int byteCount) async {
 Future<Map<String, Object?>> _transportInput(int byteCount) async {
   final windowsScript =
       r'''
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+
+public static class PtyxConsoleMode {
+  [DllImport("kernel32.dll", SetLastError = true)]
+  public static extern IntPtr GetStdHandle(int handle);
+
+  [DllImport("kernel32.dll", SetLastError = true)]
+  public static extern bool GetConsoleMode(IntPtr handle, out uint mode);
+
+  [DllImport("kernel32.dll", SetLastError = true)]
+  public static extern bool SetConsoleMode(IntPtr handle, uint mode);
+}
+'@
+$handle = [PtyxConsoleMode]::GetStdHandle(-10)
+[uint32]$mode = 0
+if (-not [PtyxConsoleMode]::GetConsoleMode($handle, [ref]$mode)) {
+  throw [ComponentModel.Win32Exception]::new(
+    [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+  )
+}
+# Disable ENABLE_LINE_INPUT and ENABLE_ECHO_INPUT so the transport child
+# drains binary writes without waiting for a newline.
+if (-not [PtyxConsoleMode]::SetConsoleMode(
+  $handle,
+  [uint32]($mode -band 4294967289)
+)) {
+  throw [ComponentModel.Win32Exception]::new(
+    [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+  )
+}
 [Console]::Write("READY")
 $input = [Console]::OpenStandardInput()
 $buffer = [byte[]]::new(65536)
