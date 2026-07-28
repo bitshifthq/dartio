@@ -1025,12 +1025,6 @@ impl Broker {
     }
 
     fn handle_request(&mut self, frame: Frame) -> io::Result<bool> {
-        eprintln!(
-            "broker_request kind={} request={} jobs={}",
-            frame.kind,
-            frame.request,
-            self.running_jobs()
-        );
         match frame.kind {
             SPAWN => self.handle_spawn(frame)?,
             CLOSE => self.handle_close(frame)?,
@@ -1057,7 +1051,6 @@ impl Broker {
     }
 
     fn handle_spawn(&mut self, frame: Frame) -> io::Result<()> {
-        eprintln!("broker_spawn request={} stage=decode", frame.request);
         let request = match decode_spawn(&frame.payload) {
             Ok(value) => value,
             Err(error) => {
@@ -1068,7 +1061,6 @@ impl Broker {
                 return send_frame(self.control.as_raw_fd(), &response, None);
             }
         };
-        eprintln!("broker_spawn request={} stage=target", frame.request);
         let spawned = match spawn_target(&request) {
             Ok(value) => value,
             Err(error) => {
@@ -1079,10 +1071,6 @@ impl Broker {
                 return send_frame(self.control.as_raw_fd(), &response, None);
             }
         };
-        eprintln!(
-            "broker_spawn request={} stage=target-complete pid={}",
-            frame.request, spawned.pid
-        );
         if request.inject {
             kill_and_reap(spawned.pid);
             self.injected_cleanups += 1;
@@ -1106,7 +1094,6 @@ impl Broker {
                 return send_frame(self.control.as_raw_fd(), &response, None);
             }
         };
-        eprintln!("broker_spawn request={} stage=registered", frame.request);
         if let Some(exit) = early_exit {
             if let Some((index, generation)) = split_session(session) {
                 let slot = &mut self.slots[index];
@@ -1131,7 +1118,6 @@ impl Broker {
             self.reap_blocking(session);
             return Err(error);
         }
-        eprintln!("broker_spawn request={} stage=response", frame.request);
         if let Some(exit) = early_exit {
             let mut notification = Frame::new(EXIT);
             notification.session = session;
@@ -2467,9 +2453,11 @@ fn run_harness() -> io::Result<()> {
     );
 
     let running = Arc::new(AtomicBool::new(true));
+    let churn_count = Arc::new(AtomicUsize::new(0));
     let churners: Vec<_> = (0..4)
         .map(|_| {
             let running = Arc::clone(&running);
+            let churn_count = Arc::clone(&churn_count);
             thread::spawn(move || {
                 let path = CString::new("/dev/null").unwrap();
                 while running.load(Ordering::Relaxed) {
@@ -2479,7 +2467,9 @@ fn run_harness() -> io::Result<()> {
                             libc::fcntl(fd, libc::F_SETFD, 0);
                             libc::close(fd);
                         }
+                        churn_count.fetch_add(1, Ordering::Relaxed);
                     }
+                    thread::sleep(Duration::from_micros(100));
                 }
             })
         })
@@ -2504,6 +2494,7 @@ fn run_harness() -> io::Result<()> {
     for churner in churners {
         churner.join().unwrap();
     }
+    assert!(churn_count.load(Ordering::Relaxed) >= 40);
     drop(sentinel);
     println!("controlling_terminal_and_fd_churn sessions=40 leaked_child_fds=0");
 
