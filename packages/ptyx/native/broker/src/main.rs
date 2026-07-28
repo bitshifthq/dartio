@@ -2363,17 +2363,29 @@ fn run_harness() -> io::Result<()> {
             })
         })
         .collect();
-    for _ in 0..40 {
+    for iteration in 0..40 {
         let session = client.spawn(&self_argv(&["--child-inspect"]), false)?;
+        if iteration == 0 {
+            println!("broker_cycle spawn=true");
+        }
         let output = String::from_utf8(read_pty(
             session.master.as_raw_fd(),
             Duration::from_secs(5),
         )?)
         .unwrap();
+        if iteration == 0 {
+            println!("broker_cycle output=true");
+        }
         assert!(output.contains("controlling=true"), "{output}");
         assert!(output.contains("extra_fds=0"), "{output}");
         assert_eq!(client.wait_exit(session.id, Duration::from_secs(5))?, 0);
+        if iteration == 0 {
+            println!("broker_cycle exit=true");
+        }
         assert!(client.release(session.id)?);
+        if iteration == 0 {
+            println!("broker_cycle release=true");
+        }
     }
     running.store(false, Ordering::Relaxed);
     for churner in churners {
