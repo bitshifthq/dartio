@@ -826,6 +826,19 @@ impl Broker {
     #[cfg(target_os = "macos")]
     fn event_loop(&mut self) -> io::Result<()> {
         loop {
+            if self.running_jobs() == 0 {
+                match receive_frame(self.control.as_raw_fd())? {
+                    Some((frame, passed)) => {
+                        drop(passed);
+                        if !self.handle_request(frame)? {
+                            return Ok(());
+                        }
+                    }
+                    None => return Ok(()),
+                }
+                continue;
+            }
+
             // Keep protocol traffic on the socket's direct readiness source.
             // Hosted Darwin x64 does not consistently publish subsequent
             // socket readiness through a kqueue shared with process events.
@@ -834,8 +847,7 @@ impl Broker {
                 events: libc::POLLIN,
                 revents: 0,
             };
-            let timeout = if self.running_jobs() == 0 { -1 } else { 10 };
-            let ready = unsafe { libc::poll(&mut control, 1, timeout) };
+            let ready = unsafe { libc::poll(&mut control, 1, 10) };
             if ready < 0 {
                 let error = io::Error::last_os_error();
                 if error.kind() == io::ErrorKind::Interrupted {
