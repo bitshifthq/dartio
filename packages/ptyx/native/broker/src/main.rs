@@ -1459,7 +1459,7 @@ fn spawn_target(request: &SpawnRequest) -> io::Result<Spawned> {
                 .collect()
         });
     let executable_candidates = executable_candidates(request.argv[0].as_c_str())?;
-    let descriptor_limit = unsafe { libc::getdtablesize() };
+    let descriptor_cleanup = prepare_descriptor_cleanup()?;
     let pid = unsafe { libc::fork() };
     if pid < 0 {
         return Err(io::Error::last_os_error());
@@ -1474,7 +1474,7 @@ fn spawn_target(request: &SpawnRequest) -> io::Result<Spawned> {
                 request.cwd.as_deref(),
                 slave.as_raw_fd(),
                 error_write.as_raw_fd(),
-                descriptor_limit,
+                &descriptor_cleanup,
             );
         }
     }
@@ -1526,7 +1526,7 @@ unsafe fn exec_target(
     cwd: Option<&CStr>,
     slave: RawFd,
     mut error_fd: RawFd,
-    descriptor_limit: RawFd,
+    descriptor_cleanup: &DescriptorCleanup,
 ) -> ! {
     let mut empty = MaybeUninit::<libc::sigset_t>::uninit();
     if libc::sigemptyset(empty.as_mut_ptr()) < 0 {
@@ -1573,7 +1573,7 @@ unsafe fn exec_target(
     if libc::fcntl(error_fd, libc::F_SETFD, libc::FD_CLOEXEC) < 0 {
         child_fail(error_fd);
     }
-    if close_child_descriptors_after(error_fd, descriptor_limit) < 0 {
+    if close_child_descriptors_after(error_fd, descriptor_cleanup) < 0 {
         child_fail(error_fd);
     }
     let environment = environment.map_or(environ as *const *const libc::c_char, |entries| {
@@ -1597,7 +1597,26 @@ unsafe fn exec_target(
 }
 
 #[cfg(target_os = "linux")]
-unsafe fn close_child_descriptors_after(fd: RawFd, descriptor_limit: RawFd) -> libc::c_long {
+type DescriptorCleanup = RawFd;
+
+#[cfg(target_os = "macos")]
+type DescriptorCleanup = Vec<RawFd>;
+
+#[cfg(target_os = "linux")]
+fn prepare_descriptor_cleanup() -> io::Result<DescriptorCleanup> {
+    Ok(unsafe { libc::getdtablesize() })
+}
+
+#[cfg(target_os = "macos")]
+fn prepare_descriptor_cleanup() -> io::Result<DescriptorCleanup> {
+    open_descriptor_numbers()
+}
+
+#[cfg(target_os = "linux")]
+unsafe fn close_child_descriptors_after(
+    fd: RawFd,
+    descriptor_limit: &DescriptorCleanup,
+) -> libc::c_long {
     let result = libc::syscall(
         libc::SYS_close_range,
         (fd + 1) as libc::c_uint,
@@ -1611,15 +1630,22 @@ unsafe fn close_child_descriptors_after(fd: RawFd, descriptor_limit: RawFd) -> l
     if error != libc::ENOSYS && error != libc::EINVAL {
         return -1;
     }
-    for descriptor in fd + 1..descriptor_limit {
+    for descriptor in fd + 1..*descriptor_limit {
         libc::close(descriptor);
     }
     0
 }
 
 #[cfg(target_os = "macos")]
-unsafe fn close_child_descriptors_after(fd: RawFd, descriptor_limit: RawFd) -> libc::c_long {
-    for descriptor in fd + 1..descriptor_limit {
+unsafe fn close_child_descriptors_after(
+    fd: RawFd,
+    descriptors: &DescriptorCleanup,
+) -> libc::c_long {
+    for descriptor in descriptors
+        .iter()
+        .copied()
+        .filter(|descriptor| *descriptor > fd)
+    {
         libc::close(descriptor);
     }
     0
@@ -2025,10 +2051,38 @@ fn kill_and_reap(pid: libc::pid_t) {
 }
 
 fn count_open_fds() -> usize {
+    #[cfg(target_os = "macos")]
+    {
+        // Reading /dev/fd temporarily contributes the directory descriptor to
+        // its own listing, so exclude that one entry from the stable count.
+        open_descriptor_numbers()
+            .expect("/dev/fd must enumerate process descriptors")
+            .len()
+            .saturating_sub(1)
+    }
+    #[cfg(target_os = "linux")]
     let maximum = unsafe { libc::getdtablesize() };
-    (0..maximum)
-        .filter(|fd| unsafe { libc::fcntl(*fd, libc::F_GETFD) } >= 0)
-        .count()
+    #[cfg(target_os = "linux")]
+    {
+        (0..maximum)
+            .filter(|fd| unsafe { libc::fcntl(*fd, libc::F_GETFD) } >= 0)
+            .count()
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn open_descriptor_numbers() -> io::Result<Vec<RawFd>> {
+    std::fs::read_dir("/dev/fd")?
+        .map(|entry| {
+            let name = entry?.file_name();
+            name.to_string_lossy().parse::<RawFd>().map_err(|error| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("invalid /dev/fd entry {name:?}: {error}"),
+                )
+            })
+        })
+        .collect()
 }
 
 fn process_exists(pid: libc::pid_t) -> bool {
@@ -2125,9 +2179,17 @@ fn child_inspect() {
             libc::close(tty_fd);
         }
     }
+    #[cfg(target_os = "linux")]
     let extra = (3..unsafe { libc::getdtablesize() })
         .filter(|fd| unsafe { libc::fcntl(*fd, libc::F_GETFD) } >= 0)
         .count();
+    #[cfg(target_os = "macos")]
+    let extra = open_descriptor_numbers()
+        .expect("/dev/fd must enumerate child descriptors")
+        .into_iter()
+        .filter(|fd| *fd > libc::STDERR_FILENO)
+        .count()
+        .saturating_sub(1);
     print!(
         "controlling={controlling} extra_fds={extra} pid={pid} sid={sid} pgrp={pgrp} \
          foreground={foreground} foreground_errno={foreground_error} tty_fd={tty_fd} \

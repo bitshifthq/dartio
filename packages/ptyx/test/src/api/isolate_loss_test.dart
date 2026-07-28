@@ -113,7 +113,9 @@ Future<void> _loseDuringStagedSpawn((SendPort, String) message) async {
               '-NonInteractive',
               '-Command',
               r'''
-$PID | Set-Content -NoNewline $env:PTYX_STAGE_PID_FILE
+$temporaryPidFile = "$env:PTYX_STAGE_PID_FILE.tmp"
+[System.IO.File]::WriteAllText($temporaryPidFile, "$PID")
+[System.IO.File]::Move($temporaryPidFile, $env:PTYX_STAGE_PID_FILE)
 Start-Sleep -Seconds 30
 ''',
             ]
