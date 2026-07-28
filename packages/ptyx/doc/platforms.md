@@ -7,15 +7,16 @@ operating system and architecture.
 
 | Target | Backend | Build evidence | Runtime qualification |
 | --- | --- | --- | --- |
-| macOS x64 | `poll` reactor and Unix broker | local release build | local API, native, ABI, lifecycle, and fault tests |
-| macOS arm64 | `poll` reactor and Unix broker | CI build target exists | pending native arm64 CI result |
-| Linux x64 | `epoll` reactor and Unix broker | CI build target exists | pending successful CI rerun |
-| Linux arm64 | `epoll` reactor and Unix broker | cross-check succeeds | pending native arm64 runtime result |
-| Windows x64 | ConPTY, IOCP, and Job Object | cross-check succeeds | pending successful Windows CI rerun |
-| Windows arm64 | ConPTY, IOCP, and Job Object | CI build target exists | pending native arm64 runtime result |
+| macOS x64 | `poll` reactor and Unix broker | hosted native build | API, native, ABI, lifecycle, fault, scorecard, and five-minute soak jobs |
+| macOS arm64 | `poll` reactor and Unix broker | hosted native build | API, native, ABI, lifecycle, fault, scorecard, and five-minute soak jobs |
+| Linux x64 | `epoll` reactor and Unix broker | hosted native build | API, native, ABI, lifecycle, fault, scorecard, and five-minute soak jobs |
+| Linux arm64 | `epoll` reactor and Unix broker | hosted native build | API, native, ABI, lifecycle, fault, scorecard, and five-minute soak jobs |
+| Windows x64 | ConPTY, IOCP, and Job Object | hosted native build | API, native, ABI, lifecycle, fault, scorecard, and five-minute soak jobs |
+| Windows arm64 | ConPTY, IOCP, and Job Object | hosted native build | API, native, ABI, lifecycle, fault, scorecard, and five-minute soak jobs |
 
 Android, iOS, and web are not advertised. Linux arm64 cross-compilation is
-useful build evidence but is not runtime qualification.
+useful build evidence but does not replace its retained hosted runtime
+qualification.
 
 ## Windows floor
 

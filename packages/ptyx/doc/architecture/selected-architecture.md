@@ -168,9 +168,8 @@ helper materialization obeys the same owner/mode/hash/ABI checks as macOS. A
 no-exec cache or temporary filesystem requires an explicit executable helper
 path; it never triggers in-process fork fallback.
 
-Linux x64 requires a retained runtime integration run before release. Linux
-arm64 must cross-build during development and run on a representative arm64
-runner before that architecture is advertised.
+Release evidence must retain each platform's runtime integration result.
+Cross-building does not substitute for a representative architecture runner.
 
 ### Windows ConPTY
 
@@ -189,10 +188,10 @@ Windows does not use the Unix broker.
   semantics. Required entries such as `SystemRoot` are preserved.
 - Cancellation retains every `OVERLAPPED` allocation until its terminal IOCP
   completion. A legitimate process exit code of 259 remains exit code 259.
-- The runtime floor is Windows 10 version 1809, build 17763, where ConPTY was
-  introduced. Blocking `ClosePseudoConsole` behavior on older implementations
-  is isolated on a bounded closer pool with admission limited to 128 live or
-  quarantined sessions.
+- The runtime floor is build 26100. Older ConPTY implementations can retain a
+  process handle after every completed session, violating the cleanup
+  contract. `ClosePseudoConsole` still runs on a bounded closer pool with
+  admission limited to 128 live or quarantined sessions.
 - Windows client and Server SKUs are qualified separately. Compilation alone
   is not runtime qualification.
 
