@@ -1179,11 +1179,28 @@ impl Broker {
             .extend_from_slice(&(self.running_jobs() as u32).to_ne_bytes());
         response
             .payload
-            .extend_from_slice(&(count_open_fds() as u32).to_ne_bytes());
+            .extend_from_slice(&(self.owned_descriptor_count() as u32).to_ne_bytes());
         response
             .payload
             .extend_from_slice(&self.signal_after_reap.to_ne_bytes());
         send_frame(self.control.as_raw_fd(), &response, None)
+    }
+
+    fn owned_descriptor_count(&self) -> usize {
+        #[cfg(target_os = "macos")]
+        {
+            // The broker launch contract retains only stdio and CONTROL_FD;
+            // Broker::run adds exactly one kqueue descriptor. PTY masters are
+            // transferred to the controller rather than retained here.
+            (libc::STDIN_FILENO..=libc::STDERR_FILENO)
+                .filter(|fd| unsafe { libc::fcntl(*fd, libc::F_GETFD) } >= 0)
+                .count()
+                + 2
+        }
+        #[cfg(target_os = "linux")]
+        {
+            count_open_fds()
+        }
     }
 
     fn allocate_slot(&mut self, pid: libc::pid_t) -> u64 {
@@ -1490,7 +1507,16 @@ fn spawn_target(request: &SpawnRequest) -> io::Result<Spawned> {
                 .collect()
         });
     let executable_candidates = executable_candidates(request.argv[0].as_c_str())?;
-    let descriptor_cleanup = prepare_descriptor_cleanup()?;
+    let highest_descriptor = [
+        master.as_raw_fd(),
+        slave.as_raw_fd(),
+        error_read.as_raw_fd(),
+        error_write.as_raw_fd(),
+    ]
+    .into_iter()
+    .max()
+    .unwrap();
+    let descriptor_cleanup = prepare_descriptor_cleanup(highest_descriptor)?;
     let pid = unsafe { libc::fork() };
     if pid < 0 {
         return Err(io::Error::last_os_error());
@@ -1631,16 +1657,16 @@ unsafe fn exec_target(
 type DescriptorCleanup = RawFd;
 
 #[cfg(target_os = "macos")]
-type DescriptorCleanup = Vec<RawFd>;
+type DescriptorCleanup = RawFd;
 
 #[cfg(target_os = "linux")]
-fn prepare_descriptor_cleanup() -> io::Result<DescriptorCleanup> {
+fn prepare_descriptor_cleanup(_highest_descriptor: RawFd) -> io::Result<DescriptorCleanup> {
     Ok(unsafe { libc::getdtablesize() })
 }
 
 #[cfg(target_os = "macos")]
-fn prepare_descriptor_cleanup() -> io::Result<DescriptorCleanup> {
-    open_descriptor_numbers()
+fn prepare_descriptor_cleanup(highest_descriptor: RawFd) -> io::Result<DescriptorCleanup> {
+    Ok(highest_descriptor)
 }
 
 #[cfg(target_os = "linux")]
@@ -1670,13 +1696,9 @@ unsafe fn close_child_descriptors_after(
 #[cfg(target_os = "macos")]
 unsafe fn close_child_descriptors_after(
     fd: RawFd,
-    descriptors: &DescriptorCleanup,
+    highest_descriptor: &DescriptorCleanup,
 ) -> libc::c_long {
-    for descriptor in descriptors
-        .iter()
-        .copied()
-        .filter(|descriptor| *descriptor > fd)
-    {
+    for descriptor in fd + 1..=*highest_descriptor {
         libc::close(descriptor);
     }
     0
