@@ -33,6 +33,10 @@ part of 'api.dart';
 abstract interface class PtySession {
   /// Starts a child process attached to a new pseudo terminal.
   ///
+  /// Windows requires build 26100 or newer. Earlier builds report
+  /// [PtyUnsupportedException] because their ConPTY shutdown behavior cannot
+  /// satisfy the session cleanup contract.
+  ///
   /// Throws [PtyInvalidArgumentException] for options outside the native
   /// contract, [PtyUnsupportedException] when the platform backend is
   /// unavailable, [PtySpawnException] when native process creation fails, or
