@@ -2469,7 +2469,7 @@ fn run_harness() -> io::Result<()> {
                         }
                         churn_count.fetch_add(1, Ordering::Relaxed);
                     }
-                    thread::sleep(Duration::from_micros(100));
+                    thread::sleep(Duration::from_millis(1));
                 }
             })
         })
