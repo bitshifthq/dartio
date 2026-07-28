@@ -31,4 +31,15 @@ void main() {
           'probe stdout:\n${result.stdout}\nprobe stderr:\n${result.stderr}',
     );
   });
+
+  test('reentrant write preserves typed infrastructure failure', () async {
+    final result = await _runProbe('reentrant-write');
+
+    expect(
+      result.exitCode,
+      0,
+      reason:
+          'probe stdout:\n${result.stdout}\nprobe stderr:\n${result.stderr}',
+    );
+  });
 }

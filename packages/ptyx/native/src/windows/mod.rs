@@ -6,7 +6,7 @@ use std::io;
 use std::pin::Pin;
 use std::ptr::null_mut;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::mpsc::{self, Receiver, Sender, SyncSender};
+use std::sync::mpsc::{self, Receiver, Sender, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -26,7 +26,7 @@ use windows_sys::Win32::System::IO::{
 use self::handles::{IoOperation, OwnedHandle, OwnedPseudoConsole};
 pub(crate) use self::spawn::BrokerSpawn;
 use crate::oneshot::{self, Sender as ReplySender};
-use crate::GenerationRegistry;
+use crate::{GenerationRegistry, WRITE_INFRASTRUCTURE_FAILURE};
 
 const BYTE_QUANTUM: usize = 64 * 1024;
 const INTERACTIVE_BATCH: usize = 256;
@@ -723,19 +723,17 @@ impl IntegratedRuntime {
     }
 
     pub(crate) fn write(&self, handle: u64, bytes: Vec<u8>) -> i64 {
-        let admission = match self
-            .admissions
-            .lock()
-            .ok()
-            .and_then(|admissions| admissions.get(&handle).cloned())
-        {
-            Some(admission) => admission,
-            None => return -1,
+        let admission = match self.admissions.lock() {
+            Ok(admissions) => match admissions.get(&handle).cloned() {
+                Some(admission) => admission,
+                None => return -1,
+            },
+            Err(_) => return WRITE_INFRASTRUCTURE_FAILURE,
         };
         let length = bytes.len();
         let mut state = match admission.state.lock() {
             Ok(state) => state,
-            Err(_) => return -1,
+            Err(_) => return WRITE_INFRASTRUCTURE_FAILURE,
         };
         if !state.open {
             return -1;
@@ -744,17 +742,20 @@ impl IntegratedRuntime {
             return 0;
         }
         state.bytes += length;
-        if self
-            .commands
-            .try_send(Command::Write {
-                handle,
-                bytes,
-                admission: Arc::clone(&admission),
-            })
-            .is_err()
-        {
+        let command = Command::Write {
+            handle,
+            bytes,
+            admission: Arc::clone(&admission),
+        };
+        if let Err(error) = self.commands.try_send(command) {
             state.bytes -= length;
-            return 0;
+            return match error {
+                TrySendError::Full(_) => 0,
+                TrySendError::Disconnected(_) => {
+                    state.open = false;
+                    WRITE_INFRASTRUCTURE_FAILURE
+                }
+            };
         }
         drop(state);
         let _ = self.iocp.post_command();
@@ -927,6 +928,7 @@ fn reactor(
             &notices,
             &mut sessions,
             &mut counters,
+            &admissions,
         );
         poll_process_exits(
             iocp.raw(),
@@ -977,7 +979,7 @@ fn reactor(
                     &mut counters,
                     &admissions,
                 ) {
-                    shutdown_all(&iocp_sender, &closer, &mut sessions);
+                    shutdown_all(&iocp_sender, &closer, &mut sessions, &admissions);
                     return;
                 }
                 continue;
@@ -1347,6 +1349,7 @@ fn handle_io_completion(
         .is_some_and(|operation| operation.overlapped_ptr() == overlapped);
     if read_matches {
         let operation = session.read.take().expect("read completion owns operation");
+        let mut terminal_eof = false;
         if let Some(error) = error {
             if matches!(
                 error.raw_os_error(),
@@ -1354,12 +1357,14 @@ fn handle_io_completion(
                     || code == ERROR_OPERATION_ABORTED as i32
             ) {
                 session.output_eof = true;
+                terminal_eof = true;
             } else {
                 session.output_eof = true;
                 session.output_failed = true;
             }
         } else if transferred == 0 {
             session.output_eof = true;
+            terminal_eof = true;
         } else {
             let amount = transferred as usize;
             counters.read_bytes += amount as u64;
@@ -1376,6 +1381,10 @@ fn handle_io_completion(
                 });
             }
         }
+        if terminal_eof {
+            fail_input(handle, session, notices, counters);
+            cancel_write(session);
+        }
         refresh_output(handle, session, notices, counters);
         ensure_read(iocp, handle, session, notices, counters);
     } else if write_matches {
@@ -1384,17 +1393,16 @@ fn handle_io_completion(
             .take()
             .expect("write completion owns operation");
         if error.is_some() || transferred == 0 {
-            session.write = Some(operation);
             fail_input(handle, session, notices, counters);
-            session.write.take();
-            session.input_bytes = 0;
         } else {
             let amount = transferred as usize;
             counters.write_bytes += amount as u64;
             operation.as_mut().get_mut().offset += amount;
-            session.input_bytes = session.input_bytes.saturating_sub(amount);
-            session.admission.release(amount);
-            if operation.remaining_len() != 0 {
+            if !session.input_failed {
+                session.input_bytes = session.input_bytes.saturating_sub(amount);
+                session.admission.release(amount);
+            }
+            if !session.input_failed && operation.remaining_len() != 0 {
                 operation.reset_overlapped();
                 submit_write_operation(handle, session, operation, notices, counters);
             }
@@ -1441,6 +1449,8 @@ fn ensure_read(
         if error != ERROR_IO_PENDING {
             if error == ERROR_BROKEN_PIPE {
                 session.output_eof = true;
+                fail_input(handle, session, notices, counters);
+                cancel_write(session);
                 refresh_output(handle, session, notices, counters);
             } else {
                 session.output_eof = true;
@@ -1487,10 +1497,7 @@ fn submit_write_operation(
         )
     };
     if submitted == 0 && unsafe { GetLastError() } != ERROR_IO_PENDING {
-        session.write = Some(operation);
         fail_input(handle, session, notices, counters);
-        session.write.take();
-        session.input_bytes = 0;
         return;
     }
     session.write = Some(operation);
@@ -1568,9 +1575,7 @@ fn fail_input(
     session.admission.close();
     session.admission.release(session.input_bytes);
     session.input.clear();
-    if session.write.is_none() {
-        session.input_bytes = 0;
-    }
+    session.input_bytes = 0;
     if accepted_pending {
         notify_input_failure(handle, session, notices, counters);
     }
@@ -1695,10 +1700,7 @@ fn abandon_session(
     if !session.close_started {
         session.close_started = true;
         session.paused = false;
-        session.admission.close();
-        session.admission.release(session.input_bytes);
-        session.input.clear();
-        session.input_bytes = 0;
+        fail_input(handle, session, notices, counters);
         session.output.clear();
         session.output_bytes = 0;
         session.output_outstanding = 0;
@@ -1719,6 +1721,7 @@ fn reap_abandoned(
     notices: &NoticeEmitter,
     sessions: &mut GenerationRegistry<Session>,
     counters: &mut RuntimeCounters,
+    admissions: &Arc<Mutex<HashMap<u64, Arc<InputAdmission>>>>,
 ) {
     for handle in sessions.handles() {
         if let Some(session) = sessions.get_mut(handle) {
@@ -1743,7 +1746,11 @@ fn reap_abandoned(
             .get(handle)
             .is_some_and(|session| session.abandoned && session.terminal());
         if removable {
-            sessions.remove(handle);
+            if sessions.remove(handle).is_some() {
+                if let Ok(mut values) = admissions.lock() {
+                    values.remove(&handle);
+                }
+            }
         }
     }
 }
@@ -1819,6 +1826,7 @@ fn shutdown_all(
     iocp: &IocpSender,
     closer: &CloserPool,
     sessions: &mut GenerationRegistry<Session>,
+    admissions: &Arc<Mutex<HashMap<u64, Arc<InputAdmission>>>>,
 ) {
     for handle in sessions.handles() {
         if let Some(session) = sessions.get_mut(handle) {
@@ -1828,6 +1836,9 @@ fn shutdown_all(
             cancel_write(session);
             force_pseudoconsole_close(iocp, handle, session, closer);
         }
+    }
+    if let Ok(mut values) = admissions.lock() {
+        values.clear();
     }
 }
 

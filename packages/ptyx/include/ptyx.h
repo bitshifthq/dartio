@@ -18,7 +18,7 @@
 #define PTYX_EXPORT __attribute__((visibility("default")))
 #endif
 
-#define PTYX_ABI_VERSION 6u
+#define PTYX_ABI_VERSION 7u
 
 PTYX_EXPORT uint32_t ptyi_abi_version(void);
 /**
@@ -56,8 +56,9 @@ PTYX_EXPORT bool ptyi_activate(
     int64_t event_port);
 
 /**
- * Returns one after admission, zero for temporary backpressure, or -1 when the
- * session can never accept more input.
+ * Returns one after admission, zero for temporary backpressure, -1 when the
+ * session can never accept more input, or -2 when the native runtime owner is
+ * unavailable.
  */
 PTYX_EXPORT int64_t ptyi_write(
     uint64_t handle,

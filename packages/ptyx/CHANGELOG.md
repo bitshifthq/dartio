@@ -19,7 +19,7 @@
   native status, and safe context.
 - Added shared native reactors, a hardened Unix spawn/reaping broker, and
   generation-checked session ownership.
-- Added ABI version 6 generated bindings, staged-route publication, an
+- Added ABI version 7 generated bindings, staged-route publication, an
   individual-isolate owner supervisor, and guaranteed native finalization with
   post/finalizer serialization for isolate loss; added lifecycle and security
   documentation, ABI/runtime/fault contract tests, a

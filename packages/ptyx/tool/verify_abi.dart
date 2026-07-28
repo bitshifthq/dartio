@@ -2,7 +2,7 @@ import 'dart:convert';
 import 'dart:ffi';
 import 'dart:io';
 
-const _expectedAbi = 6;
+const _expectedAbi = 7;
 const _symbols = [
   'ptyi_abi_version',
   'ptyi_capabilities',

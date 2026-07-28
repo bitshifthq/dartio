@@ -130,7 +130,10 @@ class PtyUnsupportedException extends PtyException {
   String get _name => 'PtyUnsupportedException';
 }
 
-/// Thrown when accepted input fails or input capacity can never be provided.
+/// Thrown when the terminal input direction has failed permanently.
+///
+/// This includes accepted input that cannot be delivered and writes rejected
+/// after the endpoint has closed.
 class PtyInputException extends PtyException {
   const PtyInputException(
     super.message, {

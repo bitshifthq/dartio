@@ -127,8 +127,9 @@ external int controllerTtyName(
   int capacity,
 );
 
-/// Returns one after admission, zero for temporary backpressure, or -1 when the
-/// session can never accept more input.
+/// Returns one after admission, zero for temporary backpressure, -1 when the
+/// session can never accept more input, or -2 when the native runtime owner is
+/// unavailable.
 @ffi.Native<ffi.Int64 Function(ffi.Uint64, ffi.Pointer<ffi.Uint8>, ffi.Size)>(
   symbol: 'ptyi_write',
 )
@@ -138,4 +139,4 @@ external int controllerWrite(
   int length,
 );
 
-const int controllerAbiVersionExpected = 6;
+const int controllerAbiVersionExpected = 7;

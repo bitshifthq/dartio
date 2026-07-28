@@ -110,7 +110,7 @@ void main() {
         inputCapacity: capacity,
       ),
     );
-    addTearDown(session.close);
+    addTearDown(() => session.close().onError<PtyInputException>((_, _) {}));
     await fixtureOutput(session).first;
     session.write(Uint8List(capacity));
 

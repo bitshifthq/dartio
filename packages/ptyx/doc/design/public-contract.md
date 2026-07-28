@@ -194,9 +194,10 @@ Every operational exception includes:
 
 The public error families are spawn, input, output, exit observation, signal,
 resize, metadata, mode observation, state, unsupported capability, and close.
-Input failures never use the output stream. Output failures never complete
-exit or input channels. Cleanup failures never replace a previously observed
-child status.
+Delayed input failures are retained for later writes and close and become the
+terminal output event after safely buffered bytes. Output read failures never
+complete exit or input state. Cleanup failures never replace a previously
+observed child status.
 
 Children inherit the parent's operating-system privilege. ptyx is not a
 sandbox.

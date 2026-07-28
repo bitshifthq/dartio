@@ -389,6 +389,34 @@ void main() {
         await session.exitCode.timeout(longTimeout);
         await fixtureOutput(session).drain<void>().timeout(longTimeout);
       });
+
+      test(
+        'reports accepted input loss as the terminal output error',
+        () async {
+          const capacity = 512 * 1024;
+          final command = shell(
+            '[Console]::Write("ready"); Start-Sleep -Seconds 10',
+          );
+          final session = await PtySession.spawn(
+            PtySpawnOptions(
+              executable: command.executable,
+              arguments: command.arguments,
+              initialSize: defaultSize,
+              maxBufferedInput: capacity,
+            ),
+          );
+          addTearDown(
+            () => session.close().onError<PtyInputException>((_, _) {}),
+          );
+          final terminalOutput = fixtureOutput(session).drain<void>();
+          session.write(Uint8List(capacity));
+
+          session.kill(ProcessSignal.sigkill);
+
+          await expectLater(terminalOutput, throwsA(isA<PtyInputException>()));
+        },
+        testOn: 'windows',
+      );
     });
 
     group('environment', () {
@@ -572,6 +600,17 @@ void main() {
 
         expect(mode.echo, isFalse);
       }, testOn: 'posix');
+
+      test('remains silent when terminal modes are unavailable', () async {
+        final session = await spawnScript('Start-Sleep -Seconds 10');
+        final modes = session.modeChanges.toList();
+        final modeExpectation = expectLater(modes, completion(isEmpty));
+
+        await Future<void>.value();
+        await session.close();
+
+        await modeExpectation;
+      }, testOn: 'windows');
     });
 
     group('metadata', () {
@@ -654,6 +693,32 @@ void main() {
     });
 
     group('close', () {
+      test('reports accepted input lost during cleanup', () async {
+        const capacity = 512 * 1024;
+        final command = shell(
+          platformScript(
+            posix: r'stty raw -echo; printf ready; kill -STOP $$; sleep 10',
+            windows: '[Console]::Write("ready"); Start-Sleep -Seconds 10',
+          ),
+        );
+        final session = await PtySession.spawn(
+          PtySpawnOptions(
+            executable: command.executable,
+            arguments: command.arguments,
+            initialSize: defaultSize,
+            maxBufferedInput: capacity,
+            gracefulCloseTimeout: Duration.zero,
+          ),
+        );
+        await fixtureOutput(session).first.timeout(shortTimeout);
+        session.discardOutput();
+        session.write(Uint8List(capacity));
+
+        final closing = session.close();
+
+        await expectLater(closing, throwsA(isA<PtyInputException>()));
+      });
+
       test('completes while output is active', () async {
         final session = await spawnCommand(infiniteOutputCommand());
 

@@ -1,6 +1,7 @@
 use super::{dup_cloexec, set_cloexec, set_nonblocking, GenerationRegistry};
 use crate::broker_client::{BrokerClient, BrokerOwner, BrokerSession, BrokerSpawn};
 use crate::oneshot::{self, Sender as ReplySender};
+use crate::WRITE_INFRASTRUCTURE_FAILURE;
 use std::collections::{HashMap, VecDeque};
 use std::ffi::CString;
 use std::io;
@@ -8,7 +9,7 @@ use std::mem::MaybeUninit;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 #[cfg(target_os = "macos")]
 use std::ptr;
-use std::sync::mpsc::{self, Receiver, SyncSender};
+use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -403,37 +404,17 @@ impl IntegratedRuntime {
     }
 
     pub fn write(&self, handle: u64, bytes: Vec<u8>) -> i64 {
-        let admission = match self
-            .admissions
-            .lock()
-            .ok()
-            .and_then(|admissions| admissions.get(&handle).cloned())
-        {
-            Some(admission) => admission,
-            None => return -1,
+        let admission = match self.admissions.lock() {
+            Ok(admissions) => match admissions.get(&handle).cloned() {
+                Some(admission) => admission,
+                None => return -1,
+            },
+            Err(_) => return WRITE_INFRASTRUCTURE_FAILURE,
         };
-        let length = bytes.len();
-        let mut state = match admission.state.lock() {
-            Ok(state) => state,
-            Err(_) => return -1,
-        };
-        if !state.open {
-            return -1;
+        let result = admit_write(&self.commands, handle, bytes, admission);
+        if result != 1 {
+            return result;
         }
-        if length == 0 || state.bytes.saturating_add(length) > admission.capacity {
-            return 0;
-        }
-        state.bytes += length;
-        let command = Command::Write {
-            handle,
-            bytes,
-            admission: Arc::clone(&admission),
-        };
-        if self.commands.try_send(command).is_err() {
-            state.bytes -= length;
-            return 0;
-        }
-        drop(state);
         self.wake.wake();
         1
     }
@@ -644,7 +625,7 @@ fn reactor(
             if io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
                 continue;
             }
-            fail_all(&notices, &mut sessions, &mut counters, &broker);
+            fail_all(&notices, &mut sessions, &mut counters, &broker, &admissions);
             return;
         }
         counters.reactor_wakeups += 1;
@@ -684,9 +665,9 @@ fn reactor(
             }
         }
         refresh_due_outputs(-1, &notices, &mut sessions, &mut counters);
-        reap_abandoned(&mut sessions, &broker);
+        reap_abandoned(&mut sessions, &broker, &admissions);
         if shutdown {
-            shutdown_all(&mut sessions, &broker);
+            shutdown_all(&mut sessions, &broker, &admissions);
             return;
         }
     }
@@ -741,7 +722,7 @@ fn reactor(
             if io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
                 continue;
             }
-            fail_all(&notices, &mut sessions, &mut counters, &broker);
+            fail_all(&notices, &mut sessions, &mut counters, &broker, &admissions);
             return;
         }
         counters.reactor_wakeups += 1;
@@ -800,9 +781,9 @@ fn reactor(
             }
         }
         refresh_due_outputs(epoll.as_raw_fd(), &notices, &mut sessions, &mut counters);
-        reap_abandoned(&mut sessions, &broker);
+        reap_abandoned(&mut sessions, &broker, &admissions);
         if shutdown {
-            shutdown_all(&mut sessions, &broker);
+            shutdown_all(&mut sessions, &broker, &admissions);
             return;
         }
     }
@@ -1050,7 +1031,7 @@ fn process_commands(
             }
             Command::BrokerLost => {
                 pending_broker_exits.clear();
-                fail_all(notices, sessions, counters, broker_client);
+                fail_all(notices, sessions, counters, broker_client, admissions);
             }
             Command::Shutdown => return (true, false),
         }
@@ -1435,7 +1416,11 @@ fn close_session(session: &mut Session, broker: &BrokerClient) -> bool {
     true
 }
 
-fn reap_abandoned(sessions: &mut GenerationRegistry<Session>, broker: &BrokerClient) {
+fn reap_abandoned(
+    sessions: &mut GenerationRegistry<Session>,
+    broker: &BrokerClient,
+    admissions: &Arc<Mutex<HashMap<u64, Arc<InputAdmission>>>>,
+) {
     for handle in sessions.handles() {
         if let Some(session) = sessions.get_mut(handle) {
             if !session.active
@@ -1469,14 +1454,20 @@ fn reap_abandoned(sessions: &mut GenerationRegistry<Session>, broker: &BrokerCli
             let released = sessions
                 .get(handle)
                 .is_some_and(|session| broker.release_async(session.broker_session).is_ok());
-            if released {
-                let _ = sessions.remove(handle);
+            if released && sessions.remove(handle).is_some() {
+                if let Ok(mut values) = admissions.lock() {
+                    values.remove(&handle);
+                }
             }
         }
     }
 }
 
-fn shutdown_all(sessions: &mut GenerationRegistry<Session>, broker: &BrokerClient) {
+fn shutdown_all(
+    sessions: &mut GenerationRegistry<Session>,
+    broker: &BrokerClient,
+    admissions: &Arc<Mutex<HashMap<u64, Arc<InputAdmission>>>>,
+) {
     for handle in sessions.handles() {
         if let Some(session) = sessions.get_mut(handle) {
             close_session(session, broker);
@@ -1487,6 +1478,9 @@ fn shutdown_all(sessions: &mut GenerationRegistry<Session>, broker: &BrokerClien
             let _ = broker.abort_async(session.broker_session);
         }
     }
+    if let Ok(mut values) = admissions.lock() {
+        values.clear();
+    }
 }
 
 fn fail_all(
@@ -1494,6 +1488,7 @@ fn fail_all(
     sessions: &mut GenerationRegistry<Session>,
     counters: &mut RuntimeCounters,
     broker: &BrokerClient,
+    admissions: &Arc<Mutex<HashMap<u64, Arc<InputAdmission>>>>,
 ) {
     for handle in sessions.handles() {
         if let Some(mut session) = sessions.remove(handle) {
@@ -1503,6 +1498,9 @@ fn fail_all(
             let _ = broker.abort_async(session.broker_session);
             send_notice(notices, Notice::BrokerLost(handle), counters);
         }
+    }
+    if let Ok(mut values) = admissions.lock() {
+        values.clear();
     }
 }
 
@@ -1640,16 +1638,53 @@ fn submit(kqueue: RawFd, change: &libc::kevent) -> io::Result<()> {
     }
 }
 
+fn admit_write(
+    commands: &SyncSender<Command>,
+    handle: u64,
+    bytes: Vec<u8>,
+    admission: Arc<InputAdmission>,
+) -> i64 {
+    let length = bytes.len();
+    let mut state = match admission.state.lock() {
+        Ok(state) => state,
+        Err(_) => return WRITE_INFRASTRUCTURE_FAILURE,
+    };
+    if !state.open {
+        return -1;
+    }
+    if length == 0 || state.bytes.saturating_add(length) > admission.capacity {
+        return 0;
+    }
+    state.bytes += length;
+    let command = Command::Write {
+        handle,
+        bytes,
+        admission: Arc::clone(&admission),
+    };
+    if let Err(error) = commands.try_send(command) {
+        state.bytes -= length;
+        return match error {
+            TrySendError::Full(_) => 0,
+            TrySendError::Disconnected(_) => {
+                state.open = false;
+                WRITE_INFRASTRUCTURE_FAILURE
+            }
+        };
+    }
+    1
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        fail_input, notify_input_failure, InputAdmission, Notice, QueuedOutput, RuntimeCounters,
-        Session, OUTPUT_BATCH,
+        admit_write, fail_input, notify_input_failure, InputAdmission, Notice, QueuedOutput,
+        RuntimeCounters, Session, OUTPUT_BATCH, WRITE_INFRASTRUCTURE_FAILURE,
     };
     use crate::broker_client::BrokerSession;
     use std::collections::VecDeque;
     use std::fs::File;
     use std::sync::{mpsc, Arc};
+    use std::thread;
 
     fn session(input_capacity: usize) -> Session {
         Session::from_broker(
@@ -1695,6 +1730,49 @@ mod tests {
 
         assert_eq!(receiver.try_recv(), Ok(Notice::InputFailed(7)));
         assert_eq!(receiver.try_recv(), Err(mpsc::TryRecvError::Empty));
+    }
+
+    #[test]
+    fn disconnected_command_queue_permanently_closes_input() {
+        let admission = Arc::new(InputAdmission::new(4));
+        let (sender, receiver) = mpsc::sync_channel(1);
+        drop(receiver);
+
+        let result = admit_write(&sender, 7, vec![1], Arc::clone(&admission));
+
+        assert_eq!(result, WRITE_INFRASTRUCTURE_FAILURE);
+        let state = admission.state.lock().unwrap();
+        assert!(!state.open);
+        assert_eq!(state.bytes, 0);
+    }
+
+    #[test]
+    fn full_command_queue_preserves_recoverable_input() {
+        let admission = Arc::new(InputAdmission::new(4));
+        let (sender, _receiver) = mpsc::sync_channel(0);
+
+        let result = admit_write(&sender, 7, vec![1], Arc::clone(&admission));
+
+        assert_eq!(result, 0);
+        let state = admission.state.lock().unwrap();
+        assert!(state.open);
+        assert_eq!(state.bytes, 0);
+    }
+
+    #[test]
+    fn poisoned_input_admission_is_an_infrastructure_failure() {
+        let admission = Arc::new(InputAdmission::new(4));
+        let poisoned = Arc::clone(&admission);
+        let _ = thread::spawn(move || {
+            let _state = poisoned.state.lock().unwrap();
+            panic!("poison input admission");
+        })
+        .join();
+        let (sender, _receiver) = mpsc::sync_channel(1);
+
+        let result = admit_write(&sender, 7, vec![1], admission);
+
+        assert_eq!(result, WRITE_INFRASTRUCTURE_FAILURE);
     }
 
     #[test]

@@ -34,6 +34,8 @@ static COMMAND_INPUT_BYTES: AtomicUsize = AtomicUsize::new(0);
 static TEST_SPAWN_DELAY_MS: AtomicUsize = AtomicUsize::new(0);
 #[cfg(feature = "test-controls")]
 static TEST_SPAWN_DELAY_ACTIVE: AtomicBool = AtomicBool::new(false);
+#[cfg(feature = "test-controls")]
+static TEST_WRITE_INFRASTRUCTURE_FAILURE: AtomicBool = AtomicBool::new(false);
 const COMMAND_INPUT_CAPACITY: usize = 64 * 1024 * 1024;
 const MAX_SESSION_CAPACITY: usize = 64 * 1024 * 1024;
 const MAX_SPAWN_PAYLOAD: usize = 64 * 1024;
@@ -105,7 +107,7 @@ impl Drop for InputAdmission {
 
 #[no_mangle]
 pub extern "C" fn ptyi_abi_version() -> u32 {
-    6
+    7
 }
 
 #[no_mangle]
@@ -197,6 +199,12 @@ pub extern "C" fn ptyi_test_delay_next_spawn(milliseconds: usize) {
 #[cfg(feature = "test-controls")]
 pub extern "C" fn ptyi_test_spawn_delay_active() -> bool {
     TEST_SPAWN_DELAY_ACTIVE.load(Ordering::Acquire)
+}
+
+#[no_mangle]
+#[cfg(feature = "test-controls")]
+pub extern "C" fn ptyi_test_fail_next_write_infrastructure() {
+    TEST_WRITE_INFRASTRUCTURE_FAILURE.store(true, Ordering::Release);
 }
 
 #[no_mangle]
@@ -482,7 +490,7 @@ pub extern "C" fn ptyi_activate(handle: u64, output_port: i64, event_port: i64) 
 
 #[no_mangle]
 pub unsafe extern "C" fn ptyi_write(handle: u64, bytes: *const u8, length: usize) -> i64 {
-    catch_unwind(AssertUnwindSafe(|| {
+    match catch_unwind(AssertUnwindSafe(|| {
         if bytes.is_null() || length == 0 || length > isize::MAX as usize {
             set_last_error_code(libc::EINVAL);
             return -1;
@@ -491,15 +499,29 @@ pub unsafe extern "C" fn ptyi_write(handle: u64, bytes: *const u8, length: usize
             return 0;
         };
         let bytes = std::slice::from_raw_parts(bytes, length).to_vec();
-        let result = with_runtime(|runtime| runtime.write(handle, bytes)).unwrap_or(-1);
-        if result < 0 {
+        #[cfg(feature = "test-controls")]
+        if TEST_WRITE_INFRASTRUCTURE_FAILURE.swap(false, Ordering::AcqRel) {
+            let _ = abandon_handle(handle);
+            set_last_error_code(libc::EIO);
+            return crate::WRITE_INFRASTRUCTURE_FAILURE;
+        }
+        let result = with_runtime(|runtime| runtime.write(handle, bytes))
+            .unwrap_or(crate::WRITE_INFRASTRUCTURE_FAILURE);
+        if result == crate::WRITE_INFRASTRUCTURE_FAILURE {
+            set_last_error_code(libc::EIO);
+        } else if result < 0 {
             set_last_error_code(libc::EPIPE);
         } else {
             set_last_error_code(0);
         }
         result
-    }))
-    .unwrap_or(-1)
+    })) {
+        Ok(result) => result,
+        Err(_) => {
+            set_last_error_code(libc::EIO);
+            crate::WRITE_INFRASTRUCTURE_FAILURE
+        }
+    }
 }
 
 #[no_mangle]

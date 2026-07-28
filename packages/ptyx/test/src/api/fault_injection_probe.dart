@@ -1,8 +1,10 @@
 @DefaultAsset('package:ptyx/ptyx.dart')
 library;
 
+import 'dart:async';
 import 'dart:ffi';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:ptyx/ptyx.dart';
 
@@ -12,15 +14,62 @@ external void failNextNativePost();
 @Native<Void Function()>(symbol: 'ptyi_test_kill_broker')
 external void killNativeBroker();
 
+@Native<Void Function()>(symbol: 'ptyi_test_fail_next_write_infrastructure')
+external void failNextWriteWithInfrastructureLoss();
+
 Future<void> main(List<String> arguments) {
   switch (arguments.length == 1 ? arguments.single : null) {
     case 'failed-post':
       return _exerciseFailedPost();
     case 'broker-loss':
       return _exerciseBrokerLoss();
+    case 'reentrant-write':
+      return _exerciseReentrantWriteFailure();
     default:
       throw ArgumentError.value(arguments, 'arguments', 'unknown probe');
   }
+}
+
+Future<void> _exerciseReentrantWriteFailure() async {
+  final session = await PtySession.spawn(
+    PtySpawnOptions(
+      executable: Platform.isWindows
+          ? r'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe'
+          : '/bin/sh',
+      arguments: Platform.isWindows
+          ? const [
+              '-NoProfile',
+              '-NonInteractive',
+              '-Command',
+              '[Console]::Write("ready"); Start-Sleep -Seconds 10',
+            ]
+          : const ['-c', 'printf ready; sleep 10'],
+      initialSize: const PtySize(rows: 24, columns: 80),
+    ),
+  );
+  final result = Completer<void>();
+  late final StreamSubscription<Uint8List> subscription;
+  subscription = session.output.listen(
+    (_) {
+      failNextWriteWithInfrastructureLoss();
+      try {
+        session.write(Uint8List.fromList(const [1]));
+      } on PtyInfrastructureException {
+        result.complete();
+      } on Object catch (error, stackTrace) {
+        result.completeError(error, stackTrace);
+      }
+    },
+    onError: (Object error, StackTrace stackTrace) {
+      if (!result.isCompleted) {
+        result.completeError(error, stackTrace);
+      }
+    },
+  );
+
+  await result.future.timeout(const Duration(seconds: 5));
+  await subscription.cancel();
+  await _expectInfrastructure(session.close());
 }
 
 Future<void> _expectInfrastructure<T>(Future<T> operation) async {

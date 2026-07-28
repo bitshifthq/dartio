@@ -93,7 +93,7 @@ identity, not an unchecked numeric PID, controls signal and cleanup decisions.
 | Race | Linearization and deterministic result |
 |---|---|
 | spawn success versus setup failure | success commits only after every required registration; earlier failures stay transaction-owned and cannot expose a session |
-| write versus close | the input reservation lock orders them; accepted writes receive flush or explicit close failure, later writes receive closed |
+| write versus close | the input reservation lock orders them; accepted writes are delivered or produce an explicit close failure, later writes receive closed |
 | write versus child exit | exit alone does not revoke input until the OS write path closes; each write is either accepted or rejected in full |
 | signal versus exit and reap | the child-state lock and retained OS identity order the request; after reap commit the result is already-exited |
 | resize versus close | the session operation gate orders them; resize either commits before close or receives closed |

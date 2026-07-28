@@ -244,6 +244,7 @@ final class NativeSession implements PtySession, Finalizable {
   var _paused = true;
   var _outputCancelled = false;
   var _infrastructureLost = false;
+  var _terminalOutputScheduled = false;
   Object? _terminalFailure;
   PtyInputException? _inputFailure;
   var _creditScheduled = false;
@@ -372,6 +373,16 @@ final class NativeSession implements PtySession, Finalizable {
       pointer.asTypedList(data.length).setAll(0, data);
       return controllerWrite(_handle, pointer, data.length);
     });
+    if (result == -2) {
+      final failure = PtyInfrastructureException(
+        'native session runtime is unavailable',
+        operation: operation,
+        nativeCode: controllerLastErrorCode(),
+      );
+      _infrastructureLost = true;
+      _fail(failure);
+      throw failure;
+    }
     if (result < 0) {
       final nativeCode = controllerLastErrorCode();
       final failure = PtyInputException(
@@ -596,6 +607,7 @@ final class NativeSession implements PtySession, Finalizable {
 
   void _fail(Object error) {
     _terminalFailure ??= error;
+    final terminalFailure = _terminalFailure!;
     // A terminal infrastructure notice means native ownership has already
     // moved to forced cleanup. Keeping either finalizer attached would invoke
     // a stale native callback while the isolate itself is shutting down.
@@ -607,9 +619,14 @@ final class NativeSession implements PtySession, Finalizable {
     if (!_outputDone.isCompleted) {
       _outputDone.complete();
     }
-    if (!_outputController.isClosed) {
-      _outputController.addError(error);
-      unawaited(_outputController.close());
+    if (!_outputController.isClosed && !_terminalOutputScheduled) {
+      _terminalOutputScheduled = true;
+      scheduleMicrotask(() {
+        if (!_outputController.isClosed) {
+          _outputController.addError(terminalFailure);
+          unawaited(_outputController.close());
+        }
+      });
     }
     _runtime._removeSession(_handle);
   }
@@ -665,9 +682,26 @@ final class NativeSession implements PtySession, Finalizable {
         _exit.future,
         _outputDone.future,
       ]).timeout(_terminalDrainTimeout);
+    } on TimeoutException catch (_, stackTrace) {
+      recordFailure(
+        const PtyCloseException(
+          'native resources did not reach a terminal state',
+        ),
+        stackTrace,
+      );
+      controllerClose(_handle);
     } on Object catch (error, stackTrace) {
       recordFailure(error, stackTrace);
       controllerClose(_handle);
+    }
+    final delayedInputFailure = _inputFailure;
+    if (delayedInputFailure != null) {
+      if (_terminalFailure == null) {
+        failure = delayedInputFailure;
+        failureStack = StackTrace.current;
+      } else {
+        recordFailure(delayedInputFailure);
+      }
     }
 
     var destroyed = controllerDestroy(_handle);
@@ -717,7 +751,7 @@ final class NativeSession implements PtySession, Finalizable {
   }
 
   void _startModeObservation() {
-    if (_modeTimer != null || _close != null) {
+    if (!capabilities.terminalModes || _modeTimer != null || _close != null) {
       return;
     }
     scheduleMicrotask(_observeMode);

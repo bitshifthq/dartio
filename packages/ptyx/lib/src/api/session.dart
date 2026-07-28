@@ -80,8 +80,9 @@ abstract interface class PtySession {
   /// Terminal input mode changes observed from the pseudo terminal.
   ///
   /// The stream emits when a program changes terminal input behavior, such as
-  /// disabling echo for hidden input. It closes with the session and may emit a
-  /// [PtyException] if mode polling fails.
+  /// disabling echo for hidden input. On platforms without terminal-mode
+  /// support it remains silent. It closes with the session and may emit a
+  /// [PtyException] if supported mode polling fails.
   Stream<PtyTermMode> get modeChanges;
 
   /// Raw bytes received from the platform pseudo-terminal backend.
@@ -135,7 +136,8 @@ abstract interface class PtySession {
   /// After this future completes, operations that require a live session throw
   /// [PtyClosedException]. The [output] and [modeChanges] streams are closed as
   /// part of closing the session. Throws [PtyCloseException] if bounded native
-  /// cleanup cannot be established. If an earlier
+  /// cleanup cannot be established and [PtyInputException] if accepted input
+  /// cannot be delivered during cleanup. If an earlier
   /// [PtyInfrastructureException] caused cleanup uncertainty, that root error
   /// is preserved.
   Future<void> close();

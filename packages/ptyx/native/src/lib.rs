@@ -17,6 +17,8 @@ mod integrated;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod isolate_thread;
 mod oneshot;
+
+pub(crate) const WRITE_INFRASTRUCTURE_FAILURE: i64 = -2;
 #[cfg(windows)]
 mod windows;
 
