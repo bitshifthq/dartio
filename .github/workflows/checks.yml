@@ -225,7 +225,7 @@ jobs:
         run: cargo test --manifest-path packages/ptyx/native/broker/Cargo.toml
       - name: run Unix broker ownership harness
         if: runner.os != 'Windows'
-        run: cargo run --manifest-path packages/ptyx/native/broker/Cargo.toml
+        run: cargo run --release --manifest-path packages/ptyx/native/broker/Cargo.toml
       - run: cargo clippy --manifest-path packages/ptyx/native/Cargo.toml --all-targets --all-features -- -D warnings
       - if: runner.os != 'Windows'
         run: cargo clippy --manifest-path packages/ptyx/native/broker/Cargo.toml --all-targets -- -D warnings
