@@ -200,6 +200,7 @@ fn receive_frame(fd: RawFd) -> io::Result<Option<(Frame, Option<OwnedFd>)>> {
     receive_frame_inner(fd, false)
 }
 
+#[cfg(target_os = "macos")]
 fn receive_frame_blocking(fd: RawFd) -> io::Result<Option<(Frame, Option<OwnedFd>)>> {
     receive_frame_inner(fd, true)
 }
