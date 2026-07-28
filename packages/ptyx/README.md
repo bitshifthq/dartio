@@ -78,8 +78,15 @@ await outputDone;
 
 An output-heavy child can block normally when `output` has no listener or its
 subscription is paused. Listen before awaiting `exitCode` when output matters.
-If it does not matter, call `discardOutput()`; canceling an output subscription
-has the same drain-and-discard effect.
+If it does not matter, explicitly cancel a subscription:
+
+```dart
+final output = session.output.listen(null);
+await output.cancel();
+```
+
+Cancellation drains and discards later native output so the child can
+continue. It is the only public discard operation.
 
 Resize is synchronous bounded metadata work:
 
@@ -160,6 +167,7 @@ to their own trust boundary. Input bytes and environment values are not
 included in package diagnostics. See the full [security model](doc/security.md).
 
 See the [lifecycle model](doc/design/lifecycle.md), the
+[C ABI contract](doc/design/c-abi.md), the
 [capability matrix](doc/capability-matrix.md), the
 [selected architecture](doc/architecture/selected-architecture.md), and
 [BENCHMARKS.md](BENCHMARKS.md) for the benchmark protocol. The current

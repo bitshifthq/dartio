@@ -422,7 +422,8 @@ The Dart API must:
 - separate direction-scoped input failure, output failure, exit failure, and
   close failure;
 - expose capabilities instead of ambiguous `null` or fabricated equivalence;
-- make drain-and-discard explicit and easy;
+- use output subscription cancellation as the single explicit
+  drain-and-discard operation;
 - preserve raw bytes without encoding or line-ending assumptions;
 - define stream subscription behavior;
 - provide idempotent asynchronous close;
@@ -448,8 +449,9 @@ The C ABI and Dart message protocol must:
 - make external typed-data finalization safe during shutdown and isolate loss;
 - have layout and calling-convention assertions on every supported target.
 
-Internal ABI compatibility may change with the Dart artifact. Mismatch
-detection must fail early and safely.
+The public C ABI is a stable language-neutral product boundary. Dart-specific
+messaging has a separate private protocol version tied to the Dart native
+asset. Both boundaries must fail early and safely on mismatch.
 
 ### Native process model
 

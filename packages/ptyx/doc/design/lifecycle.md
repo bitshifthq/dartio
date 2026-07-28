@@ -1,121 +1,174 @@
 # Lifecycle state model
 
-The model separates public acceptance, child state, byte transport, and native
-ownership. A transition is monotonic. Cleanup can retry work, but no resource
-returns to a live state after its release transition.
+The Rust core owns the authoritative lifecycle. Rust callers observe it
+through typed values, C callers through generation-tagged handles and events,
+and Dart callers through futures, streams, and typed exceptions.
 
-## Ownership model
+State transitions are monotonic. Cleanup may retry an owned platform action,
+but released ownership never becomes live again.
 
-Before spawn commits, a native spawn transaction owns every acquired object.
-An unpublished staged entry has a five-second activation deadline; expiry
-commits native abandonment so isolate loss between native spawn and Dart
-publication cannot orphan the child. It has no Dart notification route. A
-per-owner supervisor receives the staged handle before publication and
-abandons it if that individual isolate exits; activation installs routing only
-after Dart attaches the native finalizer. The native module is pinned for the
-process lifetime before any controller thread starts, ensuring those threads
-and their TLS destructors cannot outlive loaded code.
-After commit, a generation-checked session entry owns:
+## Ownership
 
-- the PTY master and platform child or job identity;
-- direct-child exit observation and exact-once reap state;
-- input queue bytes, sequence numbers, capacity waiters, and flush barriers;
-- output buffers, bounded copied Dart messages, and explicit delivery credit;
-- reactor registrations or unavoidable platform workers;
-- Dart output, event, and control ports;
-- mode-observer registration and timers.
+A runtime owns:
 
-The Dart object owns the public protocol, not raw native memory. Releasing the
-Dart wrapper requests shutdown but cannot directly free a pointer that native
-operations may still reference.
+- shared readiness and timer infrastructure;
+- the platform driver and Unix broker connection where applicable;
+- a generation-checked session registry;
+- the coalesced ready-session ring;
+- runtime failure and shutdown state.
 
-## Session transitions
+A spawn transaction owns every resource until it produces either a ready
+session or a completed spawn failure. A committed session owns:
 
-| From | Event and linearization point | To | Ownership result |
-|---|---|---|---|
-| spawning | native session entry and all initial registrations commit | open | spawn transaction transfers all resources to the entry |
-| spawning | any acquisition, child setup, exec, registration, or post setup fails | failed | transaction closes and reaps every acquired resource before reporting |
-| open | first explicit close, isolate loss, or terminal port-loss decision | closing | new public operations are rejected and one close completion is installed |
-| closing | all resources reach released or a final cleanup failure is recorded | closed | registry generation is retired and late operations are rejected |
-| closed | repeated close | closed | caller observes the cached close result |
+- the PTY or ConPTY and platform job identity;
+- direct-child exit observation;
+- accepted input and its byte accounting;
+- output buffers, events, and delivery credit;
+- readiness registrations and unavoidable pending platform I/O;
+- close state, deadlines, and retained failures.
 
-## Input transitions
+Transferred output events temporarily own their payload and credit
+independently of the session handle. Session release cannot invalidate an
+event held by a consumer.
 
-Awaiting `write` linearizes when a complete byte count and sequence range are
-reserved. Concurrent calls retain invocation order while an earlier call waits
-for capacity. The writer releases capacity only for bytes actually passed to
-the PTY or explicitly failed during shutdown. A flush linearizes when it
-snapshots the last accepted sequence.
+The Dart adapter owns only event routing, Dart delivery tokens, and one native
+owner token. Dart objects never own raw native buffers or operating-system
+resources.
 
-| From | Event | To | Result |
-|---|---|---|---|
-| open | full reservation succeeds | open | bytes are accepted in sequence order |
-| open | capacity is insufficient | open | write waits without reserving partial input |
-| open | permanent native write failure | failed | queued writes and flushes complete with the same input failure |
-| open | close commits | closed | unaccepted waits fail as closed; accepted sequences finish or receive explicit close failure |
-| failed | write or flush | failed | cached input failure is returned |
-| closed | write or flush | closed | state exception is returned |
+## Session states
 
-## Output transitions
+| From | Event and linearization point | To | Result |
+| --- | --- | --- | --- |
+| spawning | platform spawn and core registration commit | open | the spawn-ready event transfers the public session identity |
+| spawning | validation, acquisition, process creation, or registration fails | failed | rollback releases every acquired resource before spawn-failed |
+| spawning | consumer releases or activation lease expires | closing | native abandonment owns complete cleanup |
+| open | first close, owner loss, port loss, or infrastructure failure commits | closing | later live operations are rejected |
+| closing | resources are released or quarantined with a retained failure | closed | one close-complete event records the result |
+| closed | repeated close or release | closed | the cached result or idempotent release is used |
 
-Native read credit covers bytes until Dart delivery or explicit discard.
-Pausing and listening change credit flow, not byte order.
+## Input
+
+`write` has one native admission linearization point. It either transfers the
+complete buffer into bounded ownership or accepts none.
 
 | From | Event | To | Result |
-|---|---|---|---|
-| awaitingListener | first listen commits | flowing | buffered bytes begin ordered delivery |
-| awaitingListener | budget is full | awaitingListener | PTY read readiness is disabled |
-| awaitingListener | explicit discard | discarding | buffered and later bytes are acknowledged without Dart delivery |
-| flowing | subscription pause commits | paused | delivery stops and bounded credit eventually disables PTY reads |
-| paused | resume commits | flowing | ordered delivery resumes |
-| flowing or paused | cancel commits | discarding | no later user bytes are delivered |
-| any live output state | PTY EOF after queued bytes | ended | stream closes after all deliverable bytes |
-| any live output state | permanent read failure | failed | safe trailing bytes, then one output error, then close |
-| any live output state | session close commits | discarding | shutdown may discard undelivered output and releases all credit |
+| --- | --- | --- | --- |
+| open | complete reservation succeeds | open | bytes receive the next FIFO sequence |
+| open | capacity is insufficient | open | recoverable backpressure, no bytes accepted |
+| open | buffer exceeds the per-write or session limit | open | invalid argument, no bytes accepted |
+| open | temporary native write condition | open | the core retains and retries the same prefix |
+| open | permanent endpoint write failure | failed | later writes receive the retained input failure |
+| open | close commits before admission | closed | the write receives closed |
+| open | admission commits before close | open or closing | accepted bytes are delivered or explicitly fail close |
+| failed | write | failed | the same typed input failure is returned |
+| closed | write | closed | a closed-state error is returned |
 
-## Child and exit transitions
+A permanent input failure does not independently discard output, fabricate
+child exit, or revoke metadata. The core emits one input-failed event after
+safely queued output and includes the failure in close completion.
 
-The native child identity is retained until an exact-once wait operation
-records a status or an exit-observation failure. A cached terminal-job
-identity, not an unchecked numeric PID, controls signal and cleanup decisions.
+## Output
+
+Output has `awaitingConsumer`, `flowing`, `paused`, `canceling`, `ended`, and
+`failed` states. Native byte credit covers queue storage, transferred C events,
+posted Dart messages, and Dart-held paused deliveries.
 
 | From | Event | To | Result |
-|---|---|---|---|
-| running | direct child status is observed | exited | typed exit status is cached once while the owned Unix leader remains unreaped until cleanup |
-| running | wait facility fails | exitObservationFailed | exit future receives a dedicated failure |
-| running | signal races before reap commit | running or exited | delivery result reflects the OS operation |
-| exited | signal request | exited | returns already-exited without an OS signal |
-| running | Unix graceful close deadline expires | running | force termination is requested against the owned job |
-| running | close commits on Windows | running | the owned Job Object is terminated immediately |
+| --- | --- | --- | --- |
+| awaitingConsumer | first consumer starts | flowing | queued events become deliverable |
+| awaitingConsumer or flowing | budget becomes full | same state | platform reads stop until credit returns |
+| flowing | Dart subscription pauses | paused | the bounded delivery window fills, then reads stop |
+| paused | Dart subscription resumes | flowing | retained events continue in order |
+| any live state | subscription cancellation commits | canceling | buffered and later output is drained and discarded |
+| any live state | PTY EOF after queued bytes | ended | output-done follows the final output event |
+| any live state | permanent read failure | failed | safe output precedes one output failure |
+| any live state | close commits | canceling or flowing | the close policy resolves undelivered output explicitly |
+
+There is no session-level discard method. Stream cancellation is the sole
+public discard transition.
+
+## Child and exit
+
+Child state is independent of output:
+
+| From | Event | To | Result |
+| --- | --- | --- | --- |
+| running | direct-child status is observed | exited | the exact status is cached once |
+| running | exit observation fails | observationFailed | the exit consumer receives a typed error |
+| running | termination commits before exit | running or exited | the platform owner reports accepted or already exited |
+| exited | termination request | exited | no reused numeric process identity is signaled |
+| running | close deadline expires | running | force applies to the retained job identity |
+
+Exit may precede trailing output. Output completion never fabricates an exit
+status.
+
+## Events and fairness
+
+A session becomes scheduled when its event queue changes from empty to
+nonempty. The ready bit and ready-ring insertion change atomically with that
+transition.
+
+The runtime event consumer removes one ready identity, transfers bounded work,
+and requeues a still-ready session at the tail. A session can occupy at most
+one ready-ring entry. Enqueue racing with consumption therefore cannot lose a
+wakeup or create unbounded duplicate readiness.
+
+Runtime shutdown marks the event consumer closed and wakes it. It never relies
+on timeout polling.
+
+## Close
+
+Close installs one shared completion and follows these phases:
+
+1. stop accepting new operations;
+2. resolve accepted input by delivery or retained failure;
+3. request graceful termination where the platform contract supports it;
+4. escalate against the retained job identity at the deadline;
+5. preserve trailing output or commit shutdown discard;
+6. observe direct-child exit independently;
+7. consume terminal platform I/O completions;
+8. release buffers, events, descriptors, handles, process identities, broker
+   routes, and registry ownership;
+9. publish one close result.
+
+Failure in one phase does not skip independent safe cleanup. An earlier
+infrastructure or accepted-input failure remains authoritative when it caused
+later cleanup uncertainty.
+
+`Drop`, C session release, Dart finalization, isolate loss, failed Dart event
+posting, and explicit close all enter this state machine. They do not
+implement separate destructor sequences.
 
 ## Race table
 
-| Race | Linearization and deterministic result |
-|---|---|
-| spawn success versus setup failure | success commits only after every required registration; earlier failures stay transaction-owned and cannot expose a session |
-| write versus close | the input reservation lock orders them; accepted writes are delivered or produce an explicit close failure, later writes receive closed |
-| write versus child exit | exit alone does not revoke input until the OS write path closes; each write is either accepted or rejected in full |
-| signal versus exit and reap | the child-state lock and retained OS identity order the request; after reap commit the result is already-exited |
-| resize versus close | the session operation gate orders them; resize either commits before close or receives closed |
-| output EOF versus exit | independent completions are preserved; neither fabricates or delays the other |
-| output EOF versus read failure | the reader commits exactly one terminal event; already-read bytes precede it |
-| pause or cancel versus close | close commits discard and cleanup; a prior cancel also yields discard, and no path delivers late bytes |
-| repeated or concurrent close | atomic installation of one shared close completion makes all callers observe one result |
-| native output post versus port closure | failed post returns credit and commits native shutdown; no Dart acknowledgment is awaited |
-| copied output post versus shutdown | successful posts remain charged within the session output budget until Dart delivery or discard returns credit; a failed post rolls its credit back before shutdown |
-| isolate loss versus explicit close | the owner supervisor, native finalizer, or a failed operational post reaches the same native abandonment entry; the first shutdown cause commits and later causes merge into the same cleanup |
-| reactor failure versus public operations | the reactor commits affected sub-resources to typed failures, then performs session cleanup without corrupting other sessions |
-| mode timer versus close | generation and observer state are checked at callback commit; a late callback is discarded without touching released state |
-| handle reuse versus late ABI call | registry index and generation must both match a live entry; retired generations are never dereferenced |
+| Race | Deterministic result |
+| --- | --- |
+| spawn completion versus owner loss | native ownership either routes the completion or abandons the staged session; no live child loses an owner |
+| write versus close | one admission gate orders the operations; accepted bytes resolve explicitly, later writes receive closed |
+| write versus child exit | exit alone does not revoke input; native endpoint state determines full acceptance or rejection |
+| signal versus exit | the retained platform job identity orders delivery; a completed exit reports already exited |
+| resize versus close | the operation gate commits resize or returns closed |
+| output EOF versus exit | independent events retain their observed order without implying each other |
+| output EOF versus read failure | the platform reader commits exactly one terminal output result |
+| pause or cancellation versus posted output | every delivery token is either acknowledged for delivery or released for discard exactly once |
+| close versus transferred event | the event remains valid until event release |
+| repeated close | every caller observes the same completion |
+| runtime shutdown versus blocked event receipt | shutdown wakes the receiver with closed |
+| owner exit while quiet | the Dart owner guardian requests native abandonment without requiring an output post |
+| Dart post versus port closure | failure releases the event token and commits owner abandonment |
+| finalizer versus explicit close | both request the same idempotent native transition |
+| stale handle versus generation reuse | index and generation must match a live entry; retired generations never wrap into validity |
+| input failure during close | close rereads the retained failure after terminal input resolution before completing |
+| mode observation versus unsupported capability | observation never starts and the Dart stream remains silent |
 
-## Cleanup order
+## Platform-specific convergence
 
-Cleanup first prevents new work and wakes capacity waiters. On Unix it then
-requests graceful job termination, continues the platform-required output
-drain, and escalates at the deadline. On Windows it immediately terminates the
-owned Job Object because ConPTY does not provide an equivalent portable
-graceful-close primitive. Cleanup then observes or records direct-child exit,
-unregisters readiness and timers, resolves accepted input and output credit,
-closes OS resources, and retires the session generation. Failures are
-accumulated and reported only after all independent safe cleanup actions have
-run.
+On Unix, the broker retains direct-child parentage and job identity through
+termination and exact reap. Broker loss never authorizes signaling a cached
+PID that is no longer bound to the owned terminal.
+
+On Windows, close terminates the Job Object, initiates ConPTY close, and
+continues consuming terminal IOCP completions. Pinned `OVERLAPPED` memory and
+its handles remain owned until completion. Windows build 26100 is the supported
+floor because earlier ConPTY close behavior cannot provide the same bounded
+convergence.

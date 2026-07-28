@@ -82,8 +82,6 @@ exactly once and in PTY read order.
 - Pause retains bounded data and then stops reading the PTY.
 - Resume continues delivery without loss or reordering.
 - Cancel commits an explicit transition to native drain-and-discard.
-- `discardOutput` provides the same explicit policy without requiring a dummy
-  listener.
 - Normal child exit preserves trailing output until PTY EOF.
 - Stream completion means no later output can be delivered.
 - A read failure is emitted after every byte that can still be delivered
@@ -94,6 +92,17 @@ to the subscription or explicitly discarded. Data in a Dart controller or its
 bounded in-flight native-port messages remains charged to the same session
 budget. Messages that arrive after a subscription pauses are retained in a
 FIFO charged to that budget, then delivered in order after resume.
+
+Cancellation is the only public discard operation. A caller that does not need
+output attaches and cancels a subscription:
+
+```dart
+final output = session.output.listen(null);
+await output.cancel();
+```
+
+This keeps discard ownership in the stream API instead of duplicating it on
+the session.
 
 Awaiting child exit without consuming or discarding output can legitimately
 block the child on PTY backpressure.

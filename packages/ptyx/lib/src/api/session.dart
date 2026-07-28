@@ -97,15 +97,15 @@ abstract interface class PtySession {
   ///
   /// The stream is single-subscription. Output-heavy children may block while
   /// this stream has no listener or while its subscription is paused. Cancel
-  /// the subscription to discard unread output and allow the child to continue.
-  Stream<Uint8List> get output;
-
-  /// Discards buffered and future output without blocking the child.
+  /// the subscription to discard unread and future output and allow the child
+  /// to continue. A caller that never needs output can attach a listener with
+  /// no data callback and immediately cancel its subscription:
   ///
-  /// This is useful when only [exitCode] matters. It has the same transport
-  /// effect as canceling an [output] subscription, but can be called before a
-  /// listener is attached.
-  void discardOutput();
+  /// ```dart
+  /// final output = session.output.listen(null);
+  /// await output.cancel();
+  /// ```
+  Stream<Uint8List> get output;
 
   /// The child process identifier.
   ///

@@ -379,16 +379,20 @@ void main() {
         expect(exitCode, 0);
       });
 
-      test('explicitly discards output without attaching a listener', () async {
-        final session = await spawnCommand(
-          finiteOutputCommand(2 * 1024 * 1024),
-        );
+      test(
+        'discards output when a subscription is canceled immediately',
+        () async {
+          final session = await spawnCommand(
+            finiteOutputCommand(2 * 1024 * 1024),
+          );
+          final subscription = session.output.listen(null);
+          addTearDown(subscription.cancel);
 
-        session.discardOutput();
+          await subscription.cancel();
 
-        await session.exitCode.timeout(longTimeout);
-        await fixtureOutput(session).drain<void>().timeout(longTimeout);
-      });
+          await session.exitCode.timeout(longTimeout);
+        },
+      );
 
       test(
         'reports accepted input loss as the terminal output error',
@@ -711,7 +715,6 @@ void main() {
           ),
         );
         await fixtureOutput(session).first.timeout(shortTimeout);
-        session.discardOutput();
         session.write(Uint8List(capacity));
 
         final closing = session.close();

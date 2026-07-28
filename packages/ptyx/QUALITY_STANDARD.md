@@ -100,10 +100,19 @@ are identical.
 
 ## Public API standard
 
-The Dart API is the supported product API. The C ABI is an internal
-interoperability boundary between compatible Dart and native artifacts. It
-must be precise, versioned, validated, and tested, but it is not a separate
-general-purpose C library contract.
+`ptyx` has three supported consumption layers:
+
+- an idiomatic pure-Rust crate that owns PTY behavior and operating-system
+  mechanics;
+- a stable, language-neutral C ABI over that crate;
+- an idiomatic Dart package that uses the C ABI without exposing FFI concepts.
+
+The Rust crate and C ABI are independently useful without Dart, the Dart VM,
+Dart headers, native ports, or isolate lifecycle concepts. The Dart adapter
+may contain only the transport needed to deliver C ABI events to an isolate
+and reclaim an owner's resources when that isolate exits. It must not
+reimplement PTY lifecycle, buffering, backpressure, failure precedence, or
+platform behavior.
 
 The public API must be:
 
@@ -128,7 +137,7 @@ latency budgets:
 - maximum buffered input;
 - maximum buffered or in-flight output;
 - a latency-versus-throughput profile;
-- lossless backpressure or explicit discard policy;
+- lossless backpressure or an explicit stream-cancellation discard policy;
 - graceful-shutdown deadlines.
 
 Platform buffer sizes, batching intervals, external-data thresholds, polling
@@ -160,9 +169,11 @@ The output stream is single-subscription. Its behavior is:
 - an output read failure is reported on the output stream after every byte
   that can be delivered safely.
 
-The package must provide an ergonomic way to drain and discard output for
-callers interested only in completion. Awaiting process exit without consuming
-or explicitly discarding output must be documented as a possible source of
+Canceling the output subscription is the sole public drain-and-discard
+operation. Callers interested only in completion may attach and immediately
+cancel a subscription. A separate session-level discard method must not
+duplicate that stream lifecycle operation. Awaiting process exit without
+consuming or canceling output must be documented as a possible source of
 normal PTY backpressure.
 
 ### Input
@@ -280,10 +291,15 @@ the supported detection envelope. CPU impact must be measured with 1, 10, and
 
 ## Native architecture
 
-Dart owns the public API and platform-independent semantics. Native backends
-own OS calls, process and job relationships, thread or reactor behavior,
-memory, descriptors, handles, and cleanup beneath the interoperability
-boundary.
+The Rust crate owns the authoritative cross-platform session semantics and
+native backends. It owns OS calls, process and job relationships, thread or
+reactor behavior, memory, descriptors, handles, bounded queues, failure
+precedence, and cleanup.
+
+The C ABI translates Rust ownership into explicit language-neutral handles,
+events, status values, and buffer lifetimes. Dart owns its public API shape,
+typed Dart errors, streams, and futures, but adapts rather than reimplements
+the native state machine.
 
 Linux, macOS, and Windows may use different internal strategies. Shared code
 must represent genuinely shared semantics rather than hide meaningful native
@@ -304,6 +320,13 @@ The selected design must:
 - initialize and tear down safely across Dart isolates;
 - define session serialization and isolate ownership;
 - scale to the required session counts without thread explosion.
+
+Idle sessions must not require periodic wakeups unless an observed capability
+has no event-driven implementation. Runtime work must be coalesced and fairly
+bounded per wake. Default queue sizes and batching must minimize resident
+memory at 100 sessions while retaining the throughput and latency envelope.
+CPU time, wakeup count, context switches, and idle energy impact are
+qualification metrics, not incidental diagnostics.
 
 Portable-pty is an implementation tool, not an architectural constraint. Every
 relied-upon spawn, ownership, inheritance, exit, signal, resize, I/O, and

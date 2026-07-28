@@ -291,9 +291,6 @@ final class NativeSession implements PtySession, Finalizable {
   Stream<Uint8List> get output => _outputController.stream;
 
   @override
-  void discardOutput() => _cancelOutput();
-
-  @override
   int? get pid {
     _checkOpen('pid');
     final value = controllerPid(_handle);

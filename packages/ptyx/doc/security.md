@@ -41,8 +41,8 @@ a kill-on-close Job Object during process creation.
 Public and native boundaries cap argument and environment counts, individual
 strings, input and output queues, dimensions, protocol frames, waiter tables,
 and live Windows close operations. Output backpressure is intentional: an
-unconsumed stream can stop the child after the bounded queue fills. Call
-`discardOutput` when output is not needed.
+unconsumed stream can stop the child after the bounded queue fills. Attach and
+cancel an output subscription when output is not needed.
 
 The caller should still apply its own concurrency, runtime, executable, and
 filesystem policies. A child with equal privileges can consume CPU, allocate

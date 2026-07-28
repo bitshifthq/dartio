@@ -850,7 +850,6 @@ Future<Map<String, Object?>> _discardOutput(int byteCount) async {
   final stopwatch = Stopwatch()..start();
   try {
     await bytes.cancel();
-    session.discardOutput();
     session.write(Uint8List.fromList(const [1]));
     final exitCode = await session.exitCode.timeout(_timeout);
     stopwatch.stop();
@@ -872,7 +871,8 @@ Future<Map<String, Object?>> _noListener(int byteCount) async {
     await Future<void>.delayed(const Duration(milliseconds: 250));
     final bounded = await _resourceSnapshot();
     final stopwatch = Stopwatch()..start();
-    session.discardOutput();
+    final output = session.output.listen(null);
+    await output.cancel();
     final exitCode = await session.exitCode.timeout(_timeout);
     stopwatch.stop();
     return {

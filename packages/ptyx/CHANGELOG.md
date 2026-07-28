@@ -8,6 +8,10 @@
   FIFO delivery, buffer ownership transfer, typed recoverable backpressure,
   and sticky terminal input failure. Removed the superseded input readiness,
   flush, and input-completion APIs.
+- Made output subscription cancellation the only public drain-and-discard
+  operation and removed the redundant session-level `discardOutput` method.
+- Defined an independently reusable Rust crate, a stable language-neutral C
+  ABI, and a thin Dart-over-C binding architecture.
 - Added typed `exitStatus` while retaining `exitCode`, including complete
   unsigned 32-bit Windows process exit codes.
 - Set the Windows runtime floor to build 26100, the first ConPTY implementation

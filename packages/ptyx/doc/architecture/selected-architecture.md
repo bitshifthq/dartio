@@ -2,273 +2,366 @@
 
 ## Decision
 
-`ptyx` uses direct Rust platform backends with shared readiness-driven I/O.
-Unix process creation and reaping are isolated in a persistent helper process.
-Windows uses direct ConPTY and Job Object ownership.
+`ptyx` has three supported consumption layers:
 
-This is Candidate B with a mandatory Unix broker. The broker is not an
-optional hardening layer. A child created directly inside a Dart process can
-be reaped by the host runtime, and an embedded multithreaded process cannot
-make a descriptor snapshot followed by `fork` race-free. Both failures were
-observed in representative prototypes.
+1. The `ptyx` Rust crate is the authoritative PTY implementation.
+2. The `ptyx` C ABI is a stable, language-neutral adapter over the Rust crate.
+3. The Dart package is an idiomatic wrapper over the C ABI.
 
-Candidate A is rejected because `portable-pty` hides or performs work across
-the process-creation and Windows ownership boundaries that this contract must
-control. Candidate C is rejected because the Zig prototype failed its first
-PTY lifecycle gate and showed no material whole-package advantage in the
-equivalent language comparison.
+The core uses direct Rust platform backends with a shared lifecycle, queue,
+error, and event model. Unix process creation and reaping remain isolated in a
+persistent helper process. Windows uses direct ConPTY, IOCP, and Job Object
+ownership.
 
-## Runtime topology
+The core does not depend on Dart, Dart headers, Dart ports, FFI layouts, or
+isolate lifecycle. The C ABI does not depend on Dart. A separate private Dart
+transport shim uses only the public C ABI and Dart API-DL to deliver events to
+an isolate.
 
-### Dart boundary
+## Dependency and ownership layers
 
-- Dart owns public state, typed errors, stream semantics, and API validation.
-- A session is published in stages. Native routing exists before the session
-  becomes active and before any notification can escape.
-- Capacity and flush waits use generation-tagged waiter tokens. Registration
-  atomically returns ready, armed, or failed; it never performs a
-  check-then-listen sequence.
-- Concurrent waits are retained independently in bounded tables. A capacity
-  request larger than the session's input bound fails immediately rather than
-  occupying a waiter slot.
-- Output is posted as copied typed data with at most one message in flight per
-  session. Native queued bytes, the posted message, and a synchronously
-  paused listener all count against the same output bound.
-- Delivery returns credit with a bounded nonblocking command. Interactive
-  messages bypass bulk coalescing; bulk output uses a size target and bounded
-  deadline so native-port traffic cannot devolve into one message per PTY
-  read. Pause and resume never rearm delivery while a posted message remains
-  uncredited.
-- Output cancellation changes the session to drain-and-discard. It does not
-  recursively close the stream or silently terminate the process.
-- Loss of a Dart port is a terminal typed failure. It starts native cleanup,
-  fails all waiters, and never leaves a session waiting for another Dart call.
-- A failed operational post commits the affected session to native
-  abandonment. Dart posts and native-finalizer route removal share a native
-  lock, so an isolate-group shutdown waits for any in-flight post and prevents
-  a later post from starting.
+```text
+Rust application
+      |
+      v
+ptyx Rust crate
+      |
+      +-------------------+
+      |                   |
+Unix PTY and broker   Windows ConPTY
+      ^
+      |
+language-neutral C ABI <--- other language bindings
+      ^
+      |
+Dart transport shim
+      ^
+      |
+idiomatic Dart package
+```
 
-### Native controller
+Dependency arrows point toward the authoritative implementation. Neither the
+Rust crate nor the C ABI references a higher layer.
 
-- One process-wide controller owns a bounded command queue, a generation
-  registry, Dart notification routing, and platform reactor state.
-- The native module is pinned before controller threads start. The controller
-  intentionally lives for the host process, so library unloading cannot race
-  a reactor, notifier, broker-controller, closer, or TLS destructor.
-- Dart object collection uses `NativeFinalizer`, whose SDK contract guarantees
-  its callback no later than normal isolate-group shutdown. The pinned callback
-  only removes native routing and enqueues idempotent abandonment; it never
-  calls a Dart API. Active-session receive ports keep a standalone owner alive.
-  A separate per-owner supervisor receives staged handles before publication
-  and abandons them if that individual isolate exits. The native notifier
-  performs no periodic liveness posts.
-- A staged spawn has no Dart notification route. Activation installs the route
-  only after the finalizer is attached, under the same lock used by
-  native-to-Dart posts and finalization.
-- Controller initialization is transactional. The registry, reactor,
-  notifier, broker or IOCP owner, and failure route either become observable
-  together or are all torn down before initialization reports failure.
-- Reactor, notifier, broker-channel, or IOCP-owner death atomically fails every
-  affected sub-resource with a typed infrastructure error and starts cleanup;
-  no synchronous request waits on a dead owner.
-- Linux uses `epoll`. macOS uses a shared `poll` reactor because the measured
-  `kqueue` candidate missed the input-throughput gate. A separate
-  direct-parent prototype also failed exit ownership when the Dart host
-  reaped its children; the mandatory broker corrects that ownership boundary.
-  The broker channel has its own bounded controller because it owns a framed
-  request/response transaction. Windows uses IOCP for overlapped controller
-  pipe ends.
-- Work is scheduled with command, byte, and syscall quanta. A busy session
-  cannot drain the complete command queue or monopolize the readiness batch.
-- Input and output use chunk queues with explicit byte accounting. Unix reads
-  into uninitialized scratch storage, treats only the successful `read`
-  prefix as initialized, and copies that exact prefix into its owned queue;
-  it never zero-fills unread capacity. Filter changes occur only on state
-  transitions.
-- Child exit, PTY EOF, close, and terminal write failure either deliver every
-  accepted input byte or retain and report a typed terminal input failure.
-  Once input fails, later writes cannot be accepted.
-- Handles are never reused after generation exhaustion. A retired slot remains
-  retired instead of wrapping a stale generation back into validity.
-- A session is destroyed only after its child identity is no longer owned,
-  accepted input has completed or failed, output has reached its terminal
-  state, and platform resources have been reclaimed.
+## Rust API
 
-### Unix spawn and reap broker
+The Rust API is small and concrete:
 
-The controller launches one single-threaded broker. macOS uses
-`posix_spawn`; Linux uses an audited raw `fork`/`exec` launch to preserve the
-pre-created control socket. The broker, rather than the Dart host, is the
-parent of every PTY child.
+```rust
+pub struct Runtime;
+pub struct RuntimeBuilder;
+pub struct Session;
+pub struct Events;
+pub struct Spawn;
+pub struct Spawned {
+    pub session: Session,
+    pub events: Events,
+}
+pub struct Close;
+pub struct OutputChunk;
 
-- The broker resets its signal mask and dispositions, including `SIGCHLD`,
-  before it accepts requests.
-- It atomically opens PTY descriptors with close-on-exec, forks only from its
-  single thread, establishes the session and controlling terminal, and runs a
-  fixed async-signal-safe child syscall sequence before `exec`.
-- It observes direct-child status with non-reaping `waitid`, retains the zombie
-  leader to prevent process-group ID reuse, and performs exact `waitpid` reap
-  only after descendant cleanup. The controller sends signal requests through
-  the broker and never signals a cached PID after broker loss.
-- PTY masters move to the controller with `SCM_RIGHTS`. A versioned, bounded,
-  nonblocking protocol carries generation IDs, spawn results, signal
-  acknowledgements, exit status, and cleanup state.
-- Linux receives transferred masters with `MSG_CMSG_CLOEXEC`, making
-  close-on-exec atomic. Darwin does not expose that receive flag; the
-  controller applies `FD_CLOEXEC` while parsing the returned control message,
-  before publishing the descriptor, and every ptyx `posix_spawn` uses
-  `POSIX_SPAWN_CLOEXEC_DEFAULT`. A foreign native component that performs
-  inheriting process creation concurrently with that short Darwin receive
-  interval remains an external integration hazard.
-- The handshake identifies protocol version, target architecture, helper
-  build identity, and controller ABI. Controller and helper protocol constants
-  are checked together by protocol tests; consolidating them into generated
-  definitions remains build-system work.
-- Requests and responses use fixed, bounded frames with validated payload
-  lengths. Close, release, abort, and signal acknowledgements are completed by
-  the broker-controller thread and do not block the PTY readiness reactor.
-- Controller EOF makes the broker terminate and reap all jobs. Broker EOF
-  makes the controller issue a terminal-bound signal (`SIGQUIT` on Linux,
-  `SIGKILL` on macOS), resolve the foreground group through the still-owned
-  terminal, and force that group down before closing each PTY master and
-  reporting any remaining cleanup uncertainty. It does not signal a cached
-  group unless `tcgetsid` still binds that identity to the owned terminal.
+impl Runtime {
+    pub fn builder() -> RuntimeBuilder;
+    pub fn spawn(&self, options: SpawnOptions) -> Spawn;
+}
 
-For ordinary Dart command-line applications, the library may materialize an
-integrity-checked embedded broker to an owner-only, version-and-hash-qualified
-path. Materialization uses an interprocess lock and revalidates the final
-owner, mode, type, and content after winning or observing a concurrent
-installation. Applications using a hardened runtime, sandbox, or platform
-signing policy must provide a signed broker path in their application bundle.
-The package must reject an unusable helper during initialization rather than
-falling back to in-process `fork`.
+impl Session {
+    pub fn write(&self, data: bytes::Bytes) -> Result<(), WriteError>;
+    pub fn resize(&self, size: Size) -> Result<(), ResizeError>;
+    pub fn terminate(&self, signal: Signal) -> Result<bool, TerminateError>;
+    pub fn snapshot(&self) -> Result<SessionSnapshot, MetadataError>;
+    pub fn close(&self) -> Close;
+}
 
-### Linux ownership details
+impl Events {
+    pub fn recv(&mut self) -> Result<Event, RecvError>;
+    pub fn try_recv(&mut self) -> Result<Option<Event>, RecvError>;
+    pub fn cancel_output(&mut self) -> Result<(), SessionError>;
+}
+```
 
-The Linux broker opens the PTY pair with `openpty`, sets close-on-exec before
-fork, and retains the master in the broker until descriptor transfer succeeds.
-The single-threaded child branch performs `setsid`, `TIOCSCTTY`,
-foreground-process-group setup, `dup2`, closure of known descriptors, signal
-reset, and `execve`.
+`Spawn` and `Close` implement `Future` and provide consuming blocking
+`wait` methods backed by the same completion primitive. `Events` implements
+`futures_core::Stream` without requiring a particular async runtime.
 
-The controller observes only PTY masters and its wake descriptor through
-`epoll`; it never waits for or signals a PTY child. The broker blocks
-`SIGCHLD`, consumes it through `signalfd`, and periodically re-observes every
-known direct child so rapid exits do not depend on one signal edge. It records
-status with `waitid(..., WNOWAIT)` and retains the zombie leader until release.
-This remains safe because no other thread or host runtime is a parent of those
-children. A generation-tagged live-job entry is removed only after group
-cleanup and exact reap.
+`write` is the only input method. It performs bounded, nonblocking,
+all-or-nothing admission and accepts owned `Bytes`, allowing Rust callers to
+transfer `Vec<u8>` storage without another copy. The public API has no
+`try_write`, `send`, capacity waiter, flush, or input-completion object.
 
-Controller loss closes the broker channel, terminates each owned process
-group, reaps every child, and exits. Broker loss makes the controller drop
-all PTY masters after a terminal-bound forced signal and produce a typed
-infrastructure failure; it never signals cached numeric identities. Linux
-helper materialization obeys the same owner/mode/hash/ABI checks as macOS. A
-no-exec cache or temporary filesystem requires an explicit executable helper
-path; it never triggers in-process fork fallback.
+`OutputChunk` owns its bytes and native output credit. Dropping it returns the
+credit. `Session` is safe to share between threads. `Events` has one logical
+consumer. Dropping a live session requests nonblocking abandonment; explicit
+`close` is required to observe accepted-input and cleanup failures.
 
-Release evidence must retain each platform's runtime integration result.
-Cross-building does not substitute for a representative architecture runner.
+No public backend, executor, reactor, or platform strategy traits are exposed.
+The package supports one measured native strategy per target.
 
-### Windows ConPTY
+## Shared core
 
-Windows does not use the Unix broker.
+One implementation owns:
 
-- ConPTY-facing pipe ends are synchronous; controller-facing ends are
-  overlapped and associated with IOCP.
-- `HPCON`, process, thread, Job Object, attribute list, pipe handles, pinned
-  `OVERLAPPED` operations, and their completion state have separate owners.
-- `PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE` and
-  `PROC_THREAD_ATTRIBUTE_JOB_LIST` place the child into the pseudoconsole and
-  kill-on-close job as one spawn transaction.
-- Pipe names are cryptographically unpredictable, use
-  `FILE_FLAG_FIRST_PIPE_INSTANCE`, and receive a restrictive DACL.
-- Environment keys are compared with ordinal, case-insensitive UTF-16
-  semantics. Required entries such as `SystemRoot` are preserved.
-- Cancellation retains every `OVERLAPPED` allocation until its terminal IOCP
-  completion. A legitimate process exit code of 259 remains exit code 259.
-- The runtime floor is build 26100. Older ConPTY implementations can retain a
-  process handle after every completed session, violating the cleanup
-  contract. `ClosePseudoConsole` still runs on a bounded closer pool with
-  admission limited to 128 live or quarantined sessions.
-- Windows client and Server SKUs are qualified separately. Compilation alone
-  is not runtime qualification.
+- session, child, input, output, exit, mode, and cleanup state;
+- generation-checked identities and retirement;
+- bounded input admission and FIFO partial-write handling;
+- bounded output queues and delivery credit;
+- sticky direction-scoped failures and error precedence;
+- asynchronous spawn and close completion;
+- per-session event queues;
+- fair runtime event scheduling;
+- close deadlines and cleanup convergence.
+
+Unix and Windows modules own only operations that genuinely differ:
+
+- PTY or ConPTY creation;
+- platform process and job identity;
+- descriptor or handle registration;
+- reads, writes, cancellation, resize, signal, and termination syscalls;
+- exact exit observation and platform cleanup actions.
+
+Platform drivers report typed results into the shared state model. They do not
+implement independent session state machines.
+
+## Event scheduling
+
+Each session owns a bounded payload queue. The runtime owns a coalesced ring of
+ready session identities. A session appears in that ring at most once.
+
+The Rust `Events` consumer receives from its session queue. The C adapter uses
+the same queue authority through one fair blocking operation:
+
+```c
+ptyx_status_t ptyx_runtime_next_event(
+    ptyx_runtime_t *runtime,
+    ptyx_event_t *event,
+    ptyx_error_t *error);
+```
+
+The operation selects the next ready session, transfers at most one event or a
+bounded byte quantum, and places a still-ready session at the back of the
+ring. Runtime shutdown wakes a blocked consumer with a closed result.
+
+This keeps payload capacity independent per session, prevents a noisy session
+from starving peers, and avoids public callback, missed-wakeup, polling, and
+rearm protocols.
+
+## C ABI
+
+The C ABI exposes only:
+
+- ABI version and capability discovery;
+- runtime creation, event receipt, shutdown, and release;
+- asynchronous session spawn;
+- synchronous bounded write admission;
+- resize and termination;
+- a typed metadata snapshot;
+- mode-observation subscription state;
+- asynchronous close and nonblocking release;
+- event release and error formatting.
+
+It uses opaque runtime pointers and fixed-width generation-tagged session
+handles. Public constants use fixed-width integer typedefs rather than C enum
+layout. Extensible structures begin with `struct_size`; reserved fields must
+be zero.
+
+Every call documents:
+
+- pointer and buffer ownership;
+- valid session states;
+- blocking behavior;
+- thread safety and reentrancy;
+- success and failure postconditions;
+- event-release obligations;
+- error value and message lifetime.
+
+Events carry value-based stable error domains and kinds plus an optional
+native status. Output pointers remain valid until `ptyx_event_release`.
+Unwinding is contained at every exported Rust entry point.
+
+The authoritative public header uses Doxygen groups for runtime, sessions,
+events, errors, and capabilities. Documentation warnings fail CI. Generated
+Dart bindings mirror this header and are never edited manually.
+
+## Dart integration
+
+The Dart public library exports no C type, pointer, integer handle, native
+status constant, port protocol, or FFI helper.
+
+The package follows these binding practices:
+
+- a small public export barrel;
+- generated native declarations under `lib/src/ffi`;
+- generated declarations imported only by private translation modules;
+- deterministic native-asset selection in the package build hook;
+- authoritative-header-first generation;
+- typed error and value translation before values reach implementation code.
+
+The private Dart transport shim owns only:
+
+- Dart API-DL initialization;
+- one native event-pump thread per native runtime;
+- owner and session-to-port routing;
+- retained output event tokens awaiting Dart acknowledgement;
+- failed-post cleanup;
+- nonblocking owner abandonment and finalization.
+
+It invokes only public C ABI operations. It does not own PTY state, process
+cleanup, close timing, mode polling, queue policy, or error precedence.
+
+Dart retains only state required by its public contract:
+
+- output and mode stream controllers;
+- spawn, exit, and close completers;
+- immediate closing and closed rejection;
+- typed Dart error translation;
+- immutable spawn option snapshots;
+- cached public metadata;
+- bounded outstanding output delivery tokens.
+
+A minimal owner guardian remains as an individual-isolate exit oracle. It
+owns one native owner token, not session state or spawn execution.
+`NativeFinalizer` provides nonblocking unreachable-object and isolate-group
+cleanup fallback.
+
+## Output cancellation
+
+`output` is the sole Dart-facing output lifecycle API. Canceling its
+subscription commits native drain-and-discard. There is no separate
+`discardOutput` method in Dart.
+
+The Dart stream cancellation path submits the same native transition and
+releases every retained delivery token. Closing a session may also discard
+undelivered output as part of shutdown, but normal child exit preserves
+trailing output.
+
+Rust expresses this through the `Events` consumer that owns output delivery.
+The C ABI exposes one narrowly scoped `ptyx_session_cancel_output` command so
+language bindings can translate their stream or reader cancellation. It is
+not exported by the Dart public library.
+
+## Credit and copying
+
+Native output credit remains held while bytes are queued in native memory,
+posted to Dart, or retained by a paused Dart subscription. Posting a Dart
+message does not return credit.
+
+The transport uses a fixed, byte-accounted, benchmark-selected window of
+outstanding output events per session. A single-flight window is not the
+default because retained measurements show that bounded multi-message
+pipelining materially improves sustained output. Pause, cancellation, stale
+route, port failure, close, and isolate loss release every token exactly once.
+
+The initial copy profile is:
+
+- Rust input: zero-copy ownership transfer for owned `Bytes` or `Vec`;
+- C input: one copy into core-owned storage;
+- Dart input: two copies through ordinary FFI;
+- Dart output: one Dart VM typed-data copy.
+
+A Dart-specific one-copy input path or external output data requires a
+prototype that proves lower total CPU, memory, allocation, and energy cost
+without weakening ownership or cleanup. It is not part of the initial public
+contract.
+
+## Efficiency requirements
+
+The runtime uses shared readiness infrastructure rather than per-session I/O
+threads. Work per wake is bounded by command, event, byte, and syscall quanta.
+Inactive sessions allocate no large scratch buffers and produce no periodic
+wakeups. Buffers are allocated lazily, reused where ownership permits, and
+released when direction state becomes terminal.
+
+Default budgets are selected against the complete scorecard, including:
+
+- throughput and interactive latency;
+- resident and peak memory at 1, 10, and 100 sessions;
+- CPU time, wakeups, context switches, and idle energy;
+- allocation and copy counts;
+- active-session fairness;
+- pause, cancellation, saturation, and shutdown memory.
+
+An optimization is retained only when it improves the complete boundary or
+has a measured correctness benefit. A throughput gain cannot justify hidden
+loss, unbounded mailboxes, busy polling, thread proliferation, or delayed
+cleanup.
+
+## Platform ownership
+
+### Unix
+
+A persistent single-threaded broker owns process creation, exact child reaping,
+process-group identity, and forced cleanup. PTY masters transfer to the core
+through a bounded versioned protocol. The Dart host never forks PTY children
+and never becomes their parent.
+
+The reusable Rust crate accepts an explicit broker path or a broker provider
+configured by `RuntimeBuilder`. It never silently falls back to in-process
+fork. The Dart package supplies its integrity-checked, target-matched broker
+through its native-asset build.
+
+### Windows
+
+Windows uses ConPTY, overlapped controller pipe ends, IOCP, and a kill-on-close
+Job Object. Pinned I/O memory remains owned until terminal completion.
+
+The supported and tested runtime floor is Windows build 26100. Earlier builds
+may work for some workloads but are not supported because their
+`ClosePseudoConsole` behavior cannot satisfy deterministic bounded cleanup.
 
 ## Failure and close ordering
 
-Normal close is idempotent and follows this order:
+An unrecoverable input transport failure stops input only when continued byte
+ordering cannot be established. It rejects later writes, emits one sticky
+input failure after safely buffered output, and is retained by close. It does
+not independently discard output, fabricate child exit, or prevent safe
+signaling and metadata access.
 
-1. stop accepting public writes;
-2. resolve every accepted input sequence by completion or typed failure;
-3. request job termination from the platform owner;
-4. continue reading until the platform output boundary reaches EOF;
-5. observe and publish exact exit status independently from output completion;
-6. cancel or drain platform I/O while retaining its memory and handles;
-7. release PTY, process, job, broker-routing, and registry ownership;
-8. complete cleanup.
+Close is idempotent:
 
-On Windows, step 3 atomically terminates the Job Object and cancels pending
-writes. The controller then initiates bounded `ClosePseudoConsole` while the
-overlapped output pipe remains owned and continues draining it to broken pipe.
-Only after terminal IOCP completions have been consumed may it free pinned
-`OVERLAPPED` storage or close the controller pipe, process, thread, job, and
-IOCP handles. Windows therefore does not wait for output EOF before initiating
-HPCON close.
+1. reject new operations;
+2. resolve accepted input by delivery or typed failure;
+3. request platform job termination;
+4. preserve or explicitly discard output according to the close contract;
+5. observe direct-child status independently;
+6. complete platform I/O and release pinned memory;
+7. release process, job, descriptor, handle, broker, queue, and event ownership;
+8. emit one close completion containing the authoritative failure, if any.
 
-Graceful termination has a caller-configured deadline. Forced termination,
-broker acknowledgement, exit observation, PTY EOF, and platform cancellation
-each have an explicit bounded phase. When a phase expires, the controller
-continues every independent safe cleanup action and completes close with a
-typed `PtyCloseException` describing which ownership result is uncertain.
-Timeout never authorizes signalling a cached Unix PID after broker loss or
-freeing a Windows `OVERLAPPED` allocation before terminal completion. Such
-resources remain owned by a process-level quarantine until the platform owner
-confirms completion or process shutdown reclaims them.
+Every failure path enters this state machine. Destructors and isolate-loss
+handlers request it rather than implementing separate cleanup sequences.
 
-Port loss, reactor loss, broker loss, spawn rollback, and forced close enter
-the same state machine at an explicit failure edge. None is implemented as a
-separate best-effort destructor.
+## Rejected alternatives
 
-## Selection evidence
+- A Dart-owned supervisor and queue model duplicates native lifecycle and
+  backpressure behavior.
+- Dart polling adds wakeups, latency, and Dart implementation state.
+- Public C callbacks add callback-thread, lifetime, reentrancy, and
+  quiescence contracts.
+- A public wait, poll, and rearm sequence exposes a missed-wakeup protocol and
+  permits unfair draining.
+- One global payload queue allows capacity competition and head-of-line
+  blocking between sessions.
+- Per-session I/O threads scale memory, scheduler work, and energy use with
+  idle session count.
+- External typed data weakens deterministic output-credit ownership unless its
+  VM finalizer and shutdown behavior are separately proven.
+- Direct child creation inside the multithreaded Dart host cannot provide the
+  required Unix parent and descriptor ownership.
 
-The decision is based on the retained baseline and candidate evidence plus the
-corrective prototypes described in
-`../evidence/candidate-investigation.md`.
+## Evidence and remaining gates
 
-The decisive results are:
+The direct Rust candidate, retained production benchmarks, broker prototypes,
+fault tests, and platform runs justify the selected direction. They do not
+remove the need to qualify the rewritten boundary.
 
-- direct ownership matched the same-host direct input boundary and met the
-  latency and idle-scaling gates;
-- the representative broker-controller-Dart slice demonstrated bounded
-  queues, copied typed-data delivery, bounded multi-message output credit, no
-  per-session I/O workers, race-free capacity waits, concurrent close,
-  pause/cancel/no-listener bounds, and typed cleanup after a real broker kill;
-- the pre-correction Candidate B prototype recorded five post-warmup 128 MiB
-  output runs at 89.847 to 90.968 MiB/s, five 32 MiB input runs at 5.485 to
-  5.540 MiB/s, and 400 one-byte round trips at p50/p95/p99 of 134/193/288
-  microseconds. Correctness fixes were verified on a later artifact, so these
-  numbers remain directional selection evidence rather than a cleared
-  production performance gate;
-- 1/4/16-session fairness runs showed progress for every session. The
-  saturated 16-session noisy throughput spread was approximately five
-  percent; its 64.2 ms quiet p99 remains a production regression target;
-- the Unix broker demonstrated controlling-terminal behavior, failure
-  rollback, exact broker-owned reaping, descriptor reclamation, controller-EOF
-  cleanup, and ordinary Dart JIT/AOT helper materialization;
-- stress testing the direct-parent integrated slice proved that host
-  `SIGCHLD` behavior can steal exit status, making broker-owned parenting a
-  selection requirement;
-- the Windows slice cross-compiled for x64 and arm64 and established the
-  required ownership model. The production implementation subsequently
-  bounded older `ClosePseudoConsole` behavior with admission and quarantine;
-  exact-target runtime qualification remains a release gate.
+Before the architecture is complete, retained exact-revision evidence must
+cover:
 
-Independent correctness and platform re-reviews passed this architecture for
-implementation. The corrected vertical slice passed its correctness checks,
-but it was not the exact artifact used for the retained performance samples.
-The review is scoped to selection; production benchmarks, competitor
-comparisons, soak, sanitizers, and target qualification remain release gates.
-
-Selection does not claim that the corrective prototypes are production code.
-Their remaining findings are requirements on the implementation above.
+- Rust blocking and async APIs over one state model;
+- C event fairness, shutdown wake, ownership, layout, and panic containment;
+- Dart isolate loss, failed posts, pause, cancellation, and close;
+- broker distribution for standalone Rust and C consumers;
+- input and output copy and allocation profiles;
+- Windows x64 and arm64 on build 26100 or newer;
+- Linux and macOS x64 and arm64;
+- 2 GiB integrity, sanitizer, fuzz, fault, soak, and performance gates.
