@@ -11,8 +11,8 @@ operating system and architecture.
 | macOS arm64 | `poll` reactor and Unix broker | hosted native build | API, native, ABI, lifecycle, fault, scorecard, and five-minute soak jobs |
 | Linux x64 | `epoll` reactor and Unix broker | hosted native build | API, native, ABI, lifecycle, fault, scorecard, and five-minute soak jobs |
 | Linux arm64 | `epoll` reactor and Unix broker | hosted native build | API, native, ABI, lifecycle, fault, scorecard, and five-minute soak jobs |
-| Windows x64 | ConPTY, IOCP, and Job Object | hosted native build | API, native, ABI, lifecycle, fault, scorecard, and five-minute soak jobs |
-| Windows arm64 | ConPTY, IOCP, and Job Object | hosted native build | API, native, ABI, lifecycle, fault, scorecard, and five-minute soak jobs |
+| Windows x64 | ConPTY, IOCP, and Job Object | hosted native build | API, native, ABI, lifecycle, fault, and five-minute soak jobs; diagnostic scorecard pending |
+| Windows arm64 | ConPTY, IOCP, and Job Object | hosted native build | API, native, ABI, lifecycle, fault, and five-minute soak jobs; diagnostic scorecard pending |
 
 Android, iOS, and web are not advertised. Linux arm64 cross-compilation is
 useful build evidence but does not replace its retained hosted runtime
