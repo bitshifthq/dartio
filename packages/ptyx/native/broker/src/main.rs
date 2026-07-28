@@ -2336,8 +2336,14 @@ fn run_harness() -> io::Result<()> {
     unsafe {
         libc::fcntl(sentinel.as_raw_fd(), libc::F_SETFD, 0);
     }
+    println!("broker_launch starting=true");
     let mut client = launch_broker()?;
+    println!("broker_launch handshake=true");
     let broker_baseline = client.stats()?;
+    println!(
+        "broker_stats jobs={} fds={} signals_after_reap={}",
+        broker_baseline.0, broker_baseline.1, broker_baseline.2
+    );
 
     let running = Arc::new(AtomicBool::new(true));
     let churners: Vec<_> = (0..4)
