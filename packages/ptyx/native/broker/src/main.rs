@@ -198,18 +198,10 @@ fn send_frame(fd: RawFd, frame: &Frame, passed_fd: Option<RawFd>) -> io::Result<
 }
 
 fn receive_frame(fd: RawFd) -> io::Result<Option<(Frame, Option<OwnedFd>)>> {
-    receive_frame_inner(fd, false)
+    receive_frame_inner(fd)
 }
 
-#[cfg(target_os = "macos")]
-fn receive_frame_blocking(fd: RawFd) -> io::Result<Option<(Frame, Option<OwnedFd>)>> {
-    receive_frame_inner(fd, true)
-}
-
-fn receive_frame_inner(
-    fd: RawFd,
-    block_until_started: bool,
-) -> io::Result<Option<(Frame, Option<OwnedFd>)>> {
+fn receive_frame_inner(fd: RawFd) -> io::Result<Option<(Frame, Option<OwnedFd>)>> {
     let deadline = Instant::now() + FRAME_TIMEOUT;
     let mut bytes = vec![0_u8; HEADER];
     let mut offset = 0;
@@ -225,12 +217,7 @@ fn receive_frame_inner(
         message.msg_iovlen = 1;
         message.msg_control = control.as_mut_ptr().cast();
         message.msg_controllen = size_of_val(&control) as _;
-        let flags = if block_until_started && offset == 0 {
-            0
-        } else {
-            libc::MSG_DONTWAIT
-        };
-        let received = unsafe { libc::recvmsg(fd, &mut message, flags) };
+        let received = unsafe { libc::recvmsg(fd, &mut message, libc::MSG_DONTWAIT) };
         if received == 0 {
             return if offset == 0 {
                 Ok(None)
@@ -901,28 +888,18 @@ impl Broker {
     #[cfg(target_os = "macos")]
     fn event_loop(&mut self) -> io::Result<()> {
         loop {
-            if self.running_jobs() == 0 {
-                match receive_frame_blocking(self.control.as_raw_fd())? {
-                    Some((frame, passed)) => {
-                        drop(passed);
-                        if !self.handle_request(frame)? {
-                            return Ok(());
-                        }
-                    }
-                    None => return Ok(()),
-                }
-                continue;
-            }
-
-            // Keep protocol traffic on the socket's direct readiness source.
-            // Hosted Darwin x64 does not consistently publish subsequent
-            // socket readiness through a kqueue shared with process events.
+            let running_jobs = self.running_jobs();
+            // Keep protocol traffic on one direct readiness path in every
+            // lifecycle state. A separate blocking-recv idle path can strand
+            // the next request after the last exited slot is released on
+            // Darwin x64.
             let mut control = libc::pollfd {
                 fd: self.control.as_raw_fd(),
                 events: libc::POLLIN,
                 revents: 0,
             };
-            let ready = unsafe { libc::poll(&mut control, 1, 10) };
+            let timeout = if running_jobs == 0 { -1 } else { 10 };
+            let ready = unsafe { libc::poll(&mut control, 1, timeout) };
             if ready < 0 {
                 let error = io::Error::last_os_error();
                 if error.kind() == io::ErrorKind::Interrupted {
@@ -943,6 +920,9 @@ impl Broker {
                     }
                     None => return Ok(()),
                 }
+            }
+            if running_jobs == 0 {
+                continue;
             }
 
             let mut events: [MaybeUninit<libc::kevent>; 32] =
