@@ -60,5 +60,6 @@ Future<void> main() async {
   if (received < 1024 * 1024) {
     throw StateError('probe received only $received output bytes');
   }
-  stdout.write('ptyx-standalone-alive');
+  stdout.writeln('ptyx-standalone-alive');
+  await stdout.flush();
 }

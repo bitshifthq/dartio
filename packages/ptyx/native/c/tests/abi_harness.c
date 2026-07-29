@@ -1,9 +1,20 @@
+#if !defined(_WIN32) && !defined(_POSIX_C_SOURCE)
+#define _POSIX_C_SOURCE 200809L
+#endif
+
 #include <ptyx/ptyx.h>
 
 #include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#if defined(_WIN32)
+#include <windows.h>
+#else
+#include <sched.h>
+#include <time.h>
+#endif
 
 _Static_assert(PTYX_ABI_VERSION == UINT32_C(2), "unexpected ABI version");
 _Static_assert(sizeof(ptyx_runtime_t) == 8, "runtime handle width changed");
@@ -64,6 +75,44 @@ static ptyx_bytes_view_t bytes_view(const char *value) {
   view.data = (const uint8_t *)value;
   view.length = strlen(value);
   return view;
+}
+
+static uint64_t monotonic_milliseconds(void) {
+#if defined(_WIN32)
+  return GetTickCount64();
+#else
+  struct timespec now;
+  require(clock_gettime(CLOCK_MONOTONIC, &now) == 0,
+          "monotonic clock failed");
+  return (uint64_t)now.tv_sec * UINT64_C(1000) +
+         (uint64_t)now.tv_nsec / UINT64_C(1000000);
+#endif
+}
+
+static void yield_thread(void) {
+#if defined(_WIN32)
+  Sleep(0);
+#else
+  sched_yield();
+#endif
+}
+
+static void write_when_admitted(ptyx_session_t session, const char *input,
+                                ptyx_error_t *error) {
+  const uint64_t deadline = monotonic_milliseconds() + UINT64_C(5000);
+  for (;;) {
+    const ptyx_status_t status =
+        ptyx_session_write(session, (const uint8_t *)input, strlen(input),
+                           error);
+    if (status == PTYX_STATUS_OK) {
+      return;
+    }
+    require(status == PTYX_STATUS_BACKPRESSURE,
+            "session input failed instead of applying backpressure");
+    require(monotonic_milliseconds() < deadline,
+            "session input remained backpressured");
+    yield_thread();
+  }
 }
 
 static void exercise_session_lifecycle(void) {
@@ -140,9 +189,7 @@ static void exercise_session_lifecycle(void) {
       require(snapshot.pid > 0, "session snapshot returned an invalid pid");
       require(snapshot.size.rows == 24 && snapshot.size.columns == 80,
               "session snapshot returned the wrong size");
-      require(ptyx_session_write(session, (const uint8_t *)input, strlen(input),
-                                 &error) == PTYX_STATUS_OK,
-              "session input was not accepted");
+      write_when_admitted(session, input, &error);
     }
     if (event.kind == PTYX_EVENT_CLOSE_COMPLETE) {
       require(event.flags == 0, "session close reported data loss");

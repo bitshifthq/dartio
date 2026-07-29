@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:isolate';
 import 'dart:math';
 import 'dart:typed_data';
 
@@ -1027,29 +1028,34 @@ Future<Map<String, Object?>> _activeOutputFairness(
   int byteCount,
 ) async {
   if (Platform.isWindows) {
-    final resourcesBefore = await _resourceSnapshot();
-    final results = await Future.wait([
-      for (var index = 0; index < sessionCount; index++)
-        _windowsTerminalOutput('output', byteCount),
-    ]);
-    final throughputs = [
-      for (final result in results) result['mib_per_second']! as double,
-    ];
-    final sortedThroughputs = [...throughputs]..sort();
-    return {
-      'sessions': sessionCount,
-      'application_bytes_per_session': byteCount,
-      'aggregate_mib_per_second': throughputs.reduce((a, b) => a + b),
-      'slowest_to_fastest_ratio':
-          sortedThroughputs.first / sortedThroughputs.last,
-      'resource_before': resourcesBefore,
-      'resource_busy': null,
-      'integrity_scope': 'terminal final-state reports',
-      'per_session': [
-        for (var index = 0; index < results.length; index++)
-          {'session': index, ...results[index]},
-      ],
-    };
+    final keepAlive = ReceivePort();
+    try {
+      final resourcesBefore = await _resourceSnapshot();
+      final results = await Future.wait([
+        for (var index = 0; index < sessionCount; index++)
+          _windowsTerminalOutput('output', byteCount),
+      ]);
+      final throughputs = [
+        for (final result in results) result['mib_per_second']! as double,
+      ];
+      final sortedThroughputs = [...throughputs]..sort();
+      return {
+        'sessions': sessionCount,
+        'application_bytes_per_session': byteCount,
+        'aggregate_mib_per_second': throughputs.reduce((a, b) => a + b),
+        'slowest_to_fastest_ratio':
+            sortedThroughputs.first / sortedThroughputs.last,
+        'resource_before': resourcesBefore,
+        'resource_busy': null,
+        'integrity_scope': 'terminal final-state reports',
+        'per_session': [
+          for (var index = 0; index < results.length; index++)
+            {'session': index, ...results[index]},
+        ],
+      };
+    } finally {
+      keepAlive.close();
+    }
   }
   final pairs = <({PtySession session, _ChunkReader bytes})>[];
   try {
