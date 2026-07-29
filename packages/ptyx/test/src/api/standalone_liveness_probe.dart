@@ -5,6 +5,8 @@ import 'dart:typed_data';
 
 import 'package:ptyx/ptyx.dart';
 
+const _operationTimeout = Duration(seconds: 20);
+
 Future<void> main() async {
   final session = await PtySession.spawn(
     PtySpawnOptions(
@@ -24,7 +26,7 @@ Future<void> main() async {
     onError: outputDone.completeError,
     onDone: outputDone.complete,
   );
-  session.write(Uint8List.fromList(const [1]));
+  await _writeGate(session);
   final exitCode = await session.exitCode;
   await outputDone.future;
   final completionLease = ReceivePort();
@@ -41,5 +43,21 @@ Future<void> main() async {
     await stdout.flush();
   } finally {
     completionLease.close();
+  }
+}
+
+Future<void> _writeGate(PtySession session) async {
+  final bytes = Uint8List.fromList(const [1]);
+  final deadline = DateTime.now().add(_operationTimeout);
+  while (true) {
+    try {
+      session.write(bytes);
+      return;
+    } on PtyBackpressureException {
+      if (DateTime.now().isAfter(deadline)) {
+        rethrow;
+      }
+      await Future<void>.delayed(Duration.zero);
+    }
   }
 }
