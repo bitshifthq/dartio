@@ -116,6 +116,7 @@ final class _NativeRuntime implements Finalizable {
   final Pointer<ptyx_error_t> _writeError;
   final Map<int, _PendingSpawn> _pendingSpawns = {};
   final Map<int, WeakReference<_NativeSession>> _sessions = {};
+  var _terminalDeliveryTurns = 0;
   _NativeRuntime._(this._port, this._adapter, this.capabilityBits)
     : _writeError = calloc<ptyx_error_t>() {
     _writeError.ref.struct_size = sizeOf<ptyx_error_t>();
@@ -477,6 +478,9 @@ final class _NativeRuntime implements Finalizable {
         for (final reference in _sessions.values)
           if (reference.target case final _NativeSession target) target,
       ];
+      if (pending.isNotEmpty || sessions.isNotEmpty) {
+        _retainTerminalDeliveryTurn();
+      }
       _pendingSpawns.clear();
       _sessions.clear();
       for (final spawn in pending) {
@@ -502,16 +506,19 @@ final class _NativeRuntime implements Finalizable {
     }
     if (kind == ptyx_event_kind.PTYX_EVENT_SPAWN_FAILED) {
       final pending = _pendingSpawns.remove(session);
-      pending?.onFailure(
-        failure ??
-            _failureFromValues(
-              domain: ptyx_error_domain.PTYX_ERROR_DOMAIN_RUNTIME,
-              kind: ptyx_error_kind.PTYX_ERROR_NATIVE_FAILURE,
-              operation: ptyx_operation.PTYX_OPERATION_SPAWN,
-              nativeCode: 0,
-              flags: 0,
-            ),
-      );
+      if (pending != null) {
+        _retainTerminalDeliveryTurn();
+        pending.onFailure(
+          failure ??
+              _failureFromValues(
+                domain: ptyx_error_domain.PTYX_ERROR_DOMAIN_RUNTIME,
+                kind: ptyx_error_kind.PTYX_ERROR_NATIVE_FAILURE,
+                operation: ptyx_operation.PTYX_OPERATION_SPAWN,
+                nativeCode: 0,
+                flags: 0,
+              ),
+        );
+      }
       _updateLiveness();
       return;
     }
@@ -542,6 +549,7 @@ final class _NativeRuntime implements Finalizable {
       case ptyx_event_kind.PTYX_EVENT_EXIT:
         target._nativeExit(value);
       case ptyx_event_kind.PTYX_EVENT_CLOSE_COMPLETE:
+        _retainTerminalDeliveryTurn();
         _sessions.remove(session);
         target._nativeCloseComplete(flags, failure);
         _updateLiveness();
@@ -561,8 +569,22 @@ final class _NativeRuntime implements Finalizable {
   }
 
   void _updateLiveness() {
-    final active = _pendingSpawns.isNotEmpty || _sessions.isNotEmpty;
+    final active =
+        _pendingSpawns.isNotEmpty ||
+        _sessions.isNotEmpty ||
+        _terminalDeliveryTurns != 0;
     _port.keepIsolateAlive = active;
+  }
+
+  void _retainTerminalDeliveryTurn() {
+    // A terminal native message can synchronously queue the final output and
+    // complete several Dart futures. Keep the port alive through the resulting
+    // microtasks so a CLI cannot exit before those consumers observe them.
+    _terminalDeliveryTurns++;
+    Timer.run(() {
+      _terminalDeliveryTurns--;
+      _updateLiveness();
+    });
   }
 
   static Pointer<ptyx_error_t> _newError(Arena arena) {

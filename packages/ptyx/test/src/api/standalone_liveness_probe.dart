@@ -1,11 +1,22 @@
-import 'dart:convert';
+import 'dart:async';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:ptyx/ptyx.dart';
 
-import '../../../benchmark/vt_payload.dart';
-
 Future<void> main() async {
+  try {
+    await PtySession.spawn(
+      const PtySpawnOptions(
+        executable: '/definitely/missing/ptyx-liveness-probe',
+        initialSize: PtySize(rows: 24, columns: 80),
+      ),
+    );
+    throw StateError('missing executable unexpectedly spawned');
+  } on PtyException {
+    await Future<void>.value();
+  }
+
   for (var iteration = 0; iteration < 5; iteration++) {
     final fast = await PtySession.spawn(
       PtySpawnOptions(
@@ -22,29 +33,32 @@ Future<void> main() async {
 
   final session = await PtySession.spawn(
     PtySpawnOptions(
-      executable: Platform.isWindows
-          ? r'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe'
-          : '/bin/sh',
-      arguments: Platform.isWindows
-          ? const [
-              '-NoProfile',
-              '-NonInteractive',
-              '-Command',
-              "Start-Sleep -Seconds 1; Write-Output 'ptyx-standalone-alive'",
-            ]
-          : const ['-c', r"sleep 1; printf 'ptyx-standalone-alive\n'"],
+      executable: Platform.resolvedExecutable,
+      arguments: [
+        File('benchmark/fixture.dart').absolute.path,
+        'output',
+        '${1024 * 1024}',
+      ],
       initialSize: const PtySize(rows: 24, columns: 80),
     ),
   );
-  final output =
-      (Platform.isWindows ? fixturePayload(session.output) : session.output)
-          .expand((chunk) => chunk)
-          .toList();
+  final outputDone = Completer<void>();
+  var received = 0;
+  final output = session.output.listen(
+    (chunk) => received += chunk.length,
+    onError: outputDone.completeError,
+    onDone: outputDone.complete,
+  );
+  session.write(Uint8List.fromList(const [1]));
   final exitCode = await session.exitCode;
-  final bytes = await output;
+  await outputDone.future;
+  await output.cancel();
   await session.close();
   if (exitCode != 0) {
     throw StateError('probe child exited with $exitCode');
   }
-  stdout.write(utf8.decode(bytes));
+  if (received < 1024 * 1024) {
+    throw StateError('probe received only $received output bytes');
+  }
+  stdout.write('ptyx-standalone-alive');
 }
