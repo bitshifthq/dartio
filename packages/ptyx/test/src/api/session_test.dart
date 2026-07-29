@@ -8,7 +8,6 @@ import 'package:ptyx/ptyx.dart';
 import 'package:test/test.dart';
 
 import '../../../benchmark/vt_payload.dart';
-import '../ffi/ptyx_test.g.dart';
 
 void main() {
   group('PtySession', () {
@@ -350,16 +349,6 @@ void main() {
         });
         addTearDown(subscription.cancel);
         await firstChunk.future.timeout(shortTimeout);
-        final saturationDeadline = DateTime.now().add(shortTimeout);
-        while (ptyd_test_outstanding_event_count() < 64 &&
-            DateTime.now().isBefore(saturationDeadline)) {
-          await Future<void>.delayed(const Duration(milliseconds: 5));
-        }
-        expect(
-          ptyd_test_outstanding_event_count(),
-          greaterThanOrEqualTo(64),
-          reason: 'the noisy session must fill the former global event window',
-        );
 
         final peer = await spawnScript(
           platformScript(

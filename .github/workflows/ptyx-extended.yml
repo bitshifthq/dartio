@@ -65,7 +65,7 @@ jobs:
             --target x86_64-unknown-linux-gnu \
             --manifest-path packages/ptyx/native/broker/Cargo.toml
           printf "PTYX_BROKER_BINARY=%s\n" \
-            "$GITHUB_WORKSPACE/packages/ptyx/native/broker/target/x86_64-unknown-linux-gnu/debug/ptyx-broker" \
+            "$GITHUB_WORKSPACE/packages/ptyx/native/target/x86_64-unknown-linux-gnu/debug/ptyx-broker" \
             >> "$GITHUB_ENV"
       - name: run controller sanitizer tests
         env:

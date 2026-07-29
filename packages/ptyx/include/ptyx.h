@@ -467,7 +467,8 @@ PTYX_EXPORT ptyx_status_t PTYX_CALL ptyx_session_write(ptyx_session_t session,
  * @return PTYX_STATUS_OK or a typed failure status.
  *
  * This operation does not release output events already transferred to the
- * caller.
+ * caller. Repeating a successful cancellation for the same live session
+ * succeeds without changing state.
  */
 PTYX_EXPORT ptyx_status_t PTYX_CALL
 ptyx_session_cancel_output(ptyx_session_t session, ptyx_error_t *error);

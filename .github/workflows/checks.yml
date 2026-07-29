@@ -181,7 +181,7 @@ jobs:
         run: |
           cargo build --manifest-path packages/ptyx/native/broker/Cargo.toml --release
           printf "PTYX_BROKER_BINARY=%s\n" \
-            "$GITHUB_WORKSPACE/packages/ptyx/native/broker/target/release/ptyx-broker" \
+            "$GITHUB_WORKSPACE/packages/ptyx/native/target/release/ptyx-broker" \
             >> "$GITHUB_ENV"
       - run: cargo fmt --manifest-path packages/ptyx/native/Cargo.toml -- --check
       - if: runner.os != 'Windows'
@@ -259,6 +259,13 @@ jobs:
           -p ptyx-c -p ptyx-engine -p ptyx --all-features --no-deps
         env:
           RUSTDOCFLAGS: -D warnings
+      - name: validate Rust crate package contents
+        if: matrix.os == 'linux-x64'
+        run: |
+          cargo package --manifest-path packages/ptyx/native/Cargo.toml \
+            -p ptyx-engine --allow-dirty --no-verify
+          cargo package --manifest-path packages/ptyx/native/Cargo.toml \
+            -p ptyx --list
       - if: runner.os != 'Windows'
         run: cargo doc --manifest-path packages/ptyx/native/broker/Cargo.toml --no-deps
         env:
@@ -303,7 +310,7 @@ jobs:
         run: |
           cargo build --manifest-path packages/ptyx/native/broker/Cargo.toml --release
           printf "PTYX_BROKER_BINARY=%s\n" \
-            "$GITHUB_WORKSPACE/packages/ptyx/native/broker/target/release/ptyx-broker" \
+            "$GITHUB_WORKSPACE/packages/ptyx/native/target/release/ptyx-broker" \
             >> "$GITHUB_ENV"
       - run: cargo clippy --manifest-path packages/ptyx/native/broker/Cargo.toml --all-targets --all-features -- -D warnings
       - run: >-

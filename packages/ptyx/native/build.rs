@@ -54,7 +54,7 @@ fn configure_broker() {
         .or_else(|| {
             env::current_dir()
                 .ok()
-                .map(|root| root.join("broker/target/release/ptyx-broker"))
+                .map(|root| root.join("target/release/ptyx-broker"))
                 .filter(|candidate| candidate.is_file())
         })
         .unwrap_or_else(|| {

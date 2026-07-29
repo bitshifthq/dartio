@@ -333,6 +333,6 @@ fn broker_path() -> PathBuf {
     std::env::var_os("PTYX_BROKER_BINARY")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../broker/target/release/ptyx-broker")
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../target/release/ptyx-broker")
         })
 }

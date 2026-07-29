@@ -12,6 +12,11 @@ import 'dart:ffi' as ffi;
 ///
 /// Acknowledgement releases the C event and returns native output credit. Each
 /// nonzero token must be acknowledged exactly once.
+///
+/// @param[in] adapter Owning adapter.
+/// @param[in] token Nonzero output-event token.
+/// @param[out] error Optional initialized error destination.
+/// @return PTYX_STATUS_OK or a typed failure.
 @ffi.Native<
   ptyx_status_t Function(
     ptyd_adapter_t,
@@ -68,6 +73,10 @@ external int ptyd_runtime_attach(
 /// Shutdown wakes the blocked event read. The function joins the pump, releases
 /// outstanding events and tracked sessions, shuts down and releases the
 /// runtime, and clears adapter. Passing an already-zero handle succeeds.
+///
+/// @param[in,out] adapter Adapter handle, cleared on success.
+/// @param[out] error Optional initialized error destination.
+/// @return PTYX_STATUS_OK or a typed failure.
 @ffi.Native<
   ptyx_status_t Function(ffi.Pointer<ptyd_adapter_t>, ffi.Pointer<ptyx_error_t>)
 >()
@@ -81,6 +90,8 @@ external int ptyd_runtime_detach(
 /// Transfers ownership to a process-wide cleanup worker and returns without
 /// waiting. The worker performs the same cleanup as detach and ignores
 /// diagnostic output because no Dart owner remains.
+///
+/// @param[in] token Adapter handle encoded as a pointer-sized integer.
 @ffi.Native<ffi.Void Function(ffi.Pointer<ffi.Void>)>()
 external void ptyd_runtime_finalize(ffi.Pointer<ffi.Void> token);
 
@@ -108,6 +119,12 @@ external int ptyd_session_release(
 /// The pump cannot process SPAWN_READY or SPAWN_FAILED before it owns the
 /// returned handle. The adapter releases the handle after SPAWN_FAILED or
 /// CLOSE_COMPLETE, or during detach.
+///
+/// @param[in] adapter Owning adapter.
+/// @param[in] options Validated, borrowed spawn options.
+/// @param[out] session Receives the tracked session handle.
+/// @param[out] error Optional initialized error destination.
+/// @return PTYX_STATUS_OK or a typed failure.
 @ffi.Native<
   ptyx_status_t Function(
     ptyd_adapter_t,
@@ -304,7 +321,8 @@ external int ptyx_runtime_shutdown(
 /// @return PTYX_STATUS_OK or a typed failure status.
 ///
 /// This operation does not release output events already transferred to the
-/// caller.
+/// caller. Repeating a successful cancellation for the same live session
+/// succeeds without changing state.
 @ffi.Native<ptyx_status_t Function(ptyx_session_t, ffi.Pointer<ptyx_error_t>)>()
 external int ptyx_session_cancel_output(
   int session,
@@ -625,6 +643,7 @@ const int PTYX_STATUS_UNSUPPORTED = 5;
 
 const int PTYX_STATUS_WRONG_STATE = 3;
 
+/// Generation-checked identity of one Dart event-pump adapter.
 typedef ptyd_adapter_t = ffi.Uint64;
 typedef Dartptyd_adapter_t = int;
 

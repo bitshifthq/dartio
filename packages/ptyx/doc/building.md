@@ -8,12 +8,12 @@ From `packages/ptyx`:
 
 ```sh
 cargo build --manifest-path native/broker/Cargo.toml --release
-PTYX_BROKER_BINARY="$PWD/native/broker/target/release/ptyx-broker" \
+PTYX_BROKER_BINARY="$PWD/native/target/release/ptyx-broker" \
   cargo build --manifest-path native/Cargo.toml --release
-dart run tool/verify_abi.dart native/target/release/libptyx.dylib
+dart run tool/verify_abi.dart native/target/release/libptyx_c.dylib
 ```
 
-Use `libptyx.so` on Linux and `ptyx.dll` on Windows. The ABI verifier checks
+Use `libptyx_c.so` on Linux and `ptyx_c.dll` on Windows. The ABI verifier checks
 the version and every authoritative exported symbol. The standalone C harness
 under `native/tests/abi_harness.c` additionally checks header layout, null
 inputs, validation limits, and stale-handle rejection.

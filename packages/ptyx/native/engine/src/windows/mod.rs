@@ -34,7 +34,7 @@ use self::handles::{IoOperation, OwnedHandle, OwnedPseudoConsole};
 use crate::control::{Control, ControlQueue, WakeGate};
 use crate::event::{self, Receiver as EventReceiver, Sender as EventSender};
 use crate::oneshot::{self, Sender as ReplySender};
-use crate::session::{InputAdmission, QueuedOutput, SessionCore};
+use crate::session::{InputAdmission, SessionCore};
 use crate::spawn::BrokerSpawn;
 use crate::{
     CloseResult, Completion, Failure, GenerationRegistry, Notice, SessionSnapshot,
@@ -83,7 +83,6 @@ struct Session {
     pid: u32,
     size: [u32; 4],
     write: Option<Pin<Box<IoOperation>>>,
-    output_notified: bool,
     output_notification_blocked: bool,
     output_failed_notified: bool,
     read: Option<Pin<Box<IoOperation>>>,
@@ -117,7 +116,6 @@ impl Session {
             pid: spawned.pid,
             size: spawned.size,
             write: None,
-            output_notified: false,
             output_notification_blocked: false,
             output_failed_notified: false,
             read: None,
@@ -129,23 +127,17 @@ impl Session {
     }
 
     fn pull(&mut self, maximum: usize) -> Bytes {
-        let bytes = self.core.pull_output(maximum);
-        self.output_notified = false;
-        bytes
+        self.core.pull_output(maximum)
     }
 
     fn credit(&mut self, bytes: usize) -> bool {
-        let credited = self.core.credit(bytes);
-        if credited && bytes != 0 {
-            self.output_notified = false;
-        }
-        credited
+        self.core.credit(bytes)
     }
 
     fn terminal(&self) -> bool {
         self.exit_status.is_some()
             && self.output_eof
-            && self.output.is_empty()
+            && !self.has_output()
             && self.output_outstanding == 0
             && self.read.is_none()
             && self.write.is_none()
@@ -429,6 +421,10 @@ struct NoticeEmitter {
 }
 
 impl NoticeEmitter {
+    fn retire_session(&self, session: u64) {
+        self.sender.retire_session(session);
+    }
+
     fn try_reserve(&self) -> Option<NoticeReservation> {
         self.budget.try_reserve()
     }
@@ -492,6 +488,17 @@ impl NoticeReceiver {
 }
 
 impl SessionNoticeReceiver {
+    pub fn close(&self) -> Vec<Notice> {
+        let notices = self.receiver.close();
+        for _ in 0..notices.len() {
+            self.budget.release();
+        }
+        if !notices.is_empty() {
+            let _ = self.iocp.post_notice_available();
+        }
+        notices
+    }
+
     pub fn recv(&self) -> Option<Notice> {
         let notice = self.receiver.recv()?;
         self.budget.release();
@@ -518,6 +525,12 @@ impl SessionNoticeReceiver {
             Poll::Ready(None) => Poll::Ready(None),
             Poll::Pending => Poll::Pending,
         }
+    }
+}
+
+impl Drop for SessionNoticeReceiver {
+    fn drop(&mut self) {
+        drop(self.close());
     }
 }
 
@@ -1405,8 +1418,7 @@ fn process_commands(
                 let found = if let Some(session) = sessions.get_mut(handle) {
                     session.discarding = true;
                     session.paused = false;
-                    session.output.clear();
-                    session.output_bytes = 0;
+                    session.clear_output();
                     session.output_deadline = None;
                     ensure_read(iocp, handle, session, notices, counters);
                     true
@@ -1494,9 +1506,7 @@ fn process_commands(
                     if !session.close_started {
                         session.close_started = true;
                         session.paused = false;
-                        session.output.clear();
-                        session.output_bytes = 0;
-                        session.output_outstanding = 0;
+                        session.forget_output();
                         fail_input(handle, session, notices, counters);
                         unsafe {
                             TerminateJobObject(session.job.raw(), 1);
@@ -1519,9 +1529,7 @@ fn process_commands(
                     if !session.close_started {
                         session.close_started = true;
                         session.paused = false;
-                        session.output.clear();
-                        session.output_bytes = 0;
-                        session.output_outstanding = 0;
+                        session.forget_output();
                         fail_input(handle, session, notices, counters);
                         unsafe {
                             TerminateJobObject(session.job.raw(), 1);
@@ -1672,19 +1680,13 @@ fn handle_io_completion(
         } else {
             let amount = transferred as usize;
             counters.read_bytes += amount as u64;
-            if session.close_started || session.discarding {
-                session.output_notified = false;
-            } else {
+            if !session.close_started && !session.discarding {
                 if session.output_bytes == 0 {
                     session.output_deadline = Some(Instant::now() + OUTPUT_DELAY);
                 }
-                session.output_bytes += amount;
                 let mut buffer = operation.into_read_buffer();
                 buffer.truncate(amount);
-                session.output.push_back(QueuedOutput {
-                    bytes: Bytes::from(buffer),
-                    offset: 0,
-                });
+                session.enqueue_output(Bytes::from(buffer));
             }
         }
         if terminal_eof {
@@ -1952,14 +1954,18 @@ fn refresh_output(
         || session
             .output_deadline
             .is_some_and(|deadline| deadline <= Instant::now());
-    if ready && !session.discarding && !session.output.is_empty() && !session.output_notified {
+    if ready && !session.discarding && session.has_output() && session.output_lease_bytes == 0 {
         if let Some(reservation) = notices.try_reserve() {
             let bytes = session.pull(OUTPUT_BATCH);
+            let amount = bytes.len();
+            session.mark_output_leased(amount);
             if notices.emit(reservation, Notice::Output { handle, bytes }, counters) {
-                session.output_notified = true;
                 session.output_notification_blocked = false;
             } else {
-                session.cleanup_failed = true;
+                let reclaimed = session.credit(amount);
+                debug_assert!(reclaimed);
+                session.abandoned = true;
+                session.active = false;
             }
         } else {
             session.output_notification_blocked = true;
@@ -2021,9 +2027,7 @@ fn abandon_session(
         session.close_started = true;
         session.paused = false;
         fail_input(handle, session, notices, counters);
-        session.output.clear();
-        session.output_bytes = 0;
-        session.output_outstanding = 0;
+        session.forget_output();
         unsafe {
             TerminateJobObject(session.job.raw(), 1);
         }
@@ -2068,6 +2072,7 @@ fn reap_closed(
             }
         }
         if sessions.remove(handle).is_some() {
+            notices.retire_session(handle);
             if let Ok(mut values) = admissions.lock() {
                 values.remove(&handle);
             }
@@ -2087,12 +2092,12 @@ fn reap_abandoned(
 ) {
     for handle in sessions.handles() {
         if let Some(session) = sessions.get_mut(handle) {
-            if !session.active
+            let activation_expired = !session.active
                 && !session.abandoned
                 && session
                     .activation_deadline
-                    .is_some_and(|deadline| deadline <= Instant::now())
-            {
+                    .is_some_and(|deadline| deadline <= Instant::now());
+            if activation_expired || (session.abandoned && !session.close_started) {
                 abandon_session(
                     iocp,
                     iocp_sender,
@@ -2108,6 +2113,7 @@ fn reap_abandoned(
             .get(handle)
             .is_some_and(|session| session.abandoned && session.terminal());
         if removable && sessions.remove(handle).is_some() {
+            notices.retire_session(handle);
             if let Ok(mut values) = admissions.lock() {
                 values.remove(&handle);
             }
@@ -2122,8 +2128,8 @@ fn output_timeout(sessions: &GenerationRegistry<Session>) -> u32 {
         .filter_map(|session| {
             output_notification_deadline(
                 session.output_notification_blocked,
-                session.output_notified,
-                session.output.is_empty(),
+                session.output_lease_bytes != 0,
+                !session.has_output(),
                 session.output_deadline,
             )
         })

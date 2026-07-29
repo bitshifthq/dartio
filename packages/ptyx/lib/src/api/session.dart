@@ -79,10 +79,11 @@ abstract interface class PtySession {
 
   /// Terminal input mode changes observed from the pseudo terminal.
   ///
-  /// The stream emits when a program changes terminal input behavior, such as
-  /// disabling echo for hidden input. On platforms without terminal-mode
-  /// support it remains silent. It closes with the session and may emit a
-  /// [PtyException] if supported mode polling fails.
+  /// On supported platforms, listening first emits the current mode and then
+  /// emits when a program changes terminal input behavior, such as disabling
+  /// echo for hidden input. On platforms without terminal-mode support it
+  /// remains silent. It closes with the session and may emit a [PtyException]
+  /// if supported mode polling fails.
   Stream<PtyTermMode> get modeChanges;
 
   /// Raw bytes received from the platform pseudo-terminal backend.

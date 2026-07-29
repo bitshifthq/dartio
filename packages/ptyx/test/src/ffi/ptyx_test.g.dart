@@ -8,20 +8,28 @@ library;
 
 import 'dart:ffi' as ffi;
 
+/// Delays the next spawn worker in diagnostic builds.
+///
+/// @param[in] milliseconds Delay duration.
 @ffi.Native<ffi.Void Function(ffi.Uint64)>()
 external void ptyd_test_delay_next_spawn(int milliseconds);
 
+/// Forces the next Dart port post to fail in diagnostic builds.
 @ffi.Native<ffi.Void Function()>()
 external void ptyd_test_fail_next_post();
 
+/// Forces the next admitted write to fail in diagnostic builds.
 @ffi.Native<ffi.Void Function()>()
 external void ptyd_test_fail_next_write();
 
+/// Terminates the Unix broker in diagnostic builds.
+///
+/// @return One when a broker was terminated; otherwise zero.
 @ffi.Native<ffi.Uint32 Function()>()
 external int ptyd_test_kill_broker();
 
-@ffi.Native<ffi.Uint64 Function()>()
-external int ptyd_test_outstanding_event_count();
-
+/// Reports whether the diagnostic spawn delay is active.
+///
+/// @return One while a delayed worker is active; otherwise zero.
 @ffi.Native<ffi.Uint32 Function()>()
 external int ptyd_test_spawn_delay_active();

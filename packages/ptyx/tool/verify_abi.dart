@@ -75,10 +75,19 @@ Set<String> _exportedPtySymbols(File library) {
         lastFailure = '${result.stdout}\n${result.stderr}';
         continue;
       }
-      return RegExp(
-        r'(?:^|[^a-zA-Z0-9_])_?(ptyx_[a-z0-9_]+)\b',
-        multiLine: true,
-      ).allMatches(result.stdout as String).map((match) => match[1]!).toSet();
+      final output = result.stdout as String;
+      final pattern = switch (executable) {
+        'dumpbin' => RegExp(
+          r'^\s+\d+\s+[0-9a-fA-F]+\s+[0-9a-fA-F]+\s+_?(ptyx_[a-z0-9_]+)\s*$',
+          multiLine: true,
+        ),
+        'llvm-readobj' => RegExp(
+          r'^\s*Name:\s+_?(ptyx_[a-z0-9_]+)\s*$',
+          multiLine: true,
+        ),
+        _ => RegExp(r'^\S.*\s_?(ptyx_[a-z0-9_]+)\s*$', multiLine: true),
+      };
+      return pattern.allMatches(output).map((match) => match[1]!).toSet();
     } on ProcessException catch (error) {
       lastFailure = error;
     }

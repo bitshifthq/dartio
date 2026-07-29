@@ -15,8 +15,10 @@
 extern "C" {
 #endif
 
+/** Generation-checked identity of one Dart event-pump adapter. */
 typedef uint64_t ptyd_adapter_t;
 
+/** Invalid or empty Dart adapter handle. */
 #define PTYD_INVALID_ADAPTER UINT64_C(0)
 
 /**
@@ -56,6 +58,12 @@ PTYX_EXPORT ptyx_status_t PTYX_CALL ptyd_runtime_attach(ptyx_runtime_t runtime,
  * The pump cannot process SPAWN_READY or SPAWN_FAILED before it owns the
  * returned handle. The adapter releases the handle after SPAWN_FAILED or
  * CLOSE_COMPLETE, or during detach.
+ *
+ * @param[in] adapter Owning adapter.
+ * @param[in] options Validated, borrowed spawn options.
+ * @param[out] session Receives the tracked session handle.
+ * @param[out] error Optional initialized error destination.
+ * @return PTYX_STATUS_OK or a typed failure.
  */
 PTYX_EXPORT ptyx_status_t PTYX_CALL ptyd_session_spawn_start(
     ptyd_adapter_t adapter, const ptyx_spawn_options_t *options,
@@ -77,6 +85,11 @@ PTYX_EXPORT ptyx_status_t PTYX_CALL ptyd_session_release(
  *
  * Acknowledgement releases the C event and returns native output credit. Each
  * nonzero token must be acknowledged exactly once.
+ *
+ * @param[in] adapter Owning adapter.
+ * @param[in] token Nonzero output-event token.
+ * @param[out] error Optional initialized error destination.
+ * @return PTYX_STATUS_OK or a typed failure.
  */
 PTYX_EXPORT ptyx_status_t PTYX_CALL ptyd_event_ack(ptyd_adapter_t adapter,
                                                    ptyx_event_token_t token,
@@ -88,6 +101,10 @@ PTYX_EXPORT ptyx_status_t PTYX_CALL ptyd_event_ack(ptyd_adapter_t adapter,
  * Shutdown wakes the blocked event read. The function joins the pump, releases
  * outstanding events and tracked sessions, shuts down and releases the
  * runtime, and clears adapter. Passing an already-zero handle succeeds.
+ *
+ * @param[in,out] adapter Adapter handle, cleared on success.
+ * @param[out] error Optional initialized error destination.
+ * @return PTYX_STATUS_OK or a typed failure.
  */
 PTYX_EXPORT ptyx_status_t PTYX_CALL ptyd_runtime_detach(ptyd_adapter_t *adapter,
                                                         ptyx_error_t *error);
@@ -98,15 +115,33 @@ PTYX_EXPORT ptyx_status_t PTYX_CALL ptyd_runtime_detach(ptyd_adapter_t *adapter,
  * Transfers ownership to a process-wide cleanup worker and returns without
  * waiting. The worker performs the same cleanup as detach and ignores
  * diagnostic output because no Dart owner remains.
+ *
+ * @param[in] token Adapter handle encoded as a pointer-sized integer.
  */
 PTYX_EXPORT void PTYX_CALL ptyd_runtime_finalize(void *token);
 
 #if defined(PTYX_TEST_CONTROLS)
+/** Forces the next Dart port post to fail in diagnostic builds. */
 PTYX_EXPORT void PTYX_CALL ptyd_test_fail_next_post(void);
+/**
+ * Terminates the Unix broker in diagnostic builds.
+ *
+ * @return One when a broker was terminated; otherwise zero.
+ */
 PTYX_EXPORT uint32_t PTYX_CALL ptyd_test_kill_broker(void);
-PTYX_EXPORT uint64_t PTYX_CALL ptyd_test_outstanding_event_count(void);
+/**
+ * Delays the next spawn worker in diagnostic builds.
+ *
+ * @param[in] milliseconds Delay duration.
+ */
 PTYX_EXPORT void PTYX_CALL ptyd_test_delay_next_spawn(uint64_t milliseconds);
+/**
+ * Reports whether the diagnostic spawn delay is active.
+ *
+ * @return One while a delayed worker is active; otherwise zero.
+ */
 PTYX_EXPORT uint32_t PTYX_CALL ptyd_test_spawn_delay_active(void);
+/** Forces the next admitted write to fail in diagnostic builds. */
 PTYX_EXPORT void PTYX_CALL ptyd_test_fail_next_write(void);
 #endif
 

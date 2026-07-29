@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 use std::sync::mpsc::TryRecvError;
 use std::sync::{Arc, Condvar, Mutex, Weak};
@@ -91,6 +91,8 @@ struct State<T> {
     queues: HashMap<u64, VecDeque<T>>,
     ready: VecDeque<u64>,
     session_signals: HashMap<u64, Weak<SessionSignal>>,
+    closed_sessions: HashSet<u64>,
+    retired_sessions: HashSet<u64>,
     senders: usize,
 }
 
@@ -122,6 +124,8 @@ pub(crate) fn channel<T>() -> (Sender<T>, Receiver<T>) {
             queues: HashMap::new(),
             ready: VecDeque::new(),
             session_signals: HashMap::new(),
+            closed_sessions: HashSet::new(),
+            retired_sessions: HashSet::new(),
             senders: 1,
         }),
         ready: Condvar::new(),
@@ -146,11 +150,37 @@ impl<T> Clone for Sender<T> {
 }
 
 impl<T> Sender<T> {
+    /// Forgets a closed route after its producer can no longer send events.
+    pub(crate) fn retire_session(&self, session: u64) {
+        let signal = if let Ok(mut state) = self.shared.state.lock() {
+            if state.closed_sessions.remove(&session) {
+                None
+            } else {
+                let signal = state.session_signals.get(&session).and_then(Weak::upgrade);
+                if signal.is_some() {
+                    state.retired_sessions.insert(session);
+                } else {
+                    state.session_signals.remove(&session);
+                }
+                signal
+            }
+        } else {
+            None
+        };
+        if let Some(signal) = signal {
+            signal.ready.notify_all();
+            signal.wake();
+        }
+    }
+
     pub(crate) fn send(&self, session: u64, event: T) -> Result<(), T> {
         let Ok(mut state) = self.shared.state.lock() else {
             return Err(event);
         };
         if state.senders == 0 {
+            return Err(event);
+        }
+        if state.closed_sessions.contains(&session) || state.retired_sessions.contains(&session) {
             return Err(event);
         }
         let queue = state.queues.entry(session).or_default();
@@ -184,6 +214,9 @@ impl<T> Sender<T> {
             return Err(event);
         };
         if state.senders == 0 {
+            return Err(event);
+        }
+        if state.closed_sessions.contains(&session) || state.retired_sessions.contains(&session) {
             return Err(event);
         }
         let queue = state.queues.entry(session).or_default();
@@ -249,6 +282,9 @@ impl<T> Receiver<T> {
             waker: Mutex::new(None),
         });
         let mut state = self.shared.state.lock().ok()?;
+        if state.closed_sessions.contains(&session) {
+            return None;
+        }
         if state
             .session_signals
             .get(&session)
@@ -286,11 +322,25 @@ impl<T> Receiver<T> {
 }
 
 impl<T> SessionReceiver<T> {
+    /// Atomically closes this session route and returns all queued events.
+    ///
+    /// Once this method acquires the channel lock, later sends for this
+    /// session fail rather than creating an orphaned queue.
+    pub fn close(&self) -> Vec<T> {
+        let Ok(mut state) = self.shared.state.lock() else {
+            return Vec::new();
+        };
+        close_session(&mut state, self.session, &self.signal)
+    }
+
     pub fn recv(&self) -> Option<T> {
         let mut state = self.shared.state.lock().ok()?;
         loop {
             if let Some(event) = pop_session(&mut state, self.session) {
                 return Some(event);
+            }
+            if state.retired_sessions.contains(&self.session) {
+                return None;
             }
             if state.senders == 0 {
                 return None;
@@ -303,7 +353,7 @@ impl<T> SessionReceiver<T> {
         let mut state = self.shared.state.lock().map_err(|_| ReceiverClosed)?;
         if let Some(event) = pop_session(&mut state, self.session) {
             Ok(Some(event))
-        } else if state.senders == 0 {
+        } else if state.retired_sessions.contains(&self.session) || state.senders == 0 {
             Err(ReceiverClosed)
         } else {
             Ok(None)
@@ -317,6 +367,9 @@ impl<T> SessionReceiver<T> {
         };
         if let Some(event) = pop_session(&mut state, self.session) {
             return Poll::Ready(Some(event));
+        }
+        if state.retired_sessions.contains(&self.session) {
+            return Poll::Ready(None);
         }
         if state.senders == 0 {
             return Poll::Ready(None);
@@ -335,16 +388,7 @@ impl<T> SessionReceiver<T> {
 
 impl<T> Drop for SessionReceiver<T> {
     fn drop(&mut self) {
-        if let Ok(mut state) = self.shared.state.lock() {
-            let owns_registration = state
-                .session_signals
-                .get(&self.session)
-                .and_then(Weak::upgrade)
-                .is_some_and(|signal| Arc::ptr_eq(&signal, &self.signal));
-            if owns_registration {
-                state.session_signals.remove(&self.session);
-            }
-        }
+        drop(self.close());
     }
 }
 
@@ -388,11 +432,32 @@ fn pop_session<T>(state: &mut State<T>, session: u64) -> Option<T> {
     Some(event)
 }
 
+fn close_session<T>(state: &mut State<T>, session: u64, signal: &Arc<SessionSignal>) -> Vec<T> {
+    let owns_registration = state
+        .session_signals
+        .get(&session)
+        .and_then(Weak::upgrade)
+        .is_some_and(|registered| Arc::ptr_eq(&registered, signal));
+    if !owns_registration {
+        return Vec::new();
+    }
+
+    state.session_signals.remove(&session);
+    if !state.retired_sessions.remove(&session) {
+        state.closed_sessions.insert(session);
+    }
+    state.ready.retain(|ready| *ready != session);
+    state
+        .queues
+        .remove(&session)
+        .map_or_else(Vec::new, VecDeque::into)
+}
+
 #[cfg(test)]
 mod tests {
     use super::channel;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::Arc;
+    use std::sync::{Arc, Barrier};
     use std::task::{Context, Poll, Wake, Waker};
     use std::thread;
 
@@ -493,9 +558,120 @@ mod tests {
         );
 
         drop(session);
-        sender.send(7, "unobserved").expect("queue remains usable");
+        assert_eq!(sender.send(7, "unobserved"), Err("unobserved"));
 
         assert_eq!(counter.0.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn dropping_session_receiver_purges_queued_events_and_rejects_later_sends() {
+        let (sender, receiver) = channel();
+        let session = receiver.session(7).expect("register session receiver");
+        sender.send(7, "first").expect("queue event");
+        sender.send(7, "second").expect("queue event");
+
+        drop(session);
+
+        assert_eq!(sender.send(7, "late"), Err("late"));
+        sender.send(8, "peer").expect("peer route remains open");
+        assert_eq!(receiver.recv(), Some((8, "peer")));
+    }
+
+    #[test]
+    fn close_racing_send_cannot_leave_an_orphaned_session_queue() {
+        let (sender, receiver) = channel();
+        let session = receiver.session(7).expect("register session receiver");
+        let gate = Arc::new(Barrier::new(2));
+        let sending = thread::spawn({
+            let gate = Arc::clone(&gate);
+            move || {
+                gate.wait();
+                for event in 0.. {
+                    if sender.send(7, event).is_err() {
+                        return event;
+                    }
+                }
+                unreachable!("the receiver close eventually rejects the sender")
+            }
+        });
+
+        gate.wait();
+        drop(session);
+        let _rejected_at = sending.join().expect("sender thread");
+        assert_eq!(receiver.recv(), None);
+    }
+
+    #[test]
+    fn retired_session_routes_do_not_accumulate_during_churn() {
+        let (sender, receiver) = channel();
+        for session_id in 1..=10_000 {
+            let session = receiver
+                .session(session_id)
+                .expect("register fresh session receiver");
+            sender.send(session_id, session_id).expect("queue event");
+            drop(session);
+            sender.retire_session(session_id);
+        }
+
+        let state = sender.shared.state.lock().expect("channel state");
+        assert!(state.queues.is_empty());
+        assert!(state.ready.is_empty());
+        assert!(state.session_signals.is_empty());
+        assert!(state.closed_sessions.is_empty());
+        assert!(state.retired_sessions.is_empty());
+    }
+
+    #[test]
+    fn producer_retirement_preserves_queued_events_until_receiver_close() {
+        let (sender, receiver) = channel();
+        let session = receiver.session(7).expect("register session receiver");
+        sender.send(7, "terminal").expect("queue terminal event");
+
+        sender.retire_session(7);
+
+        assert_eq!(sender.send(7, "late"), Err("late"));
+        assert_eq!(session.recv(), Some("terminal"));
+        assert_eq!(session.recv(), None);
+        drop(session);
+        let state = sender.shared.state.lock().expect("channel state");
+        assert!(!state.retired_sessions.contains(&7));
+        assert!(!state.closed_sessions.contains(&7));
+    }
+
+    #[test]
+    fn producer_retirement_wakes_and_terminates_a_pending_session_receiver() {
+        let (sender, receiver) = channel::<()>();
+        let session = receiver.session(7).expect("register session receiver");
+        let wake = Arc::new(CountWake(AtomicUsize::new(0)));
+        let waker = Waker::from(Arc::clone(&wake));
+        let mut context = Context::from_waker(&waker);
+        assert_eq!(session.poll_recv(&mut context), Poll::Pending);
+
+        sender.retire_session(7);
+
+        assert_eq!(wake.0.load(Ordering::Relaxed), 1);
+        assert_eq!(session.poll_recv(&mut context), Poll::Ready(None));
+        assert_eq!(session.try_recv(), Err(super::ReceiverClosed));
+    }
+
+    #[test]
+    fn global_receiver_retirement_does_not_accumulate_route_markers() {
+        let (sender, receiver) = channel();
+        for session_id in 1..=10_000 {
+            sender
+                .send(session_id, session_id)
+                .expect("queue terminal event");
+            sender.retire_session(session_id);
+        }
+
+        let state = sender.shared.state.lock().expect("channel state");
+        assert!(state.closed_sessions.is_empty());
+        assert!(state.retired_sessions.is_empty());
+        drop(state);
+
+        for session_id in 1..=10_000 {
+            assert_eq!(receiver.recv(), Some((session_id, session_id)));
+        }
     }
 
     #[test]

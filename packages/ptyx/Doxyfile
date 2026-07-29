@@ -1,7 +1,8 @@
 PROJECT_NAME           = "ptyx C ABI"
-PROJECT_BRIEF          = "Stable language-neutral PTY interface"
+PROJECT_BRIEF          = "Stable PTY C ABI and private Dart adapter"
 OUTPUT_DIRECTORY       = packages/ptyx/native/target/doxygen
-INPUT                  = packages/ptyx/include/ptyx.h
+INPUT                  = packages/ptyx/include/ptyx.h \
+                         packages/ptyx/include/ptyx_dart.h
 FILE_PATTERNS          = *.h
 RECURSIVE              = NO
 OPTIMIZE_OUTPUT_FOR_C  = YES

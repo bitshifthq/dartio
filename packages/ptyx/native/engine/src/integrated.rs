@@ -3,7 +3,7 @@ use crate::broker_client::{BrokerClient, BrokerOwner, BrokerSession};
 use crate::control::{Control, ControlQueue, WakeGate};
 use crate::event::{self, Receiver as EventReceiver, Sender as EventSender};
 use crate::oneshot::{self, Sender as ReplySender};
-use crate::session::{InputAdmission, QueuedOutput, SessionCore};
+use crate::session::{InputAdmission, SessionCore};
 use crate::spawn::BrokerSpawn;
 use crate::{
     CloseResult, Completion, Failure, Notice, SessionSnapshot, WRITE_INFRASTRUCTURE_FAILURE,
@@ -830,7 +830,7 @@ fn reactor(
         refresh_modes(&notices, &mut sessions, &mut counters);
         escalate_due_closes(&mut sessions, &broker);
         reap_closed(&notices, &mut sessions, &mut counters, &broker, &admissions);
-        reap_abandoned(&mut sessions, &broker, &admissions);
+        reap_abandoned(&notices, &mut sessions, &broker, &admissions);
         if shutdown {
             shutdown_all(&mut sessions, &broker, &admissions);
             return;
@@ -957,7 +957,7 @@ fn reactor(
         refresh_modes(&notices, &mut sessions, &mut counters);
         escalate_due_closes(&mut sessions, &broker);
         reap_closed(&notices, &mut sessions, &mut counters, &broker, &admissions);
-        reap_abandoned(&mut sessions, &broker, &admissions);
+        reap_abandoned(&notices, &mut sessions, &broker, &admissions);
         if shutdown {
             shutdown_all(&mut sessions, &broker, &admissions);
             return;
@@ -1071,8 +1071,7 @@ fn process_commands(
                 let found = if let Some(session) = sessions.get_mut(handle) {
                     session.discarding = true;
                     session.paused = false;
-                    session.output.clear();
-                    session.output_bytes = 0;
+                    session.clear_output();
                     session.output_deadline = None;
                     true
                 } else {
@@ -1133,7 +1132,11 @@ fn process_commands(
             } => {
                 let found = if let Some(session) = sessions.get_mut(handle) {
                     if observe {
-                        session.observed_mode = session_mode(session);
+                        // Observation begins with a mandatory current-state
+                        // emission. Sampling here would make a mode change
+                        // that raced subscription indistinguishable from the
+                        // baseline and permanently suppress it.
+                        session.observed_mode = None;
                         session.mode_interval = MODE_POLL_MIN;
                         session.mode_deadline = Some(Instant::now() + MODE_POLL_MIN);
                     } else {
@@ -1284,9 +1287,7 @@ fn process_controls(
                     session.input.clear();
                     session.input_bytes = 0;
                     session.input_entries = 0;
-                    session.output.clear();
-                    session.output_bytes = 0;
-                    session.output_outstanding = 0;
+                    session.forget_output();
                     let _ = close_session(session, broker);
                     let _ = update_read_filter(kqueue, handle, session, true);
                     let _ = update_write_filter(kqueue, handle, session, false);
@@ -1456,15 +1457,11 @@ fn read_ready(
             if session.output_bytes == 0 {
                 session.output_deadline = Some(Instant::now() + OUTPUT_DELAY);
             }
-            session.output_bytes += amount;
             // `read` initialized exactly this prefix.
             unsafe {
                 buffer.set_len(amount);
             }
-            session.output.push_back(QueuedOutput {
-                bytes: Bytes::from(buffer),
-                offset: 0,
-            });
+            session.enqueue_output(Bytes::from(buffer));
             continue;
         }
         if result == 0 {
@@ -1614,13 +1611,17 @@ fn refresh_output(
         || session
             .output_deadline
             .is_some_and(|deadline| deadline <= Instant::now());
-    if session.active && !session.discarding && output_ready && !session.output.is_empty() {
-        let bytes = session.pull_output(OUTPUT_BATCH);
-        send_notice(notices, Notice::Output { handle, bytes }, counters);
+    if session.active
+        && !session.discarding
+        && output_ready
+        && session.has_output()
+        && session.output_lease_bytes == 0
+    {
+        emit_output_notice(handle, session, notices, counters);
     }
     if session.active
         && session.output_eof
-        && session.output.is_empty()
+        && !session.has_output()
         && session.output_outstanding == 0
         && !session.output_done_notified
     {
@@ -1637,11 +1638,36 @@ fn refresh_output(
     }
 }
 
+fn emit_output_notice(
+    handle: u64,
+    session: &mut Session,
+    notices: &EventSender<Notice>,
+    counters: &mut RuntimeCounters,
+) -> bool {
+    let bytes = session.pull_output(OUTPUT_BATCH);
+    let amount = bytes.len();
+    session.mark_output_leased(amount);
+    match notices.send(handle, Notice::Output { handle, bytes }) {
+        Ok(()) => {
+            counters.notifications += 1;
+            true
+        }
+        Err(_) => {
+            let reclaimed = session.credit(amount);
+            debug_assert!(reclaimed);
+            session.forget_output();
+            session.abandoned = true;
+            session.active = false;
+            false
+        }
+    }
+}
+
 fn output_poll_timeout(sessions: &GenerationRegistry<Session>) -> i32 {
     let output_deadline = sessions
         .iter()
         .map(|(_, session)| session)
-        .filter(|session| !session.output.is_empty())
+        .filter(|session| session.has_output() && session.output_lease_bytes == 0)
         .filter_map(|session| session.output_deadline)
         .min();
     let activation_deadline = sessions
@@ -1839,7 +1865,7 @@ fn reap_closed(
                 && session.close_started
                 && session.exit_status.is_some()
                 && session.output_eof
-                && session.output.is_empty()
+                && !session.has_output()
                 && session.output_outstanding == 0
         });
         if !complete {
@@ -1865,6 +1891,7 @@ fn reap_closed(
             }
         }
         if sessions.remove(handle).is_some() {
+            notices.retire_session(handle);
             if let Ok(mut values) = admissions.lock() {
                 values.remove(&handle);
             }
@@ -1873,6 +1900,7 @@ fn reap_closed(
 }
 
 fn reap_abandoned(
+    notices: &EventSender<Notice>,
     sessions: &mut GenerationRegistry<Session>,
     broker: &BrokerClient,
     admissions: &Arc<Mutex<HashMap<u64, Arc<InputAdmission>>>>,
@@ -1894,9 +1922,7 @@ fn reap_abandoned(
                 session.input.clear();
                 session.input_bytes = 0;
                 session.input_entries = 0;
-                session.output.clear();
-                session.output_bytes = 0;
-                session.output_outstanding = 0;
+                session.forget_output();
             }
             if session.abandoned && !session.close_started {
                 let _ = close_session(session, broker);
@@ -1906,7 +1932,7 @@ fn reap_abandoned(
             session.abandoned
                 && session.exit_status.is_some()
                 && session.output_eof
-                && session.output.is_empty()
+                && !session.has_output()
                 && session.output_outstanding == 0
         });
         if removable {
@@ -1917,6 +1943,7 @@ fn reap_abandoned(
                 continue;
             }
             if sessions.remove(handle).is_some() {
+                notices.retire_session(handle);
                 if let Ok(mut values) = admissions.lock() {
                     values.remove(&handle);
                 }
@@ -1959,6 +1986,7 @@ fn fail_all(
             force_terminal_group(session.master.as_raw_fd(), session.pid);
             let _ = broker.abort_async(session.broker_session);
             send_notice(notices, Notice::BrokerLost(handle), counters);
+            notices.retire_session(handle);
         }
     }
     if let Ok(mut values) = admissions.lock() {
@@ -2179,9 +2207,9 @@ fn admit_write_with(
 #[cfg(test)]
 mod tests {
     use super::{
-        admit_write, admit_write_with, fail_input, notify_input_failure, record_cleanup_result,
-        send_notice, InputAdmission, Notice, QueuedOutput, RuntimeCounters, Session, OUTPUT_BATCH,
-        WRITE_INFRASTRUCTURE_FAILURE,
+        admit_write, admit_write_with, emit_output_notice, fail_input, notify_input_failure,
+        record_cleanup_result, send_notice, InputAdmission, Notice, RuntimeCounters, Session,
+        OUTPUT_BATCH, WRITE_INFRASTRUCTURE_FAILURE,
     };
     use crate::{broker_client::BrokerSession, event};
     use bytes::Bytes;
@@ -2320,11 +2348,7 @@ mod tests {
                 .map(|index| (chunk_index + index) as u8)
                 .collect();
             expected.extend_from_slice(&bytes);
-            session.output_bytes += bytes.len();
-            session.output.push_back(QueuedOutput {
-                bytes: bytes.into(),
-                offset: 0,
-            });
+            session.enqueue_output(bytes.into());
         }
 
         let mut actual = Vec::new();
@@ -2354,17 +2378,33 @@ mod tests {
         let mut session = session(4096);
         let bytes = vec![0x5a; OUTPUT_BATCH];
         let pointer = bytes.as_ptr();
-        session.output_bytes = bytes.len();
-        session.output.push_back(QueuedOutput {
-            bytes: bytes.into(),
-            offset: 0,
-        });
+        session.enqueue_output(bytes.into());
 
         let pulled = session.pull_output(OUTPUT_BATCH);
 
         assert_eq!(pulled.as_ptr(), pointer);
         assert_eq!(session.output_bytes, 0);
         assert_eq!(session.output_outstanding, OUTPUT_BATCH);
+    }
+
+    #[test]
+    fn output_rejected_by_a_closed_session_route_is_reclaimed() {
+        let (sender, receiver) = event::channel();
+        let route = receiver.session(7).expect("register session receiver");
+        drop(route);
+        let mut session = session(4096);
+        session.active = true;
+        session.enqueue_output(Bytes::from(vec![0x5a; OUTPUT_BATCH + 1]));
+        let mut counters = RuntimeCounters::default();
+
+        assert!(!emit_output_notice(7, &mut session, &sender, &mut counters));
+
+        assert!(session.abandoned);
+        assert!(!session.active);
+        assert_eq!(session.output_outstanding, 0);
+        assert_eq!(session.output_lease_bytes, 0);
+        assert!(!session.has_output());
+        assert_eq!(counters.notifications, 0);
     }
 
     #[test]

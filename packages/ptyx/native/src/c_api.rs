@@ -298,6 +298,7 @@ struct SessionEntry {
     runtime: Arc<RuntimeEntry>,
     state: Mutex<SessionState>,
     close_started: Mutex<bool>,
+    output_cancelled: Mutex<bool>,
 }
 
 #[derive(Clone, Copy)]
@@ -1052,6 +1053,7 @@ pub unsafe extern "C" fn ptyx_session_spawn_start(
             runtime: Arc::clone(&runtime),
             state: Mutex::new(SessionState::Spawning),
             close_started: Mutex::new(false),
+            output_cancelled: Mutex::new(false),
         });
         let public_handle = {
             let Ok(mut state) = adapter().lock() else {
@@ -1337,12 +1339,30 @@ pub(crate) fn test_kill_broker(runtime: u64) -> bool {
 #[no_mangle]
 pub unsafe extern "C" fn ptyx_session_cancel_output(session: u64, error: *mut Error) -> u32 {
     boundary(error, || {
-        let (entry, engine_handle) = match require_active(session, OPERATION_OUTPUT, error) {
-            Ok(value) => value,
-            Err(status) => return status,
+        let Some(entry) = session_entry(session) else {
+            set_error(error, stale_error(OPERATION_OUTPUT));
+            return STATUS_STALE_HANDLE;
         };
-        if entry.runtime.engine.cancel_output(engine_handle) {
+        let Ok(mut output_cancelled) = entry.output_cancelled.lock() else {
+            return STATUS_INTERNAL;
+        };
+        if *output_cancelled {
             STATUS_OK
+        } else if let SessionState::Active(engine_handle) = *entry
+            .state
+            .lock()
+            .unwrap_or_else(|value| value.into_inner())
+        {
+            if entry.runtime.engine.cancel_output(engine_handle) {
+                *output_cancelled = true;
+                STATUS_OK
+            } else {
+                set_error(
+                    error,
+                    Error::value(ERROR_DOMAIN_STATE, ERROR_WRONG_STATE, OPERATION_OUTPUT, 0),
+                );
+                STATUS_WRONG_STATE
+            }
         } else {
             set_error(
                 error,

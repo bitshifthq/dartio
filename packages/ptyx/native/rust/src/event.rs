@@ -170,6 +170,9 @@ impl Events {
 
     /// Enables or disables native terminal-mode observation.
     ///
+    /// Enabling observation first emits the current mode, followed by later
+    /// changes.
+    ///
     /// Platforms without terminal-mode observation return an error.
     pub fn observe_modes(&mut self, observe: bool) -> Result<(), ControlError> {
         if self.observing_modes == observe {
@@ -220,11 +223,12 @@ impl Stream for Events {
 
 impl Drop for Events {
     fn drop(&mut self) {
+        let notices = self.receiver.close();
         if self.observing_modes {
             let _ = self.control.observe_modes(false);
         }
         let _ = self.control.cancel_output();
-        while let Ok(Some(notice)) = self.receiver.try_recv() {
+        for notice in notices {
             if let ptyx_engine::Notice::Output { bytes, .. } = notice {
                 self.control.release_output(bytes.len());
             }

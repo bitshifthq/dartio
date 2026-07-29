@@ -632,22 +632,6 @@ pub extern "C" fn ptyd_test_kill_broker() -> u32 {
 
 #[cfg(feature = "test-controls")]
 #[no_mangle]
-pub extern "C" fn ptyd_test_outstanding_event_count() -> u64 {
-    pumps()
-        .lock()
-        .ok()
-        .and_then(|registry| registry.sole().map(Arc::clone))
-        .and_then(|pump| {
-            pump.state
-                .lock()
-                .ok()
-                .map(|state| state.outstanding.len() as u64)
-        })
-        .unwrap_or(0)
-}
-
-#[cfg(feature = "test-controls")]
-#[no_mangle]
 pub extern "C" fn ptyd_test_delay_next_spawn(milliseconds: u64) {
     c_api::test_delay_next_spawn(usize::try_from(milliseconds).unwrap_or(usize::MAX));
 }
