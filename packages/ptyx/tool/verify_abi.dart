@@ -75,22 +75,28 @@ Set<String> _exportedPtySymbols(File library) {
         lastFailure = '${result.stdout}\n${result.stderr}';
         continue;
       }
-      final output = result.stdout as String;
-      final pattern = switch (executable) {
-        'dumpbin' => RegExp(
-          r'^\s+\d+\s+[0-9a-fA-F]+\s+[0-9a-fA-F]+\s+_?(ptyx_[a-z0-9_]+)\s*$',
-          multiLine: true,
-        ),
-        'llvm-readobj' => RegExp(
-          r'^\s*Name:\s+_?(ptyx_[a-z0-9_]+)\s*$',
-          multiLine: true,
-        ),
-        _ => RegExp(r'^\S.*\s_?(ptyx_[a-z0-9_]+)\s*$', multiLine: true),
-      };
-      return pattern.allMatches(output).map((match) => match[1]!).toSet();
+      return parseExportedPtySymbols(result.stdout as String);
     } on ProcessException catch (error) {
       lastFailure = error;
     }
   }
   throw StateError('could not inspect native exports: $lastFailure');
+}
+
+Set<String> parseExportedPtySymbols(String output) {
+  final pattern = RegExp(r'(?:^|[^a-zA-Z0-9_])_?(ptyx_[a-z0-9_]+)\b');
+  final symbols = <String>{};
+  for (final line in const LineSplitter().convert(output)) {
+    for (final match in pattern.allMatches(line)) {
+      final suffix = line.substring(match.end).toLowerCase();
+      // Inspection tools print the DLL path outside the export table. Exclude
+      // that filename occurrence without hiding a real export whose exact
+      // name happens to match the library stem.
+      if (suffix.startsWith('.dll')) {
+        continue;
+      }
+      symbols.add(match[1]!);
+    }
+  }
+  return symbols;
 }
