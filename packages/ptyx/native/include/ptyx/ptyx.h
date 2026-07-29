@@ -39,7 +39,7 @@ extern "C" {
 /** ABI major version. */
 #define PTYX_ABI_VERSION_MAJOR UINT32_C(0)
 /** ABI minor version. */
-#define PTYX_ABI_VERSION_MINOR UINT32_C(1)
+#define PTYX_ABI_VERSION_MINOR UINT32_C(2)
 /** Packed ABI version returned by ptyx_abi_version(). */
 #define PTYX_ABI_VERSION                                                       \
   ((PTYX_ABI_VERSION_MAJOR << UINT32_C(16)) | PTYX_ABI_VERSION_MINOR)
@@ -462,7 +462,9 @@ PTYX_EXPORT ptyx_status_t PTYX_CALL ptyx_session_spawn_start(
  * @param[in] session Live session handle.
  * @param[in] bytes Input bytes. May be NULL only when length is zero.
  * @param[in] length Number of input bytes.
- * @param[out] error Optional initialized error destination.
+ * @param[in,out] error Optional initialized error destination. Receives a
+ * value on failure and remains unchanged on success so the input hot path
+ * performs no error-structure stores.
  * @return PTYX_STATUS_OK after bounded native admission,
  * PTYX_STATUS_BACKPRESSURE when bounded admission is temporarily unavailable
  * because of capacity, entry, channel, or concurrent-admission contention, or
@@ -609,6 +611,8 @@ typedef enum ptyx_event_kind {
   PTYX_EVENT_CLOSE_COMPLETE = 9,
   /** An observed terminal input mode changed. */
   PTYX_EVENT_MODE_CHANGED = 10,
+  /** Native terminal-mode observation failed and stopped. */
+  PTYX_EVENT_MODE_FAILED = 11,
   /** Reserved value that fixes the public enum representation at 32 bits. */
   PTYX_EVENT_KIND_ENUM_FORCE_32_BIT = INT32_MAX
 } ptyx_event_kind_t;
@@ -636,6 +640,7 @@ typedef enum ptyx_event_kind {
  * - PTYX_EVENT_CLOSE_COMPLETE carries PTYX_EVENT_CLOSE_* bits in flags and
  *   the highest-priority retained failure in error.
  * - PTYX_EVENT_MODE_CHANGED carries PTYX_MODE_* bits in value.
+ * - PTYX_EVENT_MODE_FAILED carries error.
  *
  * Every event identifies its session. Only PTYX_EVENT_OUTPUT has a nonzero
  * token. Its data remains valid until release.

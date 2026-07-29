@@ -1,5 +1,6 @@
 use crate::engine::oneshot::Sender as ReplySender;
 use crate::engine::CloseResult;
+use crate::error::OperationError;
 use bytes::{Buf, Bytes, BytesMut};
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
@@ -30,6 +31,7 @@ pub(crate) struct InputAdmissionState {
     pub(crate) bytes: usize,
     pub(crate) entries: usize,
     pub(crate) open: bool,
+    pub(crate) failure: Option<OperationError>,
 }
 
 impl InputAdmission {
@@ -40,6 +42,7 @@ impl InputAdmission {
                 bytes: 0,
                 entries: 0,
                 open: true,
+                failure: None,
             }),
         }
     }
@@ -62,6 +65,19 @@ impl InputAdmission {
             state.open = false;
         }
     }
+
+    pub(crate) fn close_with_failure(&self, failure: OperationError) {
+        if let Ok(mut state) = self.state.lock() {
+            state.failure.get_or_insert(failure);
+            state.open = false;
+        }
+    }
+
+    pub(crate) fn has_pending(&self) -> bool {
+        self.state
+            .lock()
+            .map_or(true, |state| state.bytes != 0 || state.entries != 0)
+    }
 }
 
 pub(crate) struct SessionCore {
@@ -70,7 +86,7 @@ pub(crate) struct SessionCore {
     pub(crate) input_entries: usize,
     pub(crate) input: VecDeque<QueuedInput>,
     pub(crate) input_failed: bool,
-    pub(crate) input_failure_pending: bool,
+    pub(crate) input_failure: Option<OperationError>,
     pub(crate) input_failure_notified: bool,
     pub(crate) output_capacity: usize,
     pub(crate) output_bytes: usize,
@@ -80,13 +96,13 @@ pub(crate) struct SessionCore {
     pub(crate) output_lease_bytes: usize,
     pub(crate) output_deadline: Option<Instant>,
     pub(crate) output_done_notified: bool,
-    pub(crate) output_failed: bool,
+    pub(crate) output_failure: Option<OperationError>,
     pub(crate) paused: bool,
     pub(crate) discarding: bool,
     pub(crate) output_eof: bool,
     pub(crate) exit_status: Option<i64>,
     pub(crate) close_started: bool,
-    pub(crate) cleanup_failed: bool,
+    pub(crate) cleanup_failure: Option<OperationError>,
     pub(crate) close_notified: bool,
     pub(crate) close_waiters: Vec<ReplySender<CloseResult>>,
     pub(crate) active: bool,
@@ -102,7 +118,7 @@ impl SessionCore {
             input_entries: 0,
             input: VecDeque::new(),
             input_failed: false,
-            input_failure_pending: false,
+            input_failure: None,
             input_failure_notified: false,
             output_capacity,
             output_bytes: 0,
@@ -112,13 +128,13 @@ impl SessionCore {
             output_lease_bytes: 0,
             output_deadline: None,
             output_done_notified: false,
-            output_failed: false,
+            output_failure: None,
             paused: true,
             discarding: false,
             output_eof: false,
             exit_status: None,
             close_started: false,
-            cleanup_failed: false,
+            cleanup_failure: None,
             close_notified: false,
             close_waiters: Vec::new(),
             active: false,

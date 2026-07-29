@@ -1,5 +1,6 @@
 use bytes::Bytes;
-use ptyx::__private_adapter::{BrokerSpawn, Failure, FailureKind, IntegratedRuntime, Notice};
+use ptyx::__private_adapter::{BrokerSpawn, CopyWriteResult, Failure, IntegratedRuntime, Notice};
+use ptyx::{FailureKind, Operation, OperationError};
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::io;
@@ -13,7 +14,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::Duration;
 
-const ABI_VERSION: u32 = 1;
+const ABI_VERSION: u32 = 2;
 pub const STATUS_OK: u32 = 0;
 pub const STATUS_INVALID_ARGUMENT: u32 = 1;
 pub const STATUS_STALE_HANDLE: u32 = 2;
@@ -32,6 +33,7 @@ pub const ERROR_DOMAIN_ARGUMENT: u32 = 1;
 pub const ERROR_DOMAIN_STATE: u32 = 2;
 const ERROR_DOMAIN_INPUT: u32 = 3;
 const ERROR_DOMAIN_OUTPUT: u32 = 4;
+const ERROR_DOMAIN_PROCESS: u32 = 5;
 pub const ERROR_DOMAIN_RUNTIME: u32 = 6;
 const ERROR_DOMAIN_OS: u32 = 7;
 
@@ -67,6 +69,8 @@ const EVENT_EXIT: u32 = 8;
 const EVENT_CLOSE_COMPLETE: u32 = 9;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 const EVENT_MODE_CHANGED: u32 = 10;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+const EVENT_MODE_FAILED: u32 = 11;
 
 const EVENT_CLOSE_INPUT_FAILED: u32 = 1;
 const EVENT_CLOSE_OUTPUT_FAILED: u32 = 2;
@@ -545,6 +549,27 @@ unsafe fn boundary(error: *mut Error, operation: impl FnOnce() -> u32) -> u32 {
     }
 }
 
+unsafe fn write_boundary(error: *mut Error, operation: impl FnOnce() -> u32) -> u32 {
+    if !error_is_valid(error) {
+        return STATUS_INVALID_ARGUMENT;
+    }
+    match catch_unwind(AssertUnwindSafe(operation)) {
+        Ok(status) => status,
+        Err(_) => {
+            set_error(
+                error,
+                Error::value(
+                    ERROR_DOMAIN_RUNTIME,
+                    ERROR_INFRASTRUCTURE_LOST,
+                    OPERATION_WRITE,
+                    0,
+                ),
+            );
+            STATUS_INTERNAL
+        }
+    }
+}
+
 unsafe fn borrowed_bytes(view: &BytesView) -> Result<&[u8], ()> {
     let length = usize::try_from(view.length).map_err(|_| ())?;
     if length > MAX_VIEW_LENGTH || (length != 0 && view.data.is_null()) {
@@ -931,15 +956,99 @@ pub unsafe extern "C" fn ptyx_runtime_next_event(
 
 fn failure_error(operation: u32, failure: Failure) -> Error {
     let (domain, kind) = match failure.kind {
-        FailureKind::InvalidInput => (ERROR_DOMAIN_ARGUMENT, ERROR_INVALID_ARGUMENT),
+        FailureKind::InvalidArgument => (ERROR_DOMAIN_ARGUMENT, ERROR_INVALID_ARGUMENT),
         FailureKind::Backpressure => (ERROR_DOMAIN_STATE, ERROR_QUEUE_FULL),
+        FailureKind::WrongState => (ERROR_DOMAIN_STATE, ERROR_WRONG_STATE),
         FailureKind::Unsupported => (ERROR_DOMAIN_OS, ERROR_UNSUPPORTED),
-        FailureKind::NotFound | FailureKind::PermissionDenied | FailureKind::Other => {
-            (ERROR_DOMAIN_OS, ERROR_NATIVE_FAILURE)
-        }
-        FailureKind::Infrastructure => (ERROR_DOMAIN_RUNTIME, ERROR_INFRASTRUCTURE_LOST),
+        FailureKind::Closed => (ERROR_DOMAIN_STATE, ERROR_CLOSED),
+        FailureKind::NativeFailure => (ERROR_DOMAIN_OS, ERROR_NATIVE_FAILURE),
+        FailureKind::InfrastructureLost => (ERROR_DOMAIN_RUNTIME, ERROR_INFRASTRUCTURE_LOST),
+        _ => (ERROR_DOMAIN_OS, ERROR_NATIVE_FAILURE),
     };
     Error::value(domain, kind, operation, failure.native_code.unwrap_or(0))
+}
+
+fn operation_error(failure: OperationError) -> Error {
+    let operation = match failure.operation() {
+        Operation::Runtime => OPERATION_RUNTIME_SHUTDOWN,
+        Operation::Spawn => OPERATION_SPAWN,
+        Operation::Write => OPERATION_WRITE,
+        Operation::Output => OPERATION_OUTPUT,
+        Operation::Resize => OPERATION_RESIZE,
+        Operation::Terminate => OPERATION_TERMINATE,
+        Operation::Metadata => OPERATION_METADATA,
+        Operation::Close => OPERATION_CLOSE,
+        _ => OPERATION_NONE,
+    };
+    let kind = match failure.kind() {
+        FailureKind::InvalidArgument => ERROR_INVALID_ARGUMENT,
+        FailureKind::Backpressure => ERROR_QUEUE_FULL,
+        FailureKind::WrongState => ERROR_WRONG_STATE,
+        FailureKind::Unsupported => ERROR_UNSUPPORTED,
+        FailureKind::Closed => ERROR_CLOSED,
+        FailureKind::NativeFailure => ERROR_NATIVE_FAILURE,
+        FailureKind::InfrastructureLost => ERROR_INFRASTRUCTURE_LOST,
+        _ => ERROR_NATIVE_FAILURE,
+    };
+    let domain = match failure.kind() {
+        FailureKind::InvalidArgument => ERROR_DOMAIN_ARGUMENT,
+        FailureKind::Backpressure | FailureKind::WrongState | FailureKind::Closed => {
+            match failure.operation() {
+                Operation::Write => ERROR_DOMAIN_INPUT,
+                Operation::Output => ERROR_DOMAIN_OUTPUT,
+                _ => ERROR_DOMAIN_STATE,
+            }
+        }
+        FailureKind::InfrastructureLost => ERROR_DOMAIN_RUNTIME,
+        FailureKind::Unsupported | FailureKind::NativeFailure => match failure.operation() {
+            Operation::Write => ERROR_DOMAIN_INPUT,
+            Operation::Output => ERROR_DOMAIN_OUTPUT,
+            Operation::Spawn | Operation::Terminate => ERROR_DOMAIN_PROCESS,
+            _ => ERROR_DOMAIN_OS,
+        },
+        _ => ERROR_DOMAIN_OS,
+    };
+    Error::value(domain, kind, operation, failure.native_code().unwrap_or(0))
+}
+
+fn copy_write_result(result: CopyWriteResult) -> (u32, Option<Error>) {
+    match result {
+        CopyWriteResult::Accepted => (STATUS_OK, None),
+        CopyWriteResult::Backpressure => (
+            STATUS_BACKPRESSURE,
+            Some(Error::value(
+                ERROR_DOMAIN_INPUT,
+                ERROR_QUEUE_FULL,
+                OPERATION_WRITE,
+                0,
+            )),
+        ),
+        CopyWriteResult::Closed(Some(failure)) | CopyWriteResult::Infrastructure(failure) => {
+            (operation_status(failure), Some(operation_error(failure)))
+        }
+        CopyWriteResult::Closed(None) => (
+            STATUS_CLOSED,
+            Some(Error::value(
+                ERROR_DOMAIN_INPUT,
+                ERROR_CLOSED,
+                OPERATION_WRITE,
+                0,
+            )),
+        ),
+    }
+}
+
+const fn operation_status(failure: OperationError) -> u32 {
+    match failure.kind() {
+        FailureKind::InvalidArgument => STATUS_INVALID_ARGUMENT,
+        FailureKind::Backpressure => STATUS_BACKPRESSURE,
+        FailureKind::WrongState => STATUS_WRONG_STATE,
+        FailureKind::Unsupported => STATUS_UNSUPPORTED,
+        FailureKind::Closed => STATUS_CLOSED,
+        FailureKind::NativeFailure => STATUS_OS_ERROR,
+        FailureKind::InfrastructureLost => STATUS_INTERNAL,
+        _ => STATUS_INTERNAL,
+    }
 }
 
 unsafe fn populate_event(
@@ -974,28 +1083,17 @@ unsafe fn populate_event(
             event.token = state.events.insert(lease);
             runtime.event_count.fetch_add(1, Ordering::AcqRel);
         }
-        Notice::InputFailed(_) => {
+        Notice::InputFailed { failure, .. } => {
             event.kind = EVENT_INPUT_FAILED;
-            event.error =
-                Error::value(ERROR_DOMAIN_INPUT, ERROR_NATIVE_FAILURE, OPERATION_WRITE, 0);
+            event.error = operation_error(failure);
         }
-        Notice::OutputFailed(_) => {
+        Notice::OutputFailed { failure, .. } => {
             event.kind = EVENT_OUTPUT_FAILED;
-            event.error = Error::value(
-                ERROR_DOMAIN_OUTPUT,
-                ERROR_NATIVE_FAILURE,
-                OPERATION_OUTPUT,
-                0,
-            );
+            event.error = operation_error(failure);
         }
-        Notice::BrokerLost(_) => {
+        Notice::BrokerLost { failure, .. } => {
             event.kind = EVENT_INFRASTRUCTURE_FAILED;
-            event.error = Error::value(
-                ERROR_DOMAIN_RUNTIME,
-                ERROR_INFRASTRUCTURE_LOST,
-                OPERATION_OUTPUT,
-                0,
-            );
+            event.error = operation_error(failure);
         }
         Notice::OutputDone(_) => event.kind = EVENT_OUTPUT_DONE,
         Notice::Exit { status, .. } => {
@@ -1004,28 +1102,14 @@ unsafe fn populate_event(
         }
         Notice::Closed { result, .. } => {
             event.kind = EVENT_CLOSE_COMPLETE;
-            event.flags = (u32::from(result.input_failed) * EVENT_CLOSE_INPUT_FAILED)
-                | (u32::from(result.output_failed) * EVENT_CLOSE_OUTPUT_FAILED)
-                | (u32::from(result.cleanup_failed) * EVENT_CLOSE_CLEANUP_FAILED);
-            event.error = if result.cleanup_failed {
-                Error::value(
-                    ERROR_DOMAIN_RUNTIME,
-                    ERROR_INFRASTRUCTURE_LOST,
-                    OPERATION_CLOSE,
-                    0,
-                )
-            } else if result.input_failed {
-                Error::value(ERROR_DOMAIN_INPUT, ERROR_NATIVE_FAILURE, OPERATION_CLOSE, 0)
-            } else if result.output_failed {
-                Error::value(
-                    ERROR_DOMAIN_OUTPUT,
-                    ERROR_NATIVE_FAILURE,
-                    OPERATION_CLOSE,
-                    0,
-                )
-            } else {
-                Error::none()
-            };
+            event.flags = (u32::from(result.input_failure.is_some()) * EVENT_CLOSE_INPUT_FAILED)
+                | (u32::from(result.output_failure.is_some()) * EVENT_CLOSE_OUTPUT_FAILED)
+                | (u32::from(result.cleanup_failure.is_some()) * EVENT_CLOSE_CLEANUP_FAILED);
+            event.error = result
+                .cleanup_failure
+                .or(result.input_failure)
+                .or(result.output_failure)
+                .map_or_else(Error::none, operation_error);
             if let Some(entry) = session_entry(event.session) {
                 if let Ok(mut state) = entry.state.lock() {
                     *state = SessionState::Closed;
@@ -1039,6 +1123,11 @@ unsafe fn populate_event(
         Notice::ModeChanged { modes, .. } => {
             event.kind = EVENT_MODE_CHANGED;
             event.value = i64::from(mode_bits(modes));
+        }
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        Notice::ModeFailed { failure, .. } => {
+            event.kind = EVENT_MODE_FAILED;
+            event.error = operation_error(failure);
         }
         Notice::SpawnReady { .. } | Notice::SpawnFailed { .. } => {
             return STATUS_INTERNAL;
@@ -1356,7 +1445,7 @@ pub unsafe extern "C" fn ptyx_session_write(
     length: u64,
     error: *mut Error,
 ) -> u32 {
-    boundary(error, || {
+    write_boundary(error, || {
         let Ok(length) = usize::try_from(length) else {
             set_error(error, invalid_error(OPERATION_WRITE));
             return STATUS_INVALID_ARGUMENT;
@@ -1415,35 +1504,12 @@ pub unsafe extern "C" fn ptyx_session_write(
             return STATUS_OK;
         }
         let borrowed = std::slice::from_raw_parts(bytes, length);
-        match entry.runtime.engine.write_copy(engine_handle, borrowed) {
-            1 => STATUS_OK,
-            0 => {
-                set_error(
-                    error,
-                    Error::value(ERROR_DOMAIN_INPUT, ERROR_QUEUE_FULL, OPERATION_WRITE, 0),
-                );
-                STATUS_BACKPRESSURE
-            }
-            -1 => {
-                set_error(
-                    error,
-                    Error::value(ERROR_DOMAIN_INPUT, ERROR_CLOSED, OPERATION_WRITE, 0),
-                );
-                STATUS_CLOSED
-            }
-            _ => {
-                set_error(
-                    error,
-                    Error::value(
-                        ERROR_DOMAIN_RUNTIME,
-                        ERROR_INFRASTRUCTURE_LOST,
-                        OPERATION_WRITE,
-                        0,
-                    ),
-                );
-                STATUS_INTERNAL
-            }
+        let (status, failure) =
+            copy_write_result(entry.runtime.engine.write_copy(engine_handle, borrowed));
+        if let Some(failure) = failure {
+            set_error(error, failure);
         }
+        status
     })
 }
 
@@ -1496,15 +1562,15 @@ pub unsafe extern "C" fn ptyx_session_cancel_output(session: u64, error: *mut Er
             .lock()
             .unwrap_or_else(|value| value.into_inner())
         {
-            if entry.runtime.engine.cancel_output(engine_handle) {
-                *output_cancelled = true;
-                STATUS_OK
-            } else {
-                set_error(
-                    error,
-                    Error::value(ERROR_DOMAIN_STATE, ERROR_WRONG_STATE, OPERATION_OUTPUT, 0),
-                );
-                STATUS_WRONG_STATE
+            match entry.runtime.engine.cancel_output(engine_handle) {
+                Ok(()) => {
+                    *output_cancelled = true;
+                    STATUS_OK
+                }
+                Err(failure) => {
+                    set_error(error, operation_error(failure));
+                    operation_status(failure)
+                }
             }
         } else {
             set_error(
@@ -1539,17 +1605,15 @@ pub unsafe extern "C" fn ptyx_session_resize(
             Err(status) => return status,
         };
         let size = *size;
-        if entry.runtime.engine.resize(
+        match entry.runtime.engine.resize(
             engine_handle,
             [size.rows, size.columns, size.pixel_width, size.pixel_height],
         ) {
-            STATUS_OK
-        } else {
-            set_error(
-                error,
-                Error::value(ERROR_DOMAIN_OS, ERROR_NATIVE_FAILURE, OPERATION_RESIZE, 0),
-            );
-            STATUS_OS_ERROR
+            Ok(()) => STATUS_OK,
+            Err(failure) => {
+                set_error(error, operation_error(failure));
+                operation_status(failure)
+            }
         }
     })
 }
@@ -1571,21 +1635,13 @@ pub unsafe extern "C" fn ptyx_session_terminate(
             Err(status) => return status,
         };
         match entry.runtime.engine.signal(engine_handle, signal) {
-            Some(value) => {
+            Ok(value) => {
                 *delivered = u32::from(value);
                 STATUS_OK
             }
-            None => {
-                set_error(
-                    error,
-                    Error::value(
-                        ERROR_DOMAIN_OS,
-                        ERROR_NATIVE_FAILURE,
-                        OPERATION_TERMINATE,
-                        0,
-                    ),
-                );
-                STATUS_OS_ERROR
+            Err(failure) => {
+                set_error(error, operation_error(failure));
+                operation_status(failure)
             }
         }
     })
@@ -1611,8 +1667,12 @@ pub unsafe extern "C" fn ptyx_session_snapshot(
             Ok(value) => value,
             Err(status) => return status,
         };
-        let Some(value) = entry.runtime.engine.snapshot(engine_handle) else {
-            return metadata_failure(error);
+        let value = match entry.runtime.engine.snapshot(engine_handle) {
+            Ok(value) => value,
+            Err(failure) => {
+                set_error(error, operation_error(failure));
+                return operation_status(failure);
+            }
         };
         (*snapshot).flags = 0;
         (*snapshot).pid = value.pid;
@@ -1669,24 +1729,18 @@ pub unsafe extern "C" fn ptyx_session_observe_mode(
             );
             return STATUS_UNSUPPORTED;
         }
-        if entry
+        match entry
             .runtime
             .engine
             .observe_mode(engine_handle, enabled != 0)
         {
-            STATUS_OK
-        } else {
-            metadata_failure(error)
+            Ok(()) => STATUS_OK,
+            Err(failure) => {
+                set_error(error, operation_error(failure));
+                operation_status(failure)
+            }
         }
     })
-}
-
-unsafe fn metadata_failure(error: *mut Error) -> u32 {
-    set_error(
-        error,
-        Error::value(ERROR_DOMAIN_OS, ERROR_NATIVE_FAILURE, OPERATION_METADATA, 0),
-    );
-    STATUS_OS_ERROR
 }
 
 #[no_mangle]
@@ -1849,10 +1903,14 @@ pub unsafe extern "C" fn ptyx_event_release(event: *mut Event, error: *mut Error
 #[cfg(test)]
 mod tests {
     use super::{
-        active_session_for_write, decode_handle, io_error, sessions, Error, Event, Registry,
-        RuntimeOptions, SessionSnapshot, SpawnOptions, ERROR_DOMAIN_ARGUMENT,
-        ERROR_INVALID_ARGUMENT, OPERATION_SPAWN, STATUS_BACKPRESSURE, STATUS_INVALID_ARGUMENT,
+        active_session_for_write, copy_write_result, decode_handle, io_error, operation_error,
+        operation_status, sessions, write_boundary, Error, Event, Registry, RuntimeOptions,
+        SessionSnapshot, SpawnOptions, ERROR_DOMAIN_ARGUMENT, ERROR_DOMAIN_PROCESS,
+        ERROR_INVALID_ARGUMENT, ERROR_NATIVE_FAILURE, OPERATION_SPAWN, OPERATION_TERMINATE,
+        STATUS_BACKPRESSURE, STATUS_INVALID_ARGUMENT, STATUS_OK, STATUS_OS_ERROR,
     };
+    use ptyx::__private_adapter::CopyWriteResult;
+    use ptyx::{FailureKind, Operation, OperationError};
     use std::io;
     use std::mem::size_of;
 
@@ -1903,5 +1961,46 @@ mod tests {
         assert_eq!(error.domain, ERROR_DOMAIN_ARGUMENT);
         assert_eq!(error.kind, ERROR_INVALID_ARGUMENT);
         assert_eq!(error.operation, OPERATION_SPAWN);
+    }
+
+    #[test]
+    fn structured_native_failures_cross_the_c_boundary_without_loss() {
+        let failure =
+            OperationError::new(Operation::Terminate, FailureKind::NativeFailure, Some(73));
+        let error = operation_error(failure);
+
+        assert_eq!(operation_status(failure), STATUS_OS_ERROR);
+        assert_eq!(error.domain, ERROR_DOMAIN_PROCESS);
+        assert_eq!(error.kind, ERROR_NATIVE_FAILURE);
+        assert_eq!(error.operation, OPERATION_TERMINATE);
+        assert_eq!(error.native_code, 73);
+    }
+
+    #[test]
+    fn sticky_copy_write_failure_crosses_the_c_boundary_without_loss() {
+        let failure = OperationError::new(Operation::Write, FailureKind::NativeFailure, Some(32));
+
+        let (status, error) = copy_write_result(CopyWriteResult::Closed(Some(failure)));
+        let error = error.expect("failed write must populate C error");
+
+        assert_eq!(status, STATUS_OS_ERROR);
+        assert_eq!(error.kind, ERROR_NATIVE_FAILURE);
+        assert_eq!(error.native_code, 32);
+    }
+
+    #[test]
+    fn successful_write_boundary_does_not_touch_the_error_slot() {
+        let mut error = Error::value(
+            ERROR_DOMAIN_PROCESS,
+            ERROR_NATIVE_FAILURE,
+            OPERATION_TERMINATE,
+            73,
+        );
+
+        let status = unsafe { write_boundary(&mut error, || STATUS_OK) };
+
+        assert_eq!(status, STATUS_OK);
+        assert_eq!(error.operation, OPERATION_TERMINATE);
+        assert_eq!(error.native_code, 73);
     }
 }

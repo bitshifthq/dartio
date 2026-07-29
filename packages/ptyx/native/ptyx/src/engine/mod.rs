@@ -10,8 +10,23 @@ const MAX_NOTICE_GENERATION: u32 = ((i64::MAX as u64 >> 3) >> 32) as u32;
 #[derive(Debug)]
 pub(crate) enum WriteRejection {
     Backpressure(bytes::Bytes),
-    Closed(bytes::Bytes),
-    Infrastructure(bytes::Bytes),
+    Closed {
+        bytes: bytes::Bytes,
+        failure: Option<crate::error::OperationError>,
+    },
+    Infrastructure {
+        bytes: bytes::Bytes,
+        failure: crate::error::OperationError,
+    },
+}
+
+#[cfg(feature = "__private_adapter")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CopyWriteResult {
+    Accepted,
+    Backpressure,
+    Closed(Option<crate::error::OperationError>),
+    Infrastructure(crate::error::OperationError),
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -47,13 +62,13 @@ pub struct SessionSnapshot {
 mod windows;
 
 pub use completion::Completion;
+#[cfg(feature = "__private_adapter")]
+pub use event::Failure;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use event::Receiver as EventReceiver;
 #[cfg(windows)]
 pub use event::ReceiverClosed;
 pub use event::{CloseResult, Notice, SessionReceiver};
-#[cfg(feature = "__private_adapter")]
-pub use event::{Failure, FailureKind};
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use integrated::IntegratedRuntime;
 pub use spawn::BrokerSpawn;

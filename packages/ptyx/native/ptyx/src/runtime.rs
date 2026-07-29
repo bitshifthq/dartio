@@ -1,5 +1,6 @@
 use crate::error::{
-    CloseError, ControlError, MetadataError, RuntimeError, SpawnError, WriteError, WriteErrorKind,
+    CloseError, ControlError, MetadataError, OperationError, RuntimeError, SpawnError, WriteError,
+    WriteErrorKind,
 };
 use crate::event::{CloseResult, Events, TerminalMode};
 use crate::options::{SpawnOptions, SpawnParts};
@@ -268,10 +269,10 @@ impl Session {
     /// copy. The operation never waits for PTY writability or queue capacity.
     pub fn write(&self, bytes: Bytes) -> Result<(), WriteError> {
         if bytes.is_empty() {
-            return Err(WriteError::new(WriteErrorKind::Empty, bytes));
+            return Err(WriteError::new(WriteErrorKind::Empty, bytes, None));
         }
         if self.control.closing.load(Ordering::Acquire) {
-            return Err(WriteError::new(WriteErrorKind::Closed, bytes));
+            return Err(WriteError::new(WriteErrorKind::Closed, bytes, None));
         }
         match self
             .control
@@ -281,14 +282,14 @@ impl Session {
         {
             Ok(()) => Ok(()),
             Err(crate::engine::WriteRejection::Backpressure(bytes)) => {
-                Err(WriteError::new(WriteErrorKind::Backpressure, bytes))
+                Err(WriteError::new(WriteErrorKind::Backpressure, bytes, None))
             }
-            Err(crate::engine::WriteRejection::Closed(bytes)) => {
-                Err(WriteError::new(WriteErrorKind::Closed, bytes))
+            Err(crate::engine::WriteRejection::Closed { bytes, failure }) => {
+                Err(WriteError::new(WriteErrorKind::Closed, bytes, failure))
             }
-            Err(crate::engine::WriteRejection::Infrastructure(bytes)) => {
-                Err(WriteError::new(WriteErrorKind::Infrastructure, bytes))
-            }
+            Err(crate::engine::WriteRejection::Infrastructure { bytes, failure }) => Err(
+                WriteError::new(WriteErrorKind::Infrastructure, bytes, Some(failure)),
+            ),
         }
     }
 
@@ -299,10 +300,22 @@ impl Session {
             .runtime
             .native
             .snapshot(self.control.handle)
-            .ok_or(MetadataError)?;
+            .map_err(MetadataError::new)?;
         Ok(SessionSnapshot {
-            process_id: u64::try_from(snapshot.pid).map_err(|_| MetadataError)?,
-            size: Size::from_native(snapshot.size).ok_or(MetadataError)?,
+            process_id: u64::try_from(snapshot.pid).map_err(|_| {
+                MetadataError::new(OperationError::new(
+                    crate::error::Operation::Metadata,
+                    crate::error::FailureKind::NativeFailure,
+                    None,
+                ))
+            })?,
+            size: Size::from_native(snapshot.size).ok_or_else(|| {
+                MetadataError::new(OperationError::new(
+                    crate::error::Operation::Metadata,
+                    crate::error::FailureKind::NativeFailure,
+                    None,
+                ))
+            })?,
             terminal_mode: snapshot.mode.map(TerminalMode::from_engine),
             terminal_name: snapshot.tty_name.map(native_terminal_name),
         })
@@ -314,8 +327,7 @@ impl Session {
             .runtime
             .native
             .resize(self.control.handle, size.native())
-            .then_some(())
-            .ok_or_else(|| ControlError::new("resize"))
+            .map_err(ControlError::new)
     }
 
     /// Requests termination of the owned terminal job.
@@ -326,7 +338,7 @@ impl Session {
             .runtime
             .native
             .signal(self.control.handle, 15)
-            .ok_or_else(|| ControlError::new("termination"))
+            .map_err(ControlError::new)
     }
 
     /// Starts idempotent native shutdown and returns its completion.
@@ -508,21 +520,24 @@ impl SessionControl {
         self.runtime
             .native
             .cancel_output(self.handle)
-            .then(|| self.output_cancelled.store(true, Ordering::Release))
-            .ok_or_else(|| ControlError::new("output cancellation"))
+            .map(|()| self.output_cancelled.store(true, Ordering::Release))
+            .map_err(ControlError::new)
     }
 
     pub(crate) fn observe_modes(&self, observe: bool) -> Result<(), ControlError> {
         if self.closed.load(Ordering::Acquire) {
-            return (!observe)
-                .then_some(())
-                .ok_or_else(|| ControlError::new("terminal-mode observation"));
+            return (!observe).then_some(()).ok_or_else(|| {
+                ControlError::new(OperationError::new(
+                    crate::error::Operation::Metadata,
+                    crate::error::FailureKind::Closed,
+                    None,
+                ))
+            });
         }
         self.runtime
             .native
             .observe_mode(self.handle, observe)
-            .then_some(())
-            .ok_or_else(|| ControlError::new("terminal-mode observation"))
+            .map_err(ControlError::new)
     }
 }
 

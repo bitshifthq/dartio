@@ -5,6 +5,139 @@ use std::io;
 use crate::event::CloseResult;
 use bytes::Bytes;
 
+/// Stable operation associated with a native session failure.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Operation {
+    /// Native runtime construction or ownership.
+    Runtime,
+    /// Child and terminal spawn.
+    Spawn,
+    /// Terminal input delivery.
+    Write,
+    /// Terminal output delivery or cancellation.
+    Output,
+    /// Terminal resize.
+    Resize,
+    /// Child or terminal-job termination.
+    Terminate,
+    /// Atomic metadata snapshot or terminal-mode observation.
+    Metadata,
+    /// Session cleanup.
+    Close,
+}
+
+impl fmt::Display for Operation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Runtime => "runtime",
+            Self::Spawn => "spawn",
+            Self::Write => "write",
+            Self::Output => "output",
+            Self::Resize => "resize",
+            Self::Terminate => "termination",
+            Self::Metadata => "metadata",
+            Self::Close => "close",
+        })
+    }
+}
+
+/// Stable category of a native session failure.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FailureKind {
+    /// Caller input was invalid.
+    InvalidArgument,
+    /// A bounded queue could not accept the complete operation.
+    Backpressure,
+    /// The operation does not apply in the current lifecycle state.
+    WrongState,
+    /// The requested capability is unavailable.
+    Unsupported,
+    /// The session or one transport direction is terminal.
+    Closed,
+    /// An operating-system operation failed.
+    NativeFailure,
+    /// Runtime ownership or event infrastructure was lost.
+    InfrastructureLost,
+}
+
+impl fmt::Display for FailureKind {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::InvalidArgument => "invalid argument",
+            Self::Backpressure => "backpressure",
+            Self::WrongState => "wrong state",
+            Self::Unsupported => "unsupported operation",
+            Self::Closed => "closed state",
+            Self::NativeFailure => "native failure",
+            Self::InfrastructureLost => "infrastructure loss",
+        })
+    }
+}
+
+/// Allocation-free detail retained from a native session failure.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct OperationError {
+    operation: Operation,
+    kind: FailureKind,
+    native_code: Option<i32>,
+}
+
+impl OperationError {
+    /// Creates a stable failure value.
+    #[must_use]
+    pub const fn new(operation: Operation, kind: FailureKind, native_code: Option<i32>) -> Self {
+        Self {
+            operation,
+            kind,
+            native_code,
+        }
+    }
+
+    /// Operation that failed.
+    #[must_use]
+    pub const fn operation(self) -> Operation {
+        self.operation
+    }
+
+    /// Stable category of the failure.
+    #[must_use]
+    pub const fn kind(self) -> FailureKind {
+        self.kind
+    }
+
+    /// Operating-system error code captured at the failure site.
+    #[must_use]
+    pub const fn native_code(self) -> Option<i32> {
+        self.native_code
+    }
+
+    pub(crate) fn from_io(operation: Operation, error: &io::Error) -> Self {
+        let kind = match error.kind() {
+            io::ErrorKind::InvalidInput | io::ErrorKind::InvalidData => {
+                FailureKind::InvalidArgument
+            }
+            io::ErrorKind::WouldBlock => FailureKind::Backpressure,
+            io::ErrorKind::Unsupported => FailureKind::Unsupported,
+            _ => FailureKind::NativeFailure,
+        };
+        Self::new(operation, kind, error.raw_os_error())
+    }
+}
+
+impl fmt::Display for OperationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{} failed with {}", self.operation, self.kind)?;
+        if let Some(code) = self.native_code {
+            write!(formatter, " (native code {code})")?;
+        }
+        Ok(())
+    }
+}
+
+impl Error for OperationError {}
+
 /// A terminal size is outside the native PTY contract.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct InvalidSize;
@@ -135,17 +268,32 @@ impl Error for WriteErrorKind {}
 pub struct WriteError {
     kind: WriteErrorKind,
     bytes: Bytes,
+    failure: Option<OperationError>,
 }
 
 impl WriteError {
-    pub(crate) const fn new(kind: WriteErrorKind, bytes: Bytes) -> Self {
-        Self { kind, bytes }
+    pub(crate) const fn new(
+        kind: WriteErrorKind,
+        bytes: Bytes,
+        failure: Option<OperationError>,
+    ) -> Self {
+        Self {
+            kind,
+            bytes,
+            failure,
+        }
     }
 
     /// Reason the complete write was rejected.
     #[must_use]
     pub const fn kind(&self) -> WriteErrorKind {
         self.kind
+    }
+
+    /// Sticky native cause when input previously failed or infrastructure was lost.
+    #[must_use]
+    pub const fn failure(&self) -> Option<OperationError> {
+        self.failure
     }
 
     /// Recovers the buffer that was not accepted.
@@ -161,33 +309,43 @@ impl fmt::Display for WriteError {
     }
 }
 
-impl Error for WriteError {}
+impl Error for WriteError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        self.failure
+            .as_ref()
+            .map(|failure| failure as &(dyn Error + 'static))
+    }
+}
 
 /// A synchronous session control operation failed.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ControlError {
-    operation: &'static str,
+    failure: OperationError,
 }
 
 impl ControlError {
-    pub(crate) const fn new(operation: &'static str) -> Self {
-        Self { operation }
+    pub(crate) const fn new(failure: OperationError) -> Self {
+        Self { failure }
     }
 
-    /// Operation that failed.
+    /// Structured native failure.
     #[must_use]
-    pub const fn operation(&self) -> &'static str {
-        self.operation
+    pub const fn failure(&self) -> OperationError {
+        self.failure
     }
 }
 
 impl fmt::Display for ControlError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(formatter, "native {} failed", self.operation)
+        self.failure.fmt(formatter)
     }
 }
 
-impl Error for ControlError {}
+impl Error for ControlError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        Some(&self.failure)
+    }
+}
 
 /// Explicit close could not be started or observed to completion.
 #[derive(Debug)]
@@ -207,11 +365,13 @@ impl fmt::Display for CloseError {
             Self::CompletionLost => {
                 formatter.write_str("native close completion was not published")
             }
-            Self::Failed(result) => write!(
-                formatter,
-                "native close completed with failures: input={}, output={}, cleanup={}",
-                result.input_failed, result.output_failed, result.cleanup_failed
-            ),
+            Self::Failed(result) => {
+                write!(formatter, "native close completed with failures")?;
+                if let Some(failure) = result.primary_failure() {
+                    write!(formatter, ": {failure}")?;
+                }
+                Ok(())
+            }
         }
     }
 }
@@ -242,12 +402,45 @@ impl Error for RecvError {}
 
 /// Session metadata could not be captured atomically.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct MetadataError;
+pub struct MetadataError {
+    failure: OperationError,
+}
 
-impl fmt::Display for MetadataError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("native session metadata is unavailable")
+impl MetadataError {
+    pub(crate) const fn new(failure: OperationError) -> Self {
+        Self { failure }
+    }
+
+    /// Structured native failure.
+    #[must_use]
+    pub const fn failure(&self) -> OperationError {
+        self.failure
     }
 }
 
-impl Error for MetadataError {}
+impl fmt::Display for MetadataError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.failure.fmt(formatter)
+    }
+}
+
+impl Error for MetadataError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        Some(&self.failure)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{FailureKind, Operation, OperationError};
+    use std::io;
+
+    #[test]
+    fn operating_system_pipe_failure_is_not_normalized_to_clean_closure() {
+        let error = io::Error::new(io::ErrorKind::BrokenPipe, "write failed");
+
+        let failure = OperationError::from_io(Operation::Write, &error);
+
+        assert_eq!(failure.kind(), FailureKind::NativeFailure);
+    }
+}

@@ -20,7 +20,8 @@ mod runtime;
 pub mod __private_adapter {
     #[cfg(unix)]
     pub use crate::broker::broker_path;
-    pub use crate::engine::{BrokerSpawn, Failure, FailureKind, IntegratedRuntime, Notice};
+    pub use crate::engine::{BrokerSpawn, CopyWriteResult, Failure, IntegratedRuntime, Notice};
+    pub use crate::error::FailureKind;
 }
 
 /// Private entry points that let fuzz targets exercise production decoders.
@@ -34,8 +35,8 @@ pub mod __fuzzing {
 }
 
 pub use error::{
-    CloseError, ControlError, InvalidSize, MetadataError, RecvError, RuntimeError, SpawnError,
-    WriteError, WriteErrorKind,
+    CloseError, ControlError, FailureKind, InvalidSize, MetadataError, Operation, OperationError,
+    RecvError, RuntimeError, SpawnError, WriteError, WriteErrorKind,
 };
 pub use event::{CloseResult, Event, Events, ExitStatus, OutputChunk, TerminalMode};
 pub use options::{Size, SpawnOptions};

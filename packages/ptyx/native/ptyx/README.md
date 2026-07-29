@@ -41,4 +41,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 The safe Rust API does not expose reactor handles, native queues, C ABI types,
 or Dart runtime concepts. See the repository documentation for platform
-capabilities and lifecycle guarantees.
+capabilities and lifecycle guarantees. Delayed input, output, metadata,
+infrastructure, and cleanup failures retain their stable operation, category,
+and native status in `OperationError`. A rejected write also returns the exact
+unaccepted `Bytes`; after a terminal input failure it exposes the same retained
+cause. `CloseResult` preserves simultaneous input, output, and cleanup failures
+and selects cleanup, then input, then output as its diagnostic priority.

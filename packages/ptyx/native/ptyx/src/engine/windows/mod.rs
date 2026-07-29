@@ -37,12 +37,15 @@ use crate::engine::oneshot::{self, Sender as ReplySender};
 use crate::engine::session::{InputAdmission, SessionCore};
 use crate::engine::spawn::BrokerSpawn;
 #[cfg(feature = "__private_adapter")]
+use crate::engine::CopyWriteResult;
+#[cfg(feature = "__private_adapter")]
 use crate::engine::Failure;
 #[cfg(feature = "__private_adapter")]
 use crate::engine::WRITE_INFRASTRUCTURE_FAILURE;
 use crate::engine::{
     CloseResult, Completion, GenerationRegistry, Notice, SessionSnapshot, WriteRejection,
 };
+use crate::error::{FailureKind, Operation, OperationError};
 
 const BYTE_QUANTUM: usize = 64 * 1024;
 const INTERACTIVE_BATCH: usize = 256;
@@ -60,6 +63,18 @@ const NOTICE_AVAILABLE_KEY: usize = 1_usize << (usize::BITS - 1);
 const PROCESS_EXIT_KEY_TAG: usize = 1_usize << (usize::BITS - 3);
 static QUARANTINED_IO_OPERATIONS: AtomicUsize = AtomicUsize::new(0);
 static QUARANTINED_PSEUDOCONSOLES: AtomicUsize = AtomicUsize::new(0);
+
+const fn input_closed() -> OperationError {
+    OperationError::new(Operation::Write, FailureKind::Closed, None)
+}
+
+const fn infrastructure_failure(operation: Operation) -> OperationError {
+    OperationError::new(operation, FailureKind::InfrastructureLost, None)
+}
+
+fn retain_cleanup_failure(session: &mut Session, failure: OperationError) {
+    session.cleanup_failure.get_or_insert(failure);
+}
 
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct RuntimeCounters {
@@ -214,21 +229,21 @@ enum Command {
     },
     CancelOutput {
         handle: u64,
-        reply: ReplySender<bool>,
+        reply: ReplySender<Result<(), OperationError>>,
     },
     Snapshot {
         handle: u64,
-        reply: ReplySender<Option<SessionSnapshot>>,
+        reply: ReplySender<Result<SessionSnapshot, OperationError>>,
     },
     Resize {
         handle: u64,
         size: [u32; 4],
-        reply: ReplySender<bool>,
+        reply: ReplySender<Result<(), OperationError>>,
     },
     Signal {
         handle: u64,
         signal: i32,
-        reply: ReplySender<Option<bool>>,
+        reply: ReplySender<Result<bool, OperationError>>,
     },
     CloseStart {
         handle: u64,
@@ -890,14 +905,29 @@ impl IntegratedRuntime {
     pub(crate) fn write(&self, handle: u64, bytes: Bytes) -> Result<(), WriteRejection> {
         let _submission = match self.command_submission.lock() {
             Ok(submission) => submission,
-            Err(_) => return Err(WriteRejection::Infrastructure(bytes)),
+            Err(_) => {
+                return Err(WriteRejection::Infrastructure {
+                    bytes,
+                    failure: infrastructure_failure(Operation::Write),
+                });
+            }
         };
         let admission = match self.admissions.lock() {
             Ok(admissions) => match admissions.get(&handle).cloned() {
                 Some(admission) => admission,
-                None => return Err(WriteRejection::Closed(bytes)),
+                None => {
+                    return Err(WriteRejection::Closed {
+                        bytes,
+                        failure: None,
+                    });
+                }
             },
-            Err(_) => return Err(WriteRejection::Infrastructure(bytes)),
+            Err(_) => {
+                return Err(WriteRejection::Infrastructure {
+                    bytes,
+                    failure: infrastructure_failure(Operation::Write),
+                });
+            }
         };
         admit_owned_write(
             &self.commands,
@@ -909,32 +939,40 @@ impl IntegratedRuntime {
     }
 
     #[cfg(feature = "__private_adapter")]
-    pub fn write_copy(&self, handle: u64, bytes: &[u8]) -> i64 {
-        self.write_with(handle, bytes.len(), || Bytes::copy_from_slice(bytes))
-    }
-
-    #[cfg(feature = "__private_adapter")]
-    fn write_with(&self, handle: u64, length: usize, make_bytes: impl FnOnce() -> Bytes) -> i64 {
+    pub fn write_copy(&self, handle: u64, bytes: &[u8]) -> CopyWriteResult {
         let _submission = match try_command_submission(&self.command_submission) {
             Ok(submission) => submission,
-            Err(failure) => return failure,
+            Err(0) => return CopyWriteResult::Backpressure,
+            Err(_) => {
+                return CopyWriteResult::Infrastructure(infrastructure_failure(Operation::Write));
+            }
         };
         let admission = match self.admissions.try_lock() {
             Ok(admissions) => match admissions.get(&handle).cloned() {
                 Some(admission) => admission,
-                None => return -1,
+                None => return CopyWriteResult::Closed(None),
             },
-            Err(std::sync::TryLockError::WouldBlock) => return 0,
-            Err(std::sync::TryLockError::Poisoned(_)) => return WRITE_INFRASTRUCTURE_FAILURE,
+            Err(std::sync::TryLockError::WouldBlock) => return CopyWriteResult::Backpressure,
+            Err(std::sync::TryLockError::Poisoned(_)) => {
+                return CopyWriteResult::Infrastructure(infrastructure_failure(Operation::Write));
+            }
         };
-        admit_write_with(
+        let result = admit_write_with(
             &self.commands,
             || self.iocp.post_command(),
             handle,
-            length,
-            admission,
-            make_bytes,
-        )
+            bytes.len(),
+            Arc::clone(&admission),
+            || Bytes::copy_from_slice(bytes),
+        );
+        match result {
+            1 => CopyWriteResult::Accepted,
+            0 => CopyWriteResult::Backpressure,
+            -1 => {
+                CopyWriteResult::Closed(admission.state.lock().ok().and_then(|state| state.failure))
+            }
+            _ => CopyWriteResult::Infrastructure(infrastructure_failure(Operation::Write)),
+        }
     }
 
     pub fn credit_async(&self, handle: u64, bytes: usize) -> bool {
@@ -943,38 +981,64 @@ impl IntegratedRuntime {
         true
     }
 
-    pub fn cancel_output(&self, handle: u64) -> bool {
+    pub fn cancel_output(&self, handle: u64) -> Result<(), OperationError> {
         self.request_result(|reply| Command::CancelOutput { handle, reply })
-            .unwrap_or(false)
+            .unwrap_or_else(|error| {
+                Err(OperationError::new(
+                    Operation::Output,
+                    FailureKind::InfrastructureLost,
+                    error.raw_os_error(),
+                ))
+            })
     }
 
-    pub fn snapshot(&self, handle: u64) -> Option<SessionSnapshot> {
+    pub fn snapshot(&self, handle: u64) -> Result<SessionSnapshot, OperationError> {
         self.request_result(|reply| Command::Snapshot { handle, reply })
-            .ok()
-            .flatten()
+            .unwrap_or_else(|error| {
+                Err(OperationError::new(
+                    Operation::Metadata,
+                    FailureKind::InfrastructureLost,
+                    error.raw_os_error(),
+                ))
+            })
     }
 
-    pub fn resize(&self, handle: u64, size: [u32; 4]) -> bool {
+    pub fn resize(&self, handle: u64, size: [u32; 4]) -> Result<(), OperationError> {
         self.request_result(|reply| Command::Resize {
             handle,
             size,
             reply,
         })
-        .unwrap_or(false)
+        .unwrap_or_else(|error| {
+            Err(OperationError::new(
+                Operation::Resize,
+                FailureKind::InfrastructureLost,
+                error.raw_os_error(),
+            ))
+        })
     }
 
-    pub fn observe_mode(&self, _handle: u64, _observe: bool) -> bool {
-        false
+    pub fn observe_mode(&self, _handle: u64, _observe: bool) -> Result<(), OperationError> {
+        Err(OperationError::new(
+            Operation::Metadata,
+            FailureKind::Unsupported,
+            None,
+        ))
     }
 
-    pub fn signal(&self, handle: u64, signal: i32) -> Option<bool> {
+    pub fn signal(&self, handle: u64, signal: i32) -> Result<bool, OperationError> {
         self.request_result(|reply| Command::Signal {
             handle,
             signal,
             reply,
         })
-        .ok()
-        .flatten()
+        .unwrap_or_else(|error| {
+            Err(OperationError::new(
+                Operation::Terminate,
+                FailureKind::InfrastructureLost,
+                error.raw_os_error(),
+            ))
+        })
     }
 
     pub fn close_start(&self, handle: u64) -> io::Result<Completion<CloseResult>> {
@@ -1082,6 +1146,10 @@ fn admit_write_with(
         return 0;
     }
     if wake().is_err() {
+        state.open = false;
+        state
+            .failure
+            .get_or_insert(infrastructure_failure(Operation::Write));
         return WRITE_INFRASTRUCTURE_FAILURE;
     }
     let bytes = make_bytes();
@@ -1100,6 +1168,9 @@ fn admit_write_with(
             TrySendError::Full(_) => 0,
             TrySendError::Disconnected(_) => {
                 state.open = false;
+                state
+                    .failure
+                    .get_or_insert(infrastructure_failure(Operation::Write));
                 WRITE_INFRASTRUCTURE_FAILURE
             }
         };
@@ -1118,10 +1189,18 @@ fn admit_owned_write(
     let length = bytes.len();
     let mut state = match admission.state.lock() {
         Ok(state) => state,
-        Err(_) => return Err(WriteRejection::Infrastructure(bytes)),
+        Err(_) => {
+            return Err(WriteRejection::Infrastructure {
+                bytes,
+                failure: infrastructure_failure(Operation::Write),
+            });
+        }
     };
     if !state.open {
-        return Err(WriteRejection::Closed(bytes));
+        return Err(WriteRejection::Closed {
+            bytes,
+            failure: state.failure,
+        });
     }
     if length == 0
         || state.bytes.saturating_add(length) > admission.capacity
@@ -1130,7 +1209,10 @@ fn admit_owned_write(
         return Err(WriteRejection::Backpressure(bytes));
     }
     if wake().is_err() {
-        return Err(WriteRejection::Infrastructure(bytes));
+        let failure = infrastructure_failure(Operation::Write);
+        state.failure.get_or_insert(failure);
+        state.open = false;
+        return Err(WriteRejection::Infrastructure { bytes, failure });
     }
     state.bytes += length;
     state.entries += 1;
@@ -1151,7 +1233,9 @@ fn admit_owned_write(
         }
         TrySendError::Disconnected(Command::Write { bytes, .. }) => {
             state.open = false;
-            Err(WriteRejection::Infrastructure(bytes))
+            let failure = infrastructure_failure(Operation::Write);
+            state.failure.get_or_insert(failure);
+            Err(WriteRejection::Infrastructure { bytes, failure })
         }
         TrySendError::Full(_) | TrySendError::Disconnected(_) => {
             unreachable!("owned write admission submits only write commands")
@@ -1435,8 +1519,8 @@ fn process_commands(
                         session.active = true;
                         session.paused = false;
                         session.activation_deadline = None;
-                        if session.input_failure_pending {
-                            notify_input_failure(handle, session, notices, counters);
+                        if let Some(failure) = session.input_failure {
+                            notify_input_failure(handle, session, notices, counters, failure);
                         }
                         if !session.exit_notified {
                             if let Some(status) = session.exit_status {
@@ -1470,7 +1554,8 @@ fn process_commands(
                     let accepted = session.enqueue_write(bytes).is_ok();
                     if !accepted {
                         admission.release(length, 1);
-                        notify_input_failure(handle, session, notices, counters);
+                        let failure = session.input_failure.unwrap_or_else(input_closed);
+                        notify_input_failure(handle, session, notices, counters, failure);
                     }
                     accepted
                 } else {
@@ -1490,19 +1575,28 @@ fn process_commands(
                     session.clear_output();
                     session.output_deadline = None;
                     ensure_read(iocp, handle, session, notices, counters);
-                    true
+                    Ok(())
                 } else {
-                    false
+                    Err(OperationError::new(
+                        Operation::Output,
+                        FailureKind::WrongState,
+                        None,
+                    ))
                 };
                 let _ = reply.send(found);
             }
             Command::Snapshot { handle, reply } => {
-                let snapshot = sessions.get(handle).map(|session| SessionSnapshot {
-                    pid: i64::from(session.pid),
-                    size: session.size,
-                    mode: None,
-                    tty_name: None,
-                });
+                let snapshot = sessions
+                    .get(handle)
+                    .map(|session| SessionSnapshot {
+                        pid: i64::from(session.pid),
+                        size: session.size,
+                        mode: None,
+                        tty_name: None,
+                    })
+                    .ok_or_else(|| {
+                        OperationError::new(Operation::Metadata, FailureKind::WrongState, None)
+                    });
                 let _ = reply.send(snapshot);
             }
             Command::Resize {
@@ -1510,35 +1604,60 @@ fn process_commands(
                 size,
                 reply,
             } => {
-                let resized = sessions.get_mut(handle).is_some_and(|session| {
-                    let Ok(rows) = i16::try_from(size[0]) else {
-                        return false;
-                    };
-                    let Ok(columns) = i16::try_from(size[1]) else {
-                        return false;
-                    };
-                    if rows <= 0 || columns <= 0 {
-                        return false;
-                    }
-                    let Some(pseudoconsole) = session.pseudoconsole.as_ref() else {
-                        return false;
-                    };
-                    let result = unsafe {
-                        ResizePseudoConsole(
-                            pseudoconsole.raw(),
-                            windows_sys::Win32::System::Console::COORD {
-                                X: columns,
-                                Y: rows,
-                            },
-                        )
-                    };
-                    if result >= 0 {
-                        session.size = size;
-                        true
-                    } else {
-                        false
-                    }
-                });
+                let resized = sessions
+                    .get_mut(handle)
+                    .ok_or_else(|| {
+                        OperationError::new(Operation::Resize, FailureKind::WrongState, None)
+                    })
+                    .and_then(|session| {
+                        let Ok(rows) = i16::try_from(size[0]) else {
+                            return Err(OperationError::new(
+                                Operation::Resize,
+                                FailureKind::InvalidArgument,
+                                None,
+                            ));
+                        };
+                        let Ok(columns) = i16::try_from(size[1]) else {
+                            return Err(OperationError::new(
+                                Operation::Resize,
+                                FailureKind::InvalidArgument,
+                                None,
+                            ));
+                        };
+                        if rows <= 0 || columns <= 0 {
+                            return Err(OperationError::new(
+                                Operation::Resize,
+                                FailureKind::InvalidArgument,
+                                None,
+                            ));
+                        }
+                        let Some(pseudoconsole) = session.pseudoconsole.as_ref() else {
+                            return Err(OperationError::new(
+                                Operation::Resize,
+                                FailureKind::WrongState,
+                                None,
+                            ));
+                        };
+                        let result = unsafe {
+                            ResizePseudoConsole(
+                                pseudoconsole.raw(),
+                                windows_sys::Win32::System::Console::COORD {
+                                    X: columns,
+                                    Y: rows,
+                                },
+                            )
+                        };
+                        if result >= 0 {
+                            session.size = size;
+                            Ok(())
+                        } else {
+                            Err(OperationError::new(
+                                Operation::Resize,
+                                FailureKind::NativeFailure,
+                                Some(result),
+                            ))
+                        }
+                    });
                 let _ = reply.send(resized);
             }
             Command::Signal {
@@ -1546,13 +1665,31 @@ fn process_commands(
                 signal,
                 reply,
             } => {
-                let result = sessions.get(handle).map(|session| {
-                    if signal <= 0 || session.exit_status.is_some() {
-                        false
-                    } else {
-                        (unsafe { TerminateJobObject(session.job.raw(), 1) }) != 0
-                    }
-                });
+                let result = sessions
+                    .get(handle)
+                    .ok_or_else(|| {
+                        OperationError::new(Operation::Terminate, FailureKind::WrongState, None)
+                    })
+                    .and_then(|session| {
+                        if signal <= 0 {
+                            return Err(OperationError::new(
+                                Operation::Terminate,
+                                FailureKind::InvalidArgument,
+                                None,
+                            ));
+                        }
+                        if session.exit_status.is_some() {
+                            return Ok(false);
+                        }
+                        if unsafe { TerminateJobObject(session.job.raw(), 1) } != 0 {
+                            Ok(true)
+                        } else {
+                            Err(OperationError::from_io(
+                                Operation::Terminate,
+                                &io::Error::last_os_error(),
+                            ))
+                        }
+                    });
                 let _ = reply.send(result);
             }
             Command::CloseStart {
@@ -1566,7 +1703,7 @@ fn process_commands(
                         session.close_started = true;
                         session.paused = false;
                         session.forget_output();
-                        fail_input(handle, session, notices, counters);
+                        fail_input(handle, session, notices, counters, input_closed());
                         unsafe {
                             TerminateJobObject(session.job.raw(), 1);
                         }
@@ -1654,10 +1791,11 @@ fn handle_process_exit(
         let mut status = 0;
         if unsafe { GetExitCodeProcess(session.process.raw(), &mut status) } != 0 {
             session.exit_status = Some(i64::from(status));
-            fail_input(handle, session, notices, counters);
+            fail_input(handle, session, notices, counters, input_closed());
             cancel_write(session);
         } else {
-            session.cleanup_failed = true;
+            let error = io::Error::last_os_error();
+            retain_cleanup_failure(session, OperationError::from_io(Operation::Close, &error));
             notify_broker_lost(handle, session, notices, counters);
         }
     }
@@ -1708,7 +1846,9 @@ fn handle_io_completion(
                 terminal_eof = true;
             } else {
                 session.output_eof = true;
-                session.output_failed = true;
+                session
+                    .output_failure
+                    .get_or_insert_with(|| OperationError::from_io(Operation::Output, &error));
             }
         } else if transferred == 0 {
             session.output_eof = true;
@@ -1726,7 +1866,7 @@ fn handle_io_completion(
             }
         }
         if terminal_eof {
-            fail_input(handle, session, notices, counters);
+            fail_input(handle, session, notices, counters, input_closed());
             cancel_write(session);
         }
         refresh_output(handle, session, notices, counters);
@@ -1736,8 +1876,16 @@ fn handle_io_completion(
             .write
             .take()
             .expect("write completion owns operation");
-        if error.is_some() || transferred == 0 {
-            fail_input(handle, session, notices, counters);
+        if let Some(error) = error {
+            fail_input(
+                handle,
+                session,
+                notices,
+                counters,
+                OperationError::from_io(Operation::Write, &error),
+            );
+        } else if transferred == 0 {
+            fail_input(handle, session, notices, counters, input_closed());
         } else {
             let amount = transferred as usize;
             counters.write_bytes += amount as u64;
@@ -1757,7 +1905,7 @@ fn handle_io_completion(
         }
         ensure_write(iocp, handle, session, notices, counters);
     } else {
-        session.cleanup_failed = true;
+        retain_cleanup_failure(session, infrastructure_failure(Operation::Runtime));
         notify_broker_lost(handle, session, notices, counters);
     }
     if session.exit_status.is_some() {
@@ -1801,12 +1949,15 @@ fn ensure_read(
         if error != ERROR_IO_PENDING {
             if error == ERROR_BROKEN_PIPE {
                 session.output_eof = true;
-                fail_input(handle, session, notices, counters);
+                fail_input(handle, session, notices, counters, input_closed());
                 cancel_write(session);
                 refresh_output(handle, session, notices, counters);
             } else {
                 session.output_eof = true;
-                session.output_failed = true;
+                let error = io::Error::from_raw_os_error(error as i32);
+                session
+                    .output_failure
+                    .get_or_insert_with(|| OperationError::from_io(Operation::Output, &error));
             }
             return;
         }
@@ -1848,9 +1999,19 @@ fn submit_write_operation(
             operation.overlapped_mut(),
         )
     };
-    if submitted == 0 && unsafe { GetLastError() } != ERROR_IO_PENDING {
-        fail_input(handle, session, notices, counters);
-        return;
+    if submitted == 0 {
+        let error = unsafe { GetLastError() };
+        if error != ERROR_IO_PENDING {
+            let error = io::Error::from_raw_os_error(error as i32);
+            fail_input(
+                handle,
+                session,
+                notices,
+                counters,
+                OperationError::from_io(Operation::Write, &error),
+            );
+            return;
+        }
     }
     session.write = Some(operation);
 }
@@ -1884,7 +2045,7 @@ fn start_pseudoconsole_close(
     };
     let Some(permit) = session.close_permit.take() else {
         quarantine_pseudoconsole(pseudoconsole, None);
-        session.cleanup_failed = true;
+        retain_cleanup_failure(session, infrastructure_failure(Operation::Close));
         return;
     };
     let task = CloseTask {
@@ -1921,10 +2082,11 @@ fn fail_input(
     session: &mut Session,
     notices: &NoticeEmitter,
     counters: &mut RuntimeCounters,
+    failure: OperationError,
 ) {
-    let accepted_pending = session.input_bytes != 0;
+    let accepted_pending = session.input_bytes != 0 || session.admission.has_pending();
     session.input_failed = true;
-    session.admission.close();
+    session.admission.close_with_failure(failure);
     session
         .admission
         .release(session.input_bytes, session.input_entries);
@@ -1932,7 +2094,7 @@ fn fail_input(
     session.input_bytes = 0;
     session.input_entries = 0;
     if accepted_pending {
-        notify_input_failure(handle, session, notices, counters);
+        notify_input_failure(handle, session, notices, counters, failure);
     }
 }
 
@@ -1941,11 +2103,20 @@ fn notify_input_failure(
     session: &mut Session,
     notices: &NoticeEmitter,
     counters: &mut RuntimeCounters,
+    failure: OperationError,
 ) {
-    session.input_failure_pending = true;
+    session.input_failure.get_or_insert(failure);
     if session.active && !session.input_failure_notified {
         session.input_failure_notified = true;
-        send_lifecycle_notice(session, notices, Notice::InputFailed(handle), counters);
+        send_lifecycle_notice(
+            session,
+            notices,
+            Notice::InputFailed {
+                handle,
+                failure: session.input_failure.unwrap_or(failure),
+            },
+            counters,
+        );
     }
 }
 
@@ -2009,7 +2180,7 @@ fn refresh_output(
     }
     match output_terminal_notice(
         session.output_eof,
-        session.output_failed,
+        session.output_failure.is_some(),
         session.output_bytes,
         session.output_outstanding,
         session.output_done_notified,
@@ -2017,7 +2188,15 @@ fn refresh_output(
     ) {
         Some(OutputTerminalNotice::Failed) => {
             session.output_failed_notified = true;
-            send_lifecycle_notice(session, notices, Notice::OutputFailed(handle), counters);
+            let failure = session
+                .output_failure
+                .expect("failed output must retain its cause");
+            send_lifecycle_notice(
+                session,
+                notices,
+                Notice::OutputFailed { handle, failure },
+                counters,
+            );
         }
         Some(OutputTerminalNotice::Done) => {
             session.output_done_notified = true;
@@ -2062,7 +2241,7 @@ fn abandon_session(
     if !session.close_started {
         session.close_started = true;
         session.paused = false;
-        fail_input(handle, session, notices, counters);
+        fail_input(handle, session, notices, counters, input_closed());
         session.forget_output();
         unsafe {
             TerminateJobObject(session.job.raw(), 1);
@@ -2089,9 +2268,9 @@ fn reap_closed(
         let result = sessions
             .get(handle)
             .map_or_else(CloseResult::default, |session| CloseResult {
-                input_failed: session.input_failure_pending,
-                output_failed: session.output_failed,
-                cleanup_failed: session.cleanup_failed,
+                input_failure: session.input_failure,
+                output_failure: session.output_failure,
+                cleanup_failure: session.cleanup_failure,
             });
         if let Some(session) = sessions.get_mut(handle) {
             if !session.close_notified {
@@ -2212,11 +2391,11 @@ fn send_lifecycle_notice(
     counters: &mut RuntimeCounters,
 ) {
     let Some(reservation) = session.notice_reservations.pop() else {
-        session.cleanup_failed = true;
+        retain_cleanup_failure(session, infrastructure_failure(Operation::Close));
         return;
     };
     if !notices.emit(reservation, notice, counters) {
-        session.cleanup_failed = true;
+        retain_cleanup_failure(session, infrastructure_failure(Operation::Close));
     }
 }
 
@@ -2230,7 +2409,15 @@ fn notify_broker_lost(
         return;
     }
     session.broker_lost_notified = true;
-    send_lifecycle_notice(session, notices, Notice::BrokerLost(handle), counters);
+    let failure = session
+        .cleanup_failure
+        .unwrap_or_else(|| infrastructure_failure(Operation::Runtime));
+    send_lifecycle_notice(
+        session,
+        notices,
+        Notice::BrokerLost { handle, failure },
+        counters,
+    );
 }
 
 fn shutdown_all(
@@ -2400,7 +2587,7 @@ mod tests {
         )
         .expect_err("failed wake must reject the write");
 
-        let WriteRejection::Infrastructure(bytes) = rejected else {
+        let WriteRejection::Infrastructure { bytes, .. } = rejected else {
             panic!("failed wake must report infrastructure failure");
         };
         assert_eq!(bytes.as_ptr(), original_pointer);

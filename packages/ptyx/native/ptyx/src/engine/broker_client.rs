@@ -657,6 +657,7 @@ pub(crate) struct BrokerSession {
 }
 
 use crate::engine::spawn::BrokerSpawn;
+use crate::error::{Operation, OperationError};
 
 enum Request {
     Spawn {
@@ -688,7 +689,7 @@ enum Request {
     Signal {
         session: u64,
         signal: i32,
-        reply: ReplySender<Option<bool>>,
+        reply: ReplySender<Result<bool, OperationError>>,
     },
     Shutdown,
 }
@@ -831,18 +832,13 @@ impl BrokerClient {
         &self,
         session: u64,
         signal: i32,
-        reply: ReplySender<Option<bool>>,
+        reply: ReplySender<Result<bool, OperationError>>,
     ) -> io::Result<()> {
-        let failure_reply = reply.clone();
-        let result = self.send(Request::Signal {
+        self.send(Request::Signal {
             session,
             signal,
             reply,
-        });
-        if result.is_err() {
-            let _ = failure_reply.send(None);
-        }
-        result
+        })
     }
 
     fn send(&self, request: Request) -> io::Result<()> {
@@ -1172,7 +1168,10 @@ fn run_worker(
                         signal,
                         reply,
                     } => {
-                        let _ = reply.send(worker.signal(session, signal).ok());
+                        let result = worker
+                            .signal(session, signal)
+                            .map_err(|error| OperationError::from_io(Operation::Terminate, &error));
+                        let _ = reply.send(result);
                     }
                     Request::Shutdown => {
                         worker.shutdown();

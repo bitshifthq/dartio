@@ -297,7 +297,12 @@ final class _NativeSession implements Finalizable, PtySession {
   }
 
   void _nativeInputFailed(_NativeFailure failure) {
-    _inputFailure ??= _exception(failure) as PtyInputException;
+    final error = _exception(failure);
+    if (error is PtyInputException) {
+      _inputFailure ??= error;
+      return;
+    }
+    _nativeInfrastructureFailed(failure);
   }
 
   void _nativeOutputFailed(_NativeFailure failure) {
@@ -336,7 +341,7 @@ final class _NativeSession implements Finalizable, PtySession {
     }
   }
 
-  void _nativeCloseComplete(int flags, _NativeFailure? failure) {
+  void _nativeCloseComplete(int _, _NativeFailure? failure) {
     _controller.detachFinalizer(this);
     _discardPendingOutput();
     _endOutput(null, force: true);
@@ -361,10 +366,7 @@ final class _NativeSession implements Finalizable, PtySession {
       return;
     }
     if (failure != null) {
-      final error = flags & PTYX_EVENT_CLOSE_INPUT_FAILED != 0
-          ? _inputException(failure, operation: 'close')
-          : _exception(failure, operation: 'close');
-      close.completeError(error);
+      close.completeError(_exception(failure, operation: 'close'));
       return;
     }
     close.complete();
@@ -375,6 +377,14 @@ final class _NativeSession implements Finalizable, PtySession {
     if (mode != _lastMode && !_modeController.isClosed) {
       _lastMode = mode;
       _modeController.add(mode);
+    }
+  }
+
+  void _nativeModeFailed(_NativeFailure failure) {
+    if (!_modeController.isClosed) {
+      _modeController.addError(
+        _exception(failure, operation: 'modeChanges.observe'),
+      );
     }
   }
 

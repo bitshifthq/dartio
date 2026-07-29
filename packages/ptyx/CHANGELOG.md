@@ -23,7 +23,7 @@
   native status, and safe context.
 - Added shared native reactors, a hardened Unix spawn/reaping broker, and
   generation-checked session ownership.
-- Added version 0.1 of the stable C ABI, generated private Dart bindings,
+- Added version 0.2 of the stable C ABI, generated private Dart bindings,
   atomic staged-route publication, and a private native adapter with an
   isolate-exit guardian and serialized finalization; added lifecycle and
   security documentation, ABI/runtime/fault contract tests, a

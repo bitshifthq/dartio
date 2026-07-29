@@ -1,4 +1,4 @@
-use crate::error::{ControlError, RecvError};
+use crate::error::{ControlError, OperationError, RecvError};
 use crate::runtime::SessionControl;
 use bytes::Bytes;
 use futures_core::Stream;
@@ -58,28 +58,30 @@ pub enum Event {
     /// Every safely readable output byte has been delivered.
     OutputDone,
     /// Accepted input could not be written completely.
-    InputFailed,
+    InputFailed(OperationError),
     /// Native output ended with an error.
-    OutputFailed,
+    OutputFailed(OperationError),
     /// Runtime or process ownership was lost.
-    InfrastructureFailed,
+    InfrastructureFailed(OperationError),
     /// The direct child terminated.
     Exited(ExitStatus),
     /// Explicit session cleanup reached a terminal result.
     Closed(CloseResult),
     /// An observed terminal mode changed.
     ModeChanged(TerminalMode),
+    /// Native terminal-mode observation failed and stopped.
+    ModeFailed(OperationError),
 }
 
 /// Terminal result of explicit native session cleanup.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct CloseResult {
     /// Accepted input was lost before native delivery completed.
-    pub input_failed: bool,
+    pub input_failure: Option<OperationError>,
     /// Native output ended with an error.
-    pub output_failed: bool,
+    pub output_failure: Option<OperationError>,
     /// Complete native resource reclamation could not be established.
-    pub cleanup_failed: bool,
+    pub cleanup_failure: Option<OperationError>,
 }
 
 /// A zero-copy output view that retains its native output credit.
@@ -188,23 +190,39 @@ impl Events {
             crate::engine::Notice::Output { bytes, .. } => {
                 Event::Output(OutputChunk::new(bytes, Arc::clone(&self.control)))
             }
-            crate::engine::Notice::InputFailed(_) => Event::InputFailed,
-            crate::engine::Notice::OutputFailed(_) => Event::OutputFailed,
-            crate::engine::Notice::BrokerLost(_) => Event::InfrastructureFailed,
+            crate::engine::Notice::InputFailed { failure, .. } => Event::InputFailed(failure),
+            crate::engine::Notice::OutputFailed { failure, .. } => Event::OutputFailed(failure),
+            crate::engine::Notice::BrokerLost { failure, .. } => {
+                Event::InfrastructureFailed(failure)
+            }
             crate::engine::Notice::OutputDone(_) => Event::OutputDone,
             crate::engine::Notice::Exit { status, .. } => ExitStatus::from_engine(status)
                 .map(Event::Exited)
-                .unwrap_or(Event::InfrastructureFailed),
+                .unwrap_or_else(|| {
+                    Event::InfrastructureFailed(OperationError::new(
+                        crate::error::Operation::Runtime,
+                        crate::error::FailureKind::InfrastructureLost,
+                        None,
+                    ))
+                }),
             crate::engine::Notice::Closed { result, .. } => {
                 Event::Closed(CloseResult::from_engine(result))
             }
             #[cfg(feature = "__private_adapter")]
             crate::engine::Notice::SpawnReady { .. }
-            | crate::engine::Notice::SpawnFailed { .. } => Event::InfrastructureFailed,
+            | crate::engine::Notice::SpawnFailed { .. } => {
+                Event::InfrastructureFailed(OperationError::new(
+                    crate::error::Operation::Runtime,
+                    crate::error::FailureKind::InfrastructureLost,
+                    None,
+                ))
+            }
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             crate::engine::Notice::ModeChanged { modes, .. } => {
                 Event::ModeChanged(TerminalMode::from_engine(modes))
             }
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            crate::engine::Notice::ModeFailed { failure, .. } => Event::ModeFailed(failure),
         }
     }
 }
@@ -244,9 +262,9 @@ impl Drop for Events {
 impl CloseResult {
     pub(crate) const fn from_engine(result: crate::engine::CloseResult) -> Self {
         Self {
-            input_failed: result.input_failed,
-            output_failed: result.output_failed,
-            cleanup_failed: result.cleanup_failed,
+            input_failure: result.input_failure,
+            output_failure: result.output_failure,
+            cleanup_failure: result.cleanup_failure,
         }
     }
 
@@ -254,6 +272,24 @@ impl CloseResult {
     /// failure.
     #[must_use]
     pub const fn is_success(self) -> bool {
-        !self.input_failed && !self.output_failed && !self.cleanup_failed
+        self.input_failure.is_none()
+            && self.output_failure.is_none()
+            && self.cleanup_failure.is_none()
+    }
+
+    /// Highest-priority retained failure.
+    ///
+    /// Cleanup uncertainty takes precedence over lost input, which takes
+    /// precedence over an output failure. Every individual failure remains
+    /// available in its direction-specific field.
+    #[must_use]
+    pub const fn primary_failure(self) -> Option<OperationError> {
+        if self.cleanup_failure.is_some() {
+            self.cleanup_failure
+        } else if self.input_failure.is_some() {
+            self.input_failure
+        } else {
+            self.output_failure
+        }
     }
 }

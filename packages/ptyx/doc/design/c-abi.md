@@ -160,6 +160,11 @@ Non-owning terminal events may still require release so callers can use one
 uniform rule. Releasing a zero-initialized event is allowed. Copying an owning
 event structure and releasing both copies is invalid.
 
+Terminal-mode polling emits `PTYX_EVENT_MODE_FAILED` with the captured
+metadata operation and native status, then stops that observation. It does not
+misreport an operating-system failure as an unsupported capability or fail the
+unrelated input, output, or process lifetime.
+
 ## Errors
 
 Errors are values containing:
@@ -169,6 +174,12 @@ Errors are values containing:
 - the failed operation;
 - an optional native or OS code;
 - bounded non-secret numeric context.
+
+Delayed failures retain the same value through native state, events, close,
+and binding translation. A close-complete event uses flags to report every
+co-occurring direction and carries the primary error in fixed priority:
+cleanup, then accepted input, then output. Flags never override the operation
+or domain carried by that error.
 
 An error contains no borrowed message pointer. `ptyx_error_format` writes an
 actionable description into caller-owned storage and reports the required

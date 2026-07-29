@@ -106,15 +106,20 @@ final class _NativeRuntime implements Finalizable {
   static final _sessionFinalizer = NativeFinalizer(
     Native.addressOf<NativeFinalizerFunction>(ptyd_session_finalize),
   );
+  static final _allocationFinalizer = NativeFinalizer(calloc.nativeFree);
 
   static final Future<_NativeRuntime> instance = _create();
 
   final RawReceivePort _port;
   final int _adapter;
   final int capabilityBits;
+  final Pointer<ptyx_error_t> _writeError;
   final Map<int, _PendingSpawn> _pendingSpawns = {};
   final Map<int, WeakReference<_NativeSession>> _sessions = {};
-  _NativeRuntime._(this._port, this._adapter, this.capabilityBits) {
+  _NativeRuntime._(this._port, this._adapter, this.capabilityBits)
+    : _writeError = calloc<ptyx_error_t>() {
+    _writeError.ref.struct_size = sizeOf<ptyx_error_t>();
+    _allocationFinalizer.attach(this, _writeError.cast(), detach: this);
     _adapterFinalizer.attach(
       this,
       Pointer<Void>.fromAddress(_adapter),
@@ -307,10 +312,10 @@ final class _NativeRuntime implements Finalizable {
       session,
       data.address,
       data.length,
-      nullptr,
+      _writeError,
     );
     if (status != ptyx_status.PTYX_STATUS_OK) {
-      throw _writeFailure(status);
+      throw _failure(status, _writeError);
     }
   }
 
@@ -542,6 +547,8 @@ final class _NativeRuntime implements Finalizable {
         _updateLiveness();
       case ptyx_event_kind.PTYX_EVENT_MODE_CHANGED:
         target._nativeModeChanged(value);
+      case ptyx_event_kind.PTYX_EVENT_MODE_FAILED:
+        target._nativeModeFailed(failure!);
     }
   }
 
@@ -574,42 +581,6 @@ final class _NativeRuntime implements Finalizable {
       nativeCode: value.native_code,
       flags: value.flags,
       message: _formatError(error),
-    );
-  }
-
-  static _NativeFailure _writeFailure(int status) {
-    final (domain, kind, message) = switch (status) {
-      ptyx_status.PTYX_STATUS_BACKPRESSURE => (
-        ptyx_error_domain.PTYX_ERROR_DOMAIN_INPUT,
-        ptyx_error_kind.PTYX_ERROR_QUEUE_FULL,
-        'bounded native input admission is temporarily unavailable',
-      ),
-      ptyx_status.PTYX_STATUS_INVALID_ARGUMENT => (
-        ptyx_error_domain.PTYX_ERROR_DOMAIN_ARGUMENT,
-        ptyx_error_kind.PTYX_ERROR_INVALID_ARGUMENT,
-        'native write arguments are invalid',
-      ),
-      ptyx_status.PTYX_STATUS_CLOSED ||
-      ptyx_status.PTYX_STATUS_STALE_HANDLE ||
-      ptyx_status.PTYX_STATUS_WRONG_STATE => (
-        ptyx_error_domain.PTYX_ERROR_DOMAIN_INPUT,
-        ptyx_error_kind.PTYX_ERROR_CLOSED,
-        'session can no longer accept input',
-      ),
-      _ => (
-        ptyx_error_domain.PTYX_ERROR_DOMAIN_RUNTIME,
-        ptyx_error_kind.PTYX_ERROR_INFRASTRUCTURE_LOST,
-        'native runtime infrastructure was lost',
-      ),
-    };
-    return _NativeFailure(
-      status: status,
-      domain: domain,
-      kind: kind,
-      operation: ptyx_operation.PTYX_OPERATION_WRITE,
-      nativeCode: 0,
-      flags: 0,
-      message: message,
     );
   }
 

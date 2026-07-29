@@ -224,11 +224,12 @@ fn run_input_round_trip(
             Event::Output(chunk) => output.extend_from_slice(&chunk),
             Event::OutputDone => output_done = true,
             Event::Exited(_) => exited = true,
-            Event::InputFailed
-            | Event::OutputFailed
-            | Event::InfrastructureFailed
+            Event::InputFailed(_)
+            | Event::OutputFailed(_)
+            | Event::InfrastructureFailed(_)
             | Event::Closed(_)
-            | Event::ModeChanged(_) => {
+            | Event::ModeChanged(_)
+            | Event::ModeFailed(_) => {
                 return Err(
                     std::io::Error::other("PTY session reported a terminal I/O failure").into(),
                 );
@@ -263,7 +264,7 @@ fn close_command_with_input(command: &str, timeout: Duration, input: Option<Byte
     {
         match events.recv().expect("receive readiness output") {
             Event::Output(chunk) => ready.extend_from_slice(&chunk),
-            Event::InputFailed | Event::OutputFailed | Event::InfrastructureFailed => {
+            Event::InputFailed(_) | Event::OutputFailed(_) | Event::InfrastructureFailed(_) => {
                 panic!("PTY failed before close")
             }
             _ => {}

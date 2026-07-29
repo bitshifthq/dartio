@@ -514,7 +514,9 @@ external int ptyx_session_terminate(
 /// @param[in] session Live session handle.
 /// @param[in] bytes Input bytes. May be NULL only when length is zero.
 /// @param[in] length Number of input bytes.
-/// @param[out] error Optional initialized error destination.
+/// @param[in,out] error Optional initialized error destination. Receives a
+/// value on failure and remains unchanged on success so the input hot path
+/// performs no error-structure stores.
 /// @return PTYX_STATUS_OK after bounded native admission,
 /// PTYX_STATUS_BACKPRESSURE when bounded admission is temporarily unavailable
 /// because of capacity, entry, channel, or concurrent-admission contention, or
@@ -543,11 +545,11 @@ external int ptyx_session_write(
 
 const int PTYD_INVALID_ADAPTER = 0;
 
-const int PTYX_ABI_VERSION = 1;
+const int PTYX_ABI_VERSION = 2;
 
 const int PTYX_ABI_VERSION_MAJOR = 0;
 
-const int PTYX_ABI_VERSION_MINOR = 1;
+const int PTYX_ABI_VERSION_MINOR = 2;
 
 const int PTYX_CAPABILITY_CONPTY = 8;
 
@@ -718,6 +720,7 @@ typedef ptyx_error_t = ptyx_error;
 /// - PTYX_EVENT_CLOSE_COMPLETE carries PTYX_EVENT_CLOSE_* bits in flags and
 /// the highest-priority retained failure in error.
 /// - PTYX_EVENT_MODE_CHANGED carries PTYX_MODE_* bits in value.
+/// - PTYX_EVENT_MODE_FAILED carries error.
 ///
 /// Every event identifies its session. Only PTYX_EVENT_OUTPUT has a nonzero
 /// token. Its data remains valid until release.
@@ -799,6 +802,9 @@ sealed class ptyx_event_kind {
 
   /// An observed terminal input mode changed.
   static const PTYX_EVENT_MODE_CHANGED = 10;
+
+  /// Native terminal-mode observation failed and stopped.
+  static const PTYX_EVENT_MODE_FAILED = 11;
 
   /// Reserved value that fixes the public enum representation at 32 bits.
   static const PTYX_EVENT_KIND_ENUM_FORCE_32_BIT = 2147483647;

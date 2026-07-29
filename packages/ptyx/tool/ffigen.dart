@@ -43,7 +43,7 @@ FfiGenerator _generator() => FfiGenerator(
         header.path == 'native/include/ptyx/ptyx.h' ||
         header.path.endsWith('/native/dart/include/ptyx_dart.h') ||
         header.path == 'native/dart/include/ptyx_dart.h',
-    compilerOptions: const ['-Inative/include', '-Inative/dart/include'],
+    compilerOptions: _compilerOptions(),
   ),
   functions: Functions(
     include: (declaration) =>
@@ -86,11 +86,7 @@ FfiGenerator _testGenerator() => FfiGenerator(
     include: (header) =>
         header.path.endsWith('/native/dart/include/ptyx_dart.h') ||
         header.path == 'native/dart/include/ptyx_dart.h',
-    compilerOptions: const [
-      '-Inative/include',
-      '-Inative/dart/include',
-      '-DPTYX_TEST_CONTROLS',
-    ],
+    compilerOptions: [..._compilerOptions(), '-DPTYX_TEST_CONTROLS'],
   ),
   functions: Functions(
     include: (declaration) => declaration.originalName.startsWith('ptyd_test_'),
@@ -102,5 +98,24 @@ FfiGenerator _testGenerator() => FfiGenerator(
   globals: const Globals(include: _exclude),
   macros: const Macros(include: _exclude),
 );
+
+List<String> _compilerOptions() {
+  final options = <String>['-Inative/include', '-Inative/dart/include'];
+  if (!Platform.isMacOS) {
+    return options;
+  }
+  final configured = Platform.environment['SDKROOT'];
+  if (configured != null && configured.isNotEmpty) {
+    return [...options, '-isysroot', configured];
+  }
+  final result = Process.runSync('xcrun', ['--show-sdk-path']);
+  if (result.exitCode == 0) {
+    final sdk = (result.stdout as String).trim();
+    if (sdk.isNotEmpty) {
+      return [...options, '-isysroot', sdk];
+    }
+  }
+  return options;
+}
 
 bool _exclude(Declaration _) => false;

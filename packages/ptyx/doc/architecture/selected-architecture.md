@@ -89,7 +89,7 @@ impl Session {
 impl Events {
     pub fn recv(&mut self) -> Result<Event, RecvError>;
     pub fn try_recv(&mut self) -> Result<Option<Event>, RecvError>;
-    pub fn cancel_output(&mut self) -> Result<(), SessionError>;
+    pub fn cancel_output(&mut self) -> Result<(), ControlError>;
 }
 ```
 
@@ -107,6 +107,9 @@ ownership of those bytes through `WriteError`. The public API has no
 credit. `Session` is safe to share between threads. `Events` has one logical
 consumer. Dropping a live session requests nonblocking abandonment; explicit
 `close` is required to observe accepted-input and cleanup failures.
+All delayed and synchronous native failures use one allocation-free
+`OperationError` value. Close retains simultaneous cleanup, input, and output
+failures instead of collapsing them to a boolean.
 
 No public backend, executor, reactor, or platform strategy traits are exposed.
 The package supports one measured native strategy per target.

@@ -9,16 +9,8 @@ use bytes::Bytes;
 use std::io;
 
 #[cfg(feature = "__private_adapter")]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum FailureKind {
-    InvalidInput,
-    Backpressure,
-    Unsupported,
-    NotFound,
-    PermissionDenied,
-    Infrastructure,
-    Other,
-}
+use crate::error::FailureKind;
+use crate::error::OperationError;
 
 #[cfg(feature = "__private_adapter")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -31,15 +23,15 @@ pub struct Failure {
 impl From<&io::Error> for Failure {
     fn from(error: &io::Error) -> Self {
         let kind = match error.kind() {
-            io::ErrorKind::InvalidInput | io::ErrorKind::InvalidData => FailureKind::InvalidInput,
+            io::ErrorKind::InvalidInput | io::ErrorKind::InvalidData => {
+                FailureKind::InvalidArgument
+            }
             io::ErrorKind::WouldBlock => FailureKind::Backpressure,
             io::ErrorKind::Unsupported => FailureKind::Unsupported,
-            io::ErrorKind::NotFound => FailureKind::NotFound,
-            io::ErrorKind::PermissionDenied => FailureKind::PermissionDenied,
             io::ErrorKind::BrokenPipe | io::ErrorKind::ConnectionAborted => {
-                FailureKind::Infrastructure
+                FailureKind::InfrastructureLost
             }
-            _ => FailureKind::Other,
+            _ => FailureKind::NativeFailure,
         };
         Self {
             kind,
@@ -50,9 +42,9 @@ impl From<&io::Error> for Failure {
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct CloseResult {
-    pub input_failed: bool,
-    pub output_failed: bool,
-    pub cleanup_failed: bool,
+    pub input_failure: Option<OperationError>,
+    pub output_failure: Option<OperationError>,
+    pub cleanup_failure: Option<OperationError>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -61,9 +53,18 @@ pub enum Notice {
         handle: u64,
         bytes: Bytes,
     },
-    InputFailed(u64),
-    OutputFailed(u64),
-    BrokerLost(u64),
+    InputFailed {
+        handle: u64,
+        failure: OperationError,
+    },
+    OutputFailed {
+        handle: u64,
+        failure: OperationError,
+    },
+    BrokerLost {
+        handle: u64,
+        failure: OperationError,
+    },
     OutputDone(u64),
     Exit {
         handle: u64,
@@ -88,15 +89,20 @@ pub enum Notice {
         handle: u64,
         modes: [bool; 3],
     },
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    ModeFailed {
+        handle: u64,
+        failure: OperationError,
+    },
 }
 
 impl Notice {
     pub fn handle(&self) -> u64 {
         match self {
             Self::Output { handle, .. }
-            | Self::InputFailed(handle)
-            | Self::OutputFailed(handle)
-            | Self::BrokerLost(handle)
+            | Self::InputFailed { handle, .. }
+            | Self::OutputFailed { handle, .. }
+            | Self::BrokerLost { handle, .. }
             | Self::OutputDone(handle)
             | Self::Closed { handle, .. } => *handle,
             Self::Exit { handle, .. } => *handle,
@@ -105,7 +111,7 @@ impl Notice {
             #[cfg(feature = "__private_adapter")]
             Self::SpawnFailed { request, .. } => *request,
             #[cfg(any(target_os = "linux", target_os = "macos"))]
-            Self::ModeChanged { handle, .. } => *handle,
+            Self::ModeChanged { handle, .. } | Self::ModeFailed { handle, .. } => *handle,
         }
     }
 }
