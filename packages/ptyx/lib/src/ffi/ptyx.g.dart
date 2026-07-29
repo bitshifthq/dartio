@@ -436,9 +436,9 @@ external int ptyx_session_resize(
 /// @param[out] error Optional initialized error destination.
 /// @return PTYX_STATUS_OK, PTYX_STATUS_BUFFER_TOO_SMALL, or a typed failure.
 ///
-/// PTYX_SNAPSHOT_HAS_MODE makes modes valid, with canonical=1, echo=2, and
-/// signals=4 bits. PTYX_SNAPSHOT_HAS_TTY_NAME makes the terminal-name fields
-/// valid. A second call after a size query is a new atomic snapshot.
+/// PTYX_SNAPSHOT_HAS_MODE makes PTYX_MODE_* bits valid.
+/// PTYX_SNAPSHOT_HAS_TTY_NAME makes the terminal-name fields valid. A second
+/// call after a size query is a new atomic snapshot.
 @ffi.Native<
   ffi.UnsignedInt Function(
     ptyx_session_t,
@@ -570,6 +570,12 @@ const int PTYX_INVALID_EVENT_TOKEN = 0;
 const int PTYX_INVALID_RUNTIME = 0;
 
 const int PTYX_INVALID_SESSION = 0;
+
+const int PTYX_MODE_CANONICAL = 1;
+
+const int PTYX_MODE_ECHO = 2;
+
+const int PTYX_MODE_SIGNALS = 4;
 
 const int PTYX_SNAPSHOT_HAS_MODE = 1;
 
@@ -711,8 +717,7 @@ typedef ptyx_error_t = ptyx_error;
 /// - PTYX_EVENT_EXIT carries the signed platform exit status in value.
 /// - PTYX_EVENT_CLOSE_COMPLETE carries PTYX_EVENT_CLOSE_* bits in flags and
 /// the highest-priority retained failure in error.
-/// - PTYX_EVENT_MODE_CHANGED carries canonical=1, echo=2, and signals=4 bits
-/// in value.
+/// - PTYX_EVENT_MODE_CHANGED carries PTYX_MODE_* bits in value.
 ///
 /// Every event identifies its session. Only PTYX_EVENT_OUTPUT has a nonzero
 /// token. Its data remains valid until release.
@@ -903,7 +908,7 @@ final class ptyx_session_snapshot$1 extends ffi.Struct {
   /// < Reactor-atomic terminal size.
   external ptyx_size_t size;
 
-  /// < Canonical=1, echo=2, signals=4.
+  /// < PTYX_MODE_* bits.
   @ffi.Uint32()
   external int modes;
 

@@ -30,6 +30,10 @@ _Static_assert(PTYX_OPERATION_ENUM_FORCE_32_BIT == INT32_MAX,
                "operation enum does not force 32-bit storage");
 _Static_assert(PTYX_EVENT_KIND_ENUM_FORCE_32_BIT == INT32_MAX,
                "event kind enum does not force 32-bit storage");
+_Static_assert(PTYX_MODE_CANONICAL == UINT32_C(1),
+               "canonical mode bit changed");
+_Static_assert(PTYX_MODE_ECHO == UINT32_C(2), "echo mode bit changed");
+_Static_assert(PTYX_MODE_SIGNALS == UINT32_C(4), "signal mode bit changed");
 _Static_assert(sizeof(ptyx_size_t) == 16, "size layout changed");
 _Static_assert(sizeof(ptyx_error_t) == 64, "error layout changed");
 _Static_assert(sizeof(ptyx_runtime_options_t) == 56,

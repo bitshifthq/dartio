@@ -526,9 +526,9 @@ final class _NativeSession implements Finalizable, PtySession {
   }
 
   static PtyTermMode _mode(int bits) => PtyTermMode(
-    canonical: bits & 1 != 0,
-    echo: bits & 2 != 0,
-    signals: bits & 4 != 0,
+    canonical: bits & PTYX_MODE_CANONICAL != 0,
+    echo: bits & PTYX_MODE_ECHO != 0,
+    signals: bits & PTYX_MODE_SIGNALS != 0,
   );
 
   PtyException _operationFailure(

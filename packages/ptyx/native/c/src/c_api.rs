@@ -71,6 +71,15 @@ const EVENT_MODE_CHANGED: u32 = 10;
 const EVENT_CLOSE_INPUT_FAILED: u32 = 1;
 const EVENT_CLOSE_OUTPUT_FAILED: u32 = 2;
 const EVENT_CLOSE_CLEANUP_FAILED: u32 = 4;
+const MODE_CANONICAL: u32 = 1;
+const MODE_ECHO: u32 = 2;
+const MODE_SIGNALS: u32 = 4;
+
+fn mode_bits(modes: [bool; 3]) -> u32 {
+    (u32::from(modes[0]) * MODE_CANONICAL)
+        | (u32::from(modes[1]) * MODE_ECHO)
+        | (u32::from(modes[2]) * MODE_SIGNALS)
+}
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 const CAPABILITY_SIGNALS: u32 = 1;
@@ -1029,8 +1038,7 @@ unsafe fn populate_event(
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         Notice::ModeChanged { modes, .. } => {
             event.kind = EVENT_MODE_CHANGED;
-            event.value =
-                i64::from(modes[0]) | (i64::from(modes[1]) << 1) | (i64::from(modes[2]) << 2);
+            event.value = i64::from(mode_bits(modes));
         }
         Notice::SpawnReady { .. } | Notice::SpawnFailed { .. } => {
             return STATUS_INTERNAL;
@@ -1617,8 +1625,7 @@ pub unsafe extern "C" fn ptyx_session_snapshot(
         (*snapshot).modes = 0;
         if let Some(modes) = value.mode {
             (*snapshot).flags |= SNAPSHOT_HAS_MODE;
-            (*snapshot).modes =
-                u32::from(modes[0]) | (u32::from(modes[1]) << 1) | (u32::from(modes[2]) << 2);
+            (*snapshot).modes = mode_bits(modes);
         }
         (*snapshot).tty_name_required = 0;
         let Some(name) = value.tty_name else {

@@ -367,6 +367,12 @@ ptyx_runtime_release(ptyx_runtime_t *runtime, ptyx_error_t *error);
 #define PTYX_SNAPSHOT_HAS_MODE UINT32_C(1)
 /** Snapshot contains a terminal name. */
 #define PTYX_SNAPSHOT_HAS_TTY_NAME UINT32_C(2)
+/** Terminal input uses canonical line buffering. */
+#define PTYX_MODE_CANONICAL UINT32_C(1)
+/** Terminal input is echoed. */
+#define PTYX_MODE_ECHO UINT32_C(2)
+/** Terminal signal-character processing is enabled. */
+#define PTYX_MODE_SIGNALS UINT32_C(4)
 
 /** @brief PTY size in cells and optional pixels. */
 typedef struct ptyx_size {
@@ -418,7 +424,7 @@ typedef struct ptyx_session_snapshot {
   uint32_t flags;       /**< PTYX_SNAPSHOT_* result bits. */
   int64_t pid;          /**< Direct child process ID, or -1. */
   ptyx_size_t size;     /**< Reactor-atomic terminal size. */
-  uint32_t modes;       /**< Canonical=1, echo=2, signals=4. */
+  uint32_t modes;       /**< PTYX_MODE_* bits. */
   uint32_t reserved0;   /**< Must be zero. */
   uint8_t *tty_name;    /**< Optional caller-owned terminal-name storage. */
   uint64_t tty_name_capacity; /**< Writable bytes at tty_name. */
@@ -525,9 +531,9 @@ ptyx_session_terminate(ptyx_session_t session, int32_t signal,
  * @param[out] error Optional initialized error destination.
  * @return PTYX_STATUS_OK, PTYX_STATUS_BUFFER_TOO_SMALL, or a typed failure.
  *
- * PTYX_SNAPSHOT_HAS_MODE makes modes valid, with canonical=1, echo=2, and
- * signals=4 bits. PTYX_SNAPSHOT_HAS_TTY_NAME makes the terminal-name fields
- * valid. A second call after a size query is a new atomic snapshot.
+ * PTYX_SNAPSHOT_HAS_MODE makes PTYX_MODE_* bits valid.
+ * PTYX_SNAPSHOT_HAS_TTY_NAME makes the terminal-name fields valid. A second
+ * call after a size query is a new atomic snapshot.
  */
 PTYX_EXPORT ptyx_status_t PTYX_CALL
 ptyx_session_snapshot(ptyx_session_t session, ptyx_session_snapshot_t *snapshot,
@@ -629,8 +635,7 @@ typedef enum ptyx_event_kind {
  * - PTYX_EVENT_EXIT carries the signed platform exit status in value.
  * - PTYX_EVENT_CLOSE_COMPLETE carries PTYX_EVENT_CLOSE_* bits in flags and
  *   the highest-priority retained failure in error.
- * - PTYX_EVENT_MODE_CHANGED carries canonical=1, echo=2, and signals=4 bits
- *   in value.
+ * - PTYX_EVENT_MODE_CHANGED carries PTYX_MODE_* bits in value.
  *
  * Every event identifies its session. Only PTYX_EVENT_OUTPUT has a nonzero
  * token. Its data remains valid until release.

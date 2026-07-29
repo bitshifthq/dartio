@@ -72,6 +72,11 @@ so an unknown foreign value never creates an invalid Rust enum.
 Bitwise domains do not use enum-typed storage. Named constants describe their
 bits, while ABI fields and parameters remain `uint32_t`.
 
+Terminal-mode snapshots and events use the `PTYX_MODE_*` bit constants. The
+mask remains `uint32_t` because modes are independent, composable properties,
+not one closed choice. Unknown mode bits are ignored so compatible minor
+releases can report additional properties.
+
 The ABI does not use `bool`, `size_t`, compiler bitfields, flexible array
 members, Rust layout, or platform-dependent handle types in public
 structures.
