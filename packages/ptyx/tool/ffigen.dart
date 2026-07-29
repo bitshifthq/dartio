@@ -34,24 +34,33 @@ FfiGenerator _generator() => FfiGenerator(
     style: const NativeExternalBindings(assetId: 'package:ptyx/ptyx.dart'),
   ),
   headers: Headers(
-    entryPoints: [Uri.file('include/ptyx.h'), Uri.file('include/ptyx_dart.h')],
+    entryPoints: [
+      Uri.file('native/include/ptyx/ptyx.h'),
+      Uri.file('native/dart/include/ptyx_dart.h'),
+    ],
     include: (header) =>
-        header.path.endsWith('/include/ptyx.h') ||
-        header.path == 'include/ptyx.h' ||
-        header.path.endsWith('/include/ptyx_dart.h') ||
-        header.path == 'include/ptyx_dart.h',
-    compilerOptions: const ['-Iinclude'],
+        header.path.endsWith('/native/include/ptyx/ptyx.h') ||
+        header.path == 'native/include/ptyx/ptyx.h' ||
+        header.path.endsWith('/native/dart/include/ptyx_dart.h') ||
+        header.path == 'native/dart/include/ptyx_dart.h',
+    compilerOptions: const ['-Inative/include', '-Inative/dart/include'],
   ),
   functions: Functions(
     include: (declaration) =>
         (declaration.originalName.startsWith('ptyx_') ||
             declaration.originalName.startsWith('ptyd_')) &&
         !declaration.originalName.startsWith('ptyd_test_'),
+    // The private Dart wrapper rejects buffers above 1 MiB before this call.
+    // Native admission is nonblocking and copies at most that proven bound.
     isLeaf: (declaration) => declaration.originalName == 'ptyx_session_write',
   ),
   structs: const Structs(include: _includeType),
   unions: const Unions(include: _exclude),
-  enums: const Enums(include: _exclude),
+  enums: Enums(
+    include: _includeType,
+    style: (_, _) => EnumStyle.intConstants,
+    silenceWarning: true,
+  ),
   typedefs: const Typedefs(include: _includeType),
   globals: const Globals(include: _exclude),
   macros: Macros(
@@ -73,11 +82,15 @@ FfiGenerator _testGenerator() => FfiGenerator(
     style: const NativeExternalBindings(assetId: 'package:ptyx/ptyx.dart'),
   ),
   headers: Headers(
-    entryPoints: [Uri.file('include/ptyx_dart.h')],
+    entryPoints: [Uri.file('native/dart/include/ptyx_dart.h')],
     include: (header) =>
-        header.path.endsWith('/include/ptyx_dart.h') ||
-        header.path == 'include/ptyx_dart.h',
-    compilerOptions: const ['-Iinclude', '-DPTYX_TEST_CONTROLS'],
+        header.path.endsWith('/native/dart/include/ptyx_dart.h') ||
+        header.path == 'native/dart/include/ptyx_dart.h',
+    compilerOptions: const [
+      '-Inative/include',
+      '-Inative/dart/include',
+      '-DPTYX_TEST_CONTROLS',
+    ],
   ),
   functions: Functions(
     include: (declaration) => declaration.originalName.startsWith('ptyd_test_'),

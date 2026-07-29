@@ -8,6 +8,24 @@ library;
 
 import 'dart:ffi' as ffi;
 
+/// Returns the number of live Dart adapters in this process.
+///
+/// @return Live adapter count, or UINT32_MAX when the registry is unavailable.
+@ffi.Native<ffi.Uint32 Function()>()
+external int ptyd_test_adapter_count();
+
+/// Reports whether the diagnostic runtime-attachment delay is active.
+///
+/// @return One while attachment is delayed; otherwise zero.
+@ffi.Native<ffi.Uint32 Function()>()
+external int ptyd_test_attach_delay_active();
+
+/// Delays the next runtime attachment in diagnostic builds.
+///
+/// @param[in] milliseconds Delay duration.
+@ffi.Native<ffi.Void Function(ffi.Uint64)>()
+external void ptyd_test_delay_next_attach(int milliseconds);
+
 /// Delays the next spawn worker in diagnostic builds.
 ///
 /// @param[in] milliseconds Delay duration.

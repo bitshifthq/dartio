@@ -11,8 +11,9 @@ The ABI exposes session operations and one blocking event consumer. It does
 not expose reactor commands, queue internals, operating-system handles,
 platform driver types, Dart ports, or test controls.
 
-`include/ptyx.h` is authoritative. Generated bindings and ABI tests derive
-from that header.
+`native/include/ptyx/ptyx.h` is authoritative. Generated bindings and ABI
+tests derive from that header. The private Dart notification header lives at
+`native/dart/include/ptyx_dart.h` and is not installed as part of the C SDK.
 
 ## Versioning
 
@@ -29,6 +30,13 @@ compatibility shim. Once 1.0 is declared:
 - reserved fields remain zero;
 - symbol removal or ownership changes require a new major version.
 
+ABI 0 currently requires each caller-sized structure to contain the complete
+layout for the exact packed ABI version. `struct_size` detects incompatible or
+truncated storage; it does not yet provide old-prefix compatibility. Bumping
+the ABI major to 1 is gated on fieldwise bounded reads/writes plus
+old-caller/new-library conformance tests. This prevents the versioning policy
+from promising struct growth before the implementation can honor it.
+
 The exported-symbol allowlist is tested for each produced library.
 
 ## Types and layout
@@ -36,12 +44,36 @@ The exported-symbol allowlist is tested for each produced library.
 The ABI uses:
 
 - `uint64_t` generation-tagged runtime and session identities;
-- fixed-width integer status, kind, flag, length, and code fields;
+- named C enums for single-choice status, domain, kind, operation, and event
+  values;
+- fixed-width integer flag, capability, length, handle, code, and reserved
+  fields;
 - caller-sized structures with fixed alignment;
 - explicit calling and symbol visibility macros.
 
-It does not use C enum layout, `bool`, `size_t`, compiler bitfields, flexible
-array members, Rust layout, or platform-dependent handle types in public
+Each public enum contains a reserved `INT32_MAX` force-width value. Valid
+values occupy `0..INT32_MAX` excluding that sentinel. The sentinel is never
+accepted or emitted. It prevents short-enum compilation from selecting a
+narrow representation and ensures that future nonnegative values remain
+representable.
+
+C and C++ translation-unit assertions, generated-binding checks, and Rust
+layout tests require every public enum to have the size and alignment of a
+32-bit integer on every supported compiler and target. A toolchain that fails
+those assertions is unsupported rather than accommodated with packing or a
+compiler-specific ABI.
+
+Enum values are append-only within an ABI major version. Callers handle
+unknown values through a default branch rather than assuming that every
+runtime value was known when they compiled. Rust FFI entry points use raw
+32-bit integer carriers and validate before converting to internal Rust enums,
+so an unknown foreign value never creates an invalid Rust enum.
+
+Bitwise domains do not use enum-typed storage. Named constants describe their
+bits, while ABI fields and parameters remain `uint32_t`.
+
+The ABI does not use `bool`, `size_t`, compiler bitfields, flexible array
+members, Rust layout, or platform-dependent handle types in public
 structures.
 
 Every input structure begins with `uint32_t struct_size`. A caller initializes

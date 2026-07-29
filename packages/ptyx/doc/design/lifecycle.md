@@ -54,7 +54,7 @@ complete buffer into bounded ownership or accepts none.
 | From | Event | To | Result |
 | --- | --- | --- | --- |
 | open | complete reservation succeeds | open | bytes receive the next FIFO sequence |
-| open | capacity is insufficient | open | recoverable backpressure, no bytes accepted |
+| open | admission is temporarily unavailable | open | recoverable backpressure, no bytes accepted |
 | open | buffer exceeds the per-write or session limit | open | invalid argument, no bytes accepted |
 | open | temporary native write condition | open | the core retains and retries the same prefix |
 | open | permanent endpoint write failure | failed | later writes receive the retained input failure |

@@ -42,13 +42,16 @@ Future<void> _build(BuildInput input, BuildOutputBuilder output) async {
 void _addBuildDependencies(BuildInput input, BuildOutputBuilder output) {
   final packageRoot = Directory.fromUri(input.packageRoot);
   final dependencyFiles = [
-    packageRoot.uri.resolve('include/ptyx.h'),
-    packageRoot.uri.resolve('include/ptyx_dart.h'),
+    packageRoot.uri.resolve('native/include/ptyx/ptyx.h'),
+    packageRoot.uri.resolve('native/dart/include/ptyx_dart.h'),
     packageRoot.uri.resolve('native/Cargo.toml'),
     packageRoot.uri.resolve('native/Cargo.lock'),
-    packageRoot.uri.resolve('native/build.rs'),
-    packageRoot.uri.resolve('native/engine/Cargo.toml'),
+    packageRoot.uri.resolve('native/c/Cargo.toml'),
+    packageRoot.uri.resolve('native/dart/Cargo.toml'),
+    packageRoot.uri.resolve('native/dart/build.rs'),
     packageRoot.uri.resolve('native/broker/Cargo.toml'),
+    packageRoot.uri.resolve('native/ptyx/Cargo.toml'),
+    packageRoot.uri.resolve('native/ptyx/build.rs'),
   ];
 
   for (final uri in dependencyFiles) {
@@ -56,9 +59,10 @@ void _addBuildDependencies(BuildInput input, BuildOutputBuilder output) {
   }
 
   for (final relativePath in [
-    'native/src/',
-    'native/engine/src/',
+    'native/c/src/',
+    'native/dart/',
     'native/broker/src/',
+    'native/ptyx/src/',
   ]) {
     final sourceDir = Directory.fromUri(packageRoot.uri.resolve(relativePath));
     if (!sourceDir.existsSync()) continue;

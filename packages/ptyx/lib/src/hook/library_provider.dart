@@ -98,7 +98,8 @@ final class CompileFromSource extends LibraryProvider {
 
     final dartSdk = resolveDartSdk();
     final packageRoot = Directory.fromUri(input.packageRoot);
-    final crateDir = Directory.fromUri(packageRoot.uri.resolve('native/'));
+    final nativeDir = Directory.fromUri(packageRoot.uri.resolve('native/'));
+    final crateDir = Directory.fromUri(nativeDir.uri.resolve('dart/'));
     final targetDir = cargoBuildDirectory(input);
     final cargoTarget = input.cargoTargetTriple();
     final targetOS = input.config.code.targetOS;
@@ -113,8 +114,7 @@ final class CompileFromSource extends LibraryProvider {
       '--release',
       '--target-dir',
       targetDir.path,
-      '--features',
-      if (testControls) 'test-controls' else 'dart-adapter',
+      if (testControls) ...['--features', 'test-controls'],
       if (!isHost && cargoTarget != null) ...['--target', cargoTarget],
     ];
 
@@ -129,7 +129,7 @@ final class CompileFromSource extends LibraryProvider {
       final brokerArgs = <String>[
         'build',
         '--manifest-path',
-        File.fromUri(crateDir.uri.resolve('broker/Cargo.toml')).path,
+        File.fromUri(nativeDir.uri.resolve('broker/Cargo.toml')).path,
         '--release',
         '--target-dir',
         brokerTargetDir.path,
@@ -178,7 +178,7 @@ final class CompileFromSource extends LibraryProvider {
         ? Directory.fromUri(targetDir.uri.resolve('release/'))
         : Directory.fromUri(targetDir.uri.resolve('$cargoTarget/release/'));
     final built = File.fromUri(
-      releaseDir.uri.resolve(targetOS.dylibFileName('ptyx_c')),
+      releaseDir.uri.resolve(targetOS.dylibFileName('ptyx_dart')),
     );
     if (!built.existsSync()) {
       throw StateError(

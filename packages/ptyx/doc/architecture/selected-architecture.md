@@ -8,11 +8,11 @@
 2. The `ptyx` C ABI is a stable, language-neutral API over the same Rust core.
 3. The Dart package is an idiomatic wrapper over the C ABI.
 
-The private `ptyx-engine` crate is the single authoritative implementation
-beneath the public Rust and C APIs. It uses direct Rust platform backends with
-a shared lifecycle, queue, error, and event model. Unix process creation and
-reaping remain isolated in a persistent helper process. Windows uses direct
-ConPTY, IOCP, and Job Object ownership.
+The public `ptyx` crate contains the authoritative implementation and its
+idiomatic Rust API. Private modules own the shared lifecycle, queue, error,
+event, and platform behavior. Unix process creation and reaping remain
+isolated in a persistent helper process. Windows uses direct ConPTY, IOCP, and
+Job Object ownership.
 
 The core does not depend on Dart, Dart headers, Dart ports, FFI layouts, or
 isolate lifecycle. The C ABI does not depend on Dart. A separate private Dart
@@ -22,21 +22,41 @@ an isolate.
 ## Dependency and ownership layers
 
 ```text
-Rust application       Other languages       Dart package
-      |                       |                    |
-      v                       v                    v
-public ptyx crate      language-neutral C ABI <- private Dart shim
-      |                       |
-      +-----------+-----------+
-                  v
-         private ptyx-engine
-              /       \
-   Unix PTY + broker   Windows ConPTY
+Rust application       Other languages          Dart package
+      |                       |                       |
+      v                       v                       v
+ public ptyx crate <--- language-neutral C ABI <--- Dart FFI
+      ^                       ^                       |
+      |                       +---- private Dart shim+
+      |
+      +---- Unix PTY + private broker
+      |
+      +---- Windows ConPTY
 ```
 
-Dependency arrows point toward the authoritative implementation. The public
-Rust crate and C ABI are sibling adapters and neither references a higher
-layer.
+Dependency arrows point toward the authoritative implementation. The private
+Dart shim provides only Dart API-DL notification and owner-liveness transport.
+It does not provide a second PTY API.
+
+## Native workspace
+
+The filesystem makes the dependency direction visible:
+
+```text
+native/
+  Cargo.toml                 virtual workspace
+  ptyx/                      public Rust crate and private core modules
+  c/                         language-neutral C ABI adapter
+  dart/                      private Dart API-DL adapter
+  broker/                    private Unix executable component
+  include/ptyx/ptyx.h        installed C header
+  fuzz/                      native fuzz targets
+```
+
+Only `ptyx` is a public Rust library crate. `ptyx-c`, `ptyx-dart`, and the
+broker are product build components with boundaries justified by unsafe
+foreign ownership, Dart runtime integration, and Unix process isolation.
+Shared PTY behavior is not split into another publishable engine crate.
 
 ## Rust API
 
@@ -53,6 +73,7 @@ pub struct Close;
 pub struct OutputChunk;
 
 impl Runtime {
+    pub fn new() -> Result<Self, RuntimeError>;
     pub fn builder() -> RuntimeBuilder;
     pub fn spawn(&self, options: SpawnOptions) -> Spawn;
 }
@@ -78,7 +99,8 @@ impl Events {
 
 `write` is the only input method. It performs bounded, nonblocking,
 all-or-nothing admission and accepts owned `Bytes`, allowing Rust callers to
-transfer `Vec<u8>` storage without another copy. The public API has no
+transfer `Vec<u8>` storage without another copy. A rejected write returns
+ownership of those bytes through `WriteError`. The public API has no
 `try_write`, `send`, capacity waiter, flush, or input-completion object.
 
 `OutputChunk` owns its bytes and native output credit. Dropping it returns the
@@ -88,6 +110,13 @@ consumer. Dropping a live session requests nonblocking abandonment; explicit
 
 No public backend, executor, reactor, or platform strategy traits are exposed.
 The package supports one measured native strategy per target.
+
+On Unix, `Runtime::new` securely materializes a target-matched broker when the
+build contains one. Qualified release artifacts must contain that asset so
+applications do not install or coordinate a second package. The repository
+source crate intentionally contains no prebuilt executables and requires
+`RuntimeBuilder::broker_path` or `PTYX_BROKER`; this source-build exception
+cannot be presented as a qualified distributable artifact.
 
 ## Shared core
 
@@ -151,9 +180,13 @@ The C ABI exposes only:
 - asynchronous close and nonblocking release;
 - event release and error formatting.
 
-It uses fixed-width generation-tagged runtime and session handles. Public
-constants use fixed-width integer typedefs rather than C enum layout.
-Extensible structures begin with `struct_size`; reserved fields must be zero.
+It uses fixed-width generation-tagged runtime and session handles.
+Single-choice semantic domains use named C enum types with a reserved
+`INT32_MAX` force-width enumerator. ABI checks require those enums to occupy
+four bytes on every supported compiler and target. Bit masks, capabilities,
+flags, lengths, handles, native codes, and reserved storage use explicit-width
+integers. Extensible structures begin with `struct_size`; reserved fields must
+be zero.
 
 Every call documents:
 
@@ -208,6 +241,11 @@ Dart retains only state required by its public contract:
 - immutable spawn option snapshots;
 - bounded outstanding output delivery tokens.
 
+The private Dart library routes directly from its runtime owner to private
+session implementations. It does not introduce an event-target interface or
+an event-object hierarchy with one implementation. Generated C and Dart
+adapter declarations remain confined to `lib/src/ffi`.
+
 A minimal owner guardian remains as an individual-isolate exit oracle. It
 owns one native owner token, not session state or spawn execution.
 `NativeFinalizer` provides nonblocking unreachable-object and isolate-group
@@ -249,7 +287,16 @@ The initial copy profile is:
 - Dart input: one copy in the leaf C call into core-owned storage;
 - Dart output: one Dart VM typed-data copy.
 
-A Dart-specific one-copy input path or external output data requires a
+The Dart wrapper caps one write invocation at 1 MiB even when the configured
+session input queue is larger. That bound keeps the leaf admission call short:
+it takes only nonblocking registry/admission locks and performs at most one
+1 MiB copy. Larger application payloads use ordered calls. Rust and general C
+consumers retain the full configured admission bound because they do not carry
+Dart leaf-call safepoint constraints.
+
+A compact kind-specific Dart message layout may replace the uniform native
+message only after allocation, CPU, memory, and lifecycle benchmarks. A
+Dart-specific one-copy input path or external output data requires a
 prototype that proves lower total CPU, memory, allocation, and energy cost
 without weakening ownership or cleanup. It is not part of the initial public
 contract.
@@ -285,10 +332,17 @@ process-group identity, and forced cleanup. PTY masters transfer to the core
 through a bounded versioned protocol. The Dart host never forks PTY children
 and never becomes their parent.
 
-The reusable Rust crate accepts an explicit broker path or a broker provider
-configured by `RuntimeBuilder`. It never silently falls back to in-process
-fork. The Dart package supplies its integrity-checked, target-matched broker
-through its native-asset build.
+Qualified reusable-Rust release artifacts supply an integrity-checked,
+target-matched broker by default. The crate materializes the helper atomically
+with private permissions, verifies its build and protocol identity, and owns
+launch, monitoring, shutdown, and reaping. Normal consumers of those release
+artifacts do not install or coordinate a second package. Source builds use the
+explicit override until release staging has supplied the target asset.
+
+`RuntimeBuilder` accepts an explicit external broker path for signed
+application bundles, sandboxes, distribution packaging, and environments
+that prohibit extracting an executable. It never silently falls back to
+in-process fork.
 
 ### Windows
 

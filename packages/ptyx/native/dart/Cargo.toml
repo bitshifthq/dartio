@@ -1,0 +1,26 @@
+[package]
+name = "ptyx-dart"
+version = "0.0.1"
+edition = "2021"
+publish = false
+
+[features]
+default = []
+test-controls = ["ptyx-c/test-controls"]
+
+[lib]
+name = "ptyx_dart"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+libc = "0.2"
+ptyx-c = { path = "../c" }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.60.2", features = [
+  "Win32_Foundation",
+  "Win32_System_LibraryLoader",
+] }
+
+[build-dependencies]
+cc = "1"

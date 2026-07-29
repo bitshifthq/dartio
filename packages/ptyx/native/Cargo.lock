@@ -42,7 +42,8 @@ version = "0.0.1"
 dependencies = [
  "bytes",
  "futures-core",
- "ptyx-engine",
+ "libc",
+ "windows-sys",
 ]
 
 [[package]]
@@ -57,18 +58,18 @@ name = "ptyx-c"
 version = "0.0.1"
 dependencies = [
  "bytes",
- "cc",
  "libc",
- "ptyx-engine",
+ "ptyx",
  "windows-sys",
 ]
 
 [[package]]
-name = "ptyx-engine"
+name = "ptyx-dart"
 version = "0.0.1"
 dependencies = [
- "bytes",
+ "cc",
  "libc",
+ "ptyx-c",
  "windows-sys",
 ]
 

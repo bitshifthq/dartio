@@ -18,7 +18,7 @@ From `packages/ptyx`, build the release broker and controller, then run:
 ```sh
 cargo build --manifest-path native/broker/Cargo.toml --release
 PTYX_BROKER_BINARY="$PWD/native/target/release/ptyx-broker" \
-  cargo build --manifest-path native/Cargo.toml --release
+  cargo build --manifest-path native/dart/Cargo.toml --release
 dart run benchmark/scorecard.dart all
 dart run benchmark/scorecard.dart integrity --integrity-bytes=2147483648
 ```

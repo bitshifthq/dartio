@@ -141,7 +141,57 @@ jobs:
       - name: compile
         run: |
           cargo build \
-            --manifest-path packages/ptyx/native/Cargo.toml \
+            --manifest-path packages/ptyx/native/dart/Cargo.toml \
             --release \
             --target ${{ matrix.rust_target }} \
             --target-dir target/ptyx/${{ matrix.target }}
+      - name: verify combined Dart asset symbols
+        run: |
+          RELEASE="$GITHUB_WORKSPACE/target/ptyx/${{ matrix.target }}/${{ matrix.rust_target }}/release"
+          case "${{ runner.os }}" in
+            macOS)
+              LIBRARY="$RELEASE/libptyx_dart.dylib"
+              nm -gU "$LIBRARY" > "$RUNNER_TEMP/ptyx-symbols.txt"
+              ;;
+            Linux)
+              LIBRARY="$RELEASE/libptyx_dart.so"
+              nm -D --defined-only "$LIBRARY" > "$RUNNER_TEMP/ptyx-symbols.txt"
+              ;;
+            Windows)
+              LIBRARY="$RELEASE/ptyx_dart.dll"
+              dumpbin.exe /nologo /exports "$LIBRARY" > "$RUNNER_TEMP/ptyx-symbols.txt"
+              ;;
+          esac
+          for symbol in \
+            ptyx_abi_version \
+            ptyx_error_format \
+            ptyx_event_release \
+            ptyx_runtime_capabilities \
+            ptyx_runtime_create \
+            ptyx_runtime_next_event \
+            ptyx_runtime_release \
+            ptyx_runtime_shutdown \
+            ptyx_session_cancel_output \
+            ptyx_session_close \
+            ptyx_session_observe_mode \
+            ptyx_session_release \
+            ptyx_session_resize \
+            ptyx_session_snapshot \
+            ptyx_session_spawn_start \
+            ptyx_session_terminate \
+            ptyx_session_write \
+            ptyd_event_ack \
+            ptyd_initialize \
+            ptyd_runtime_attach \
+            ptyd_runtime_detach \
+            ptyd_runtime_finalize \
+            ptyd_session_release \
+            ptyd_session_spawn_start
+          do
+            if ! grep -Eq "(^|[^[:alnum:]_])_?${symbol}([^[:alnum:]_]|$)" \
+              "$RUNNER_TEMP/ptyx-symbols.txt"
+            then
+              echo "::error::Combined Dart asset does not export $symbol"
+              exit 1
+            fi
+          done

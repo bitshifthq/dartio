@@ -134,6 +134,21 @@ void main() {
     );
   });
 
+  test('Dart write admission has a bounded leaf-call copy', () async {
+    final session = await PtySession.spawn(
+      shell(
+        platformScript(posix: 'sleep 10', windows: 'Start-Sleep -Seconds 10'),
+        inputCapacity: 2 * 1024 * 1024,
+      ),
+    );
+    addTearDown(session.close);
+
+    expect(
+      () => session.write(Uint8List(1024 * 1024 + 1)),
+      throwsA(isA<PtyInvalidArgumentException>()),
+    );
+  });
+
   test('accepted input reports a typed failure when the child exits', () async {
     const capacity = 1024 * 1024;
     final session = await PtySession.spawn(

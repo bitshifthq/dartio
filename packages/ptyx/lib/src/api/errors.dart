@@ -146,10 +146,11 @@ class PtyInputException extends PtyException {
   String get _name => 'PtyInputException';
 }
 
-/// Thrown when one complete write cannot fit in bounded native input storage.
+/// Thrown when bounded native input admission is temporarily unavailable.
 ///
 /// No bytes from the rejected invocation are accepted. The session remains
-/// usable, so a later write may succeed after the native writer makes progress.
+/// usable, so a later write may succeed after the native writer or another
+/// concurrent admission makes progress.
 final class PtyBackpressureException extends PtyException {
   const PtyBackpressureException(
     super.message, {

@@ -18,7 +18,7 @@ import 'dart:ffi' as ffi;
 /// @param[out] error Optional initialized error destination.
 /// @return PTYX_STATUS_OK or a typed failure.
 @ffi.Native<
-  ptyx_status_t Function(
+  ffi.UnsignedInt Function(
     ptyd_adapter_t,
     ptyx_event_token_t,
     ffi.Pointer<ptyx_error_t>,
@@ -34,7 +34,7 @@ external int ptyd_event_ack(
 ///
 /// @param[in] api_data Dart NativeApi.initializeApiDLData.
 /// @return PTYX_STATUS_OK or PTYX_STATUS_INVALID_ARGUMENT.
-@ffi.Native<ptyx_status_t Function(ffi.Pointer<ffi.Void>)>()
+@ffi.Native<ffi.UnsignedInt Function(ffi.Pointer<ffi.Void>)>()
 external int ptyd_initialize(ffi.Pointer<ffi.Void> api_data);
 
 /// @brief Attaches the sole event pump and cleanup owner to a runtime.
@@ -54,7 +54,7 @@ external int ptyd_initialize(ffi.Pointer<ffi.Void> api_data);
 ///
 /// After success, detach or finalization owns runtime shutdown and release.
 @ffi.Native<
-  ptyx_status_t Function(
+  ffi.UnsignedInt Function(
     ptyx_runtime_t,
     ffi.Int64,
     ffi.Pointer<ptyd_adapter_t>,
@@ -78,7 +78,10 @@ external int ptyd_runtime_attach(
 /// @param[out] error Optional initialized error destination.
 /// @return PTYX_STATUS_OK or a typed failure.
 @ffi.Native<
-  ptyx_status_t Function(ffi.Pointer<ptyd_adapter_t>, ffi.Pointer<ptyx_error_t>)
+  ffi.UnsignedInt Function(
+    ffi.Pointer<ptyd_adapter_t>,
+    ffi.Pointer<ptyx_error_t>,
+  )
 >()
 external int ptyd_runtime_detach(
   ffi.Pointer<ptyd_adapter_t> adapter,
@@ -103,7 +106,7 @@ external void ptyd_runtime_finalize(ffi.Pointer<ffi.Void> token);
 /// @param[out] error Optional initialized error destination.
 /// @return PTYX_STATUS_OK or a typed failure.
 @ffi.Native<
-  ptyx_status_t Function(
+  ffi.UnsignedInt Function(
     ptyd_adapter_t,
     ffi.Pointer<ptyx_session_t>,
     ffi.Pointer<ptyx_error_t>,
@@ -127,7 +130,7 @@ external int ptyd_session_release(
 /// @param[out] error Optional initialized error destination.
 /// @return PTYX_STATUS_OK or a typed failure.
 @ffi.Native<
-  ptyx_status_t Function(
+  ffi.UnsignedInt Function(
     ptyd_adapter_t,
     ffi.Pointer<ptyx_spawn_options_t>,
     ffi.Pointer<ptyx_session_t>,
@@ -167,7 +170,7 @@ external int ptyx_abi_version();
 /// @par Thread safety
 /// Safe to call concurrently.
 @ffi.Native<
-  ptyx_status_t Function(
+  ffi.UnsignedInt Function(
     ffi.Pointer<ptyx_error_t>,
     ffi.Pointer<ffi.Uint8>,
     ffi.Uint64,
@@ -193,7 +196,7 @@ external int ptyx_error_format(
 /// @par Thread safety
 /// Safe to call from a different thread than event receipt.
 @ffi.Native<
-  ptyx_status_t Function(ffi.Pointer<ptyx_event_t>, ffi.Pointer<ptyx_error_t>)
+  ffi.UnsignedInt Function(ffi.Pointer<ptyx_event_t>, ffi.Pointer<ptyx_error_t>)
 >()
 external int ptyx_event_release(
   ffi.Pointer<ptyx_event_t> event,
@@ -210,7 +213,7 @@ external int ptyx_event_release(
 /// @par Thread safety
 /// Safe to call concurrently.
 @ffi.Native<
-  ptyx_status_t Function(
+  ffi.UnsignedInt Function(
     ptyx_runtime_t,
     ffi.Pointer<ffi.Uint32>,
     ffi.Pointer<ptyx_error_t>,
@@ -237,7 +240,7 @@ external int ptyx_runtime_capabilities(
 /// @par Thread safety
 /// Safe to call concurrently.
 @ffi.Native<
-  ptyx_status_t Function(
+  ffi.UnsignedInt Function(
     ffi.Pointer<ptyx_runtime_options_t>,
     ffi.Pointer<ptyx_runtime_t>,
     ffi.Pointer<ptyx_error_t>,
@@ -267,7 +270,7 @@ external int ptyx_runtime_create(
 /// @par Thread safety
 /// Other runtime and session functions may run concurrently.
 @ffi.Native<
-  ptyx_status_t Function(
+  ffi.UnsignedInt Function(
     ptyx_runtime_t,
     ffi.Pointer<ptyx_event>,
     ffi.Pointer<ptyx_error_t>,
@@ -292,7 +295,10 @@ external int ptyx_runtime_next_event(
 /// @par Thread safety
 /// Do not race release with any operation using this runtime.
 @ffi.Native<
-  ptyx_status_t Function(ffi.Pointer<ptyx_runtime_t>, ffi.Pointer<ptyx_error_t>)
+  ffi.UnsignedInt Function(
+    ffi.Pointer<ptyx_runtime_t>,
+    ffi.Pointer<ptyx_error_t>,
+  )
 >()
 external int ptyx_runtime_release(
   ffi.Pointer<ptyx_runtime_t> runtime,
@@ -309,7 +315,9 @@ external int ptyx_runtime_release(
 /// May wait for native owners and the Unix broker to terminate.
 /// @par Thread safety
 /// Do not race this function with another shutdown or release.
-@ffi.Native<ptyx_status_t Function(ptyx_runtime_t, ffi.Pointer<ptyx_error_t>)>()
+@ffi.Native<
+  ffi.UnsignedInt Function(ptyx_runtime_t, ffi.Pointer<ptyx_error_t>)
+>()
 external int ptyx_runtime_shutdown(
   int runtime,
   ffi.Pointer<ptyx_error_t> error,
@@ -324,7 +332,9 @@ external int ptyx_runtime_shutdown(
 /// This operation does not release output events already transferred to the
 /// caller. Repeating a successful cancellation for the same live session
 /// succeeds without changing state.
-@ffi.Native<ptyx_status_t Function(ptyx_session_t, ffi.Pointer<ptyx_error_t>)>()
+@ffi.Native<
+  ffi.UnsignedInt Function(ptyx_session_t, ffi.Pointer<ptyx_error_t>)
+>()
 external int ptyx_session_cancel_output(
   int session,
   ffi.Pointer<ptyx_error_t> error,
@@ -338,7 +348,9 @@ external int ptyx_session_cancel_output(
 ///
 /// Exactly one PTYX_EVENT_CLOSE_COMPLETE event reports whether every accepted
 /// input byte and native owner reached a known terminal state.
-@ffi.Native<ptyx_status_t Function(ptyx_session_t, ffi.Pointer<ptyx_error_t>)>()
+@ffi.Native<
+  ffi.UnsignedInt Function(ptyx_session_t, ffi.Pointer<ptyx_error_t>)
+>()
 external int ptyx_session_close(int session, ffi.Pointer<ptyx_error_t> error);
 
 /// @brief Enables or disables terminal mode-change observation.
@@ -352,7 +364,11 @@ external int ptyx_session_close(int session, ffi.Pointer<ptyx_error_t> error);
 /// PTYX_EVENT_MODE_CHANGED events. Disabling it stops native polling and does
 /// not remove an event already transferred to the caller.
 @ffi.Native<
-  ptyx_status_t Function(ptyx_session_t, ffi.Uint32, ffi.Pointer<ptyx_error_t>)
+  ffi.UnsignedInt Function(
+    ptyx_session_t,
+    ffi.Uint32,
+    ffi.Pointer<ptyx_error_t>,
+  )
 >()
 external int ptyx_session_observe_mode(
   int session,
@@ -371,7 +387,10 @@ external int ptyx_session_observe_mode(
 /// Release is nonblocking. If deterministic close has not converged, native
 /// ownership continues cleanup independently.
 @ffi.Native<
-  ptyx_status_t Function(ffi.Pointer<ptyx_session_t>, ffi.Pointer<ptyx_error_t>)
+  ffi.UnsignedInt Function(
+    ffi.Pointer<ptyx_session_t>,
+    ffi.Pointer<ptyx_error_t>,
+  )
 >()
 external int ptyx_session_release(
   ffi.Pointer<ptyx_session_t> session,
@@ -385,7 +404,7 @@ external int ptyx_session_release(
 /// @param[out] error Optional initialized error destination.
 /// @return PTYX_STATUS_OK or a typed failure status.
 @ffi.Native<
-  ptyx_status_t Function(
+  ffi.UnsignedInt Function(
     ptyx_session_t,
     ffi.Pointer<ptyx_size_t>,
     ffi.Pointer<ptyx_error_t>,
@@ -410,7 +429,7 @@ external int ptyx_session_resize(
 /// signals=4 bits. PTYX_SNAPSHOT_HAS_TTY_NAME makes the terminal-name fields
 /// valid. A second call after a size query is a new atomic snapshot.
 @ffi.Native<
-  ptyx_status_t Function(
+  ffi.UnsignedInt Function(
     ptyx_session_t,
     ffi.Pointer<ptyx_session_snapshot_t>,
     ffi.Pointer<ptyx_error_t>,
@@ -441,7 +460,7 @@ external int ptyx_session_snapshot(
 /// @par Thread safety
 /// Safe to call concurrently.
 @ffi.Native<
-  ptyx_status_t Function(
+  ffi.UnsignedInt Function(
     ptyx_runtime_t,
     ffi.Pointer<ptyx_spawn_options_t>,
     ffi.Pointer<ptyx_session_t>,
@@ -465,7 +484,7 @@ external int ptyx_session_spawn_start(
 /// @param[out] error Optional initialized error destination.
 /// @return PTYX_STATUS_OK, PTYX_STATUS_UNSUPPORTED, or a typed failure.
 @ffi.Native<
-  ptyx_status_t Function(
+  ffi.UnsignedInt Function(
     ptyx_session_t,
     ffi.Int32,
     ffi.Pointer<ffi.Uint32>,
@@ -486,8 +505,9 @@ external int ptyx_session_terminate(
 /// @param[in] length Number of input bytes.
 /// @param[out] error Optional initialized error destination.
 /// @return PTYX_STATUS_OK after bounded native admission,
-/// PTYX_STATUS_BACKPRESSURE for recoverable queue exhaustion, or a terminal
-/// failure status.
+/// PTYX_STATUS_BACKPRESSURE when bounded admission is temporarily unavailable
+/// because of capacity, entry, channel, or concurrent-admission contention, or
+/// a terminal failure status.
 ///
 /// Returning success permits immediate reuse or release of caller storage.
 /// Success does not mean the child consumed the bytes.
@@ -496,7 +516,7 @@ external int ptyx_session_terminate(
 /// Safe to call concurrently. Accepted writes are FIFO by successful
 /// admission linearization order.
 @ffi.Native<
-  ptyx_status_t Function(
+  ffi.UnsignedInt Function(
     ptyx_session_t,
     ffi.Pointer<ffi.Uint8>,
     ffi.Uint64,
@@ -528,65 +548,11 @@ const int PTYX_CAPABILITY_TERMINAL_MODES = 4;
 
 const int PTYX_CAPABILITY_TERMINAL_NAME = 16;
 
-const int PTYX_ERROR_CLOSED = 6;
-
-const int PTYX_ERROR_DOMAIN_ARGUMENT = 1;
-
-const int PTYX_ERROR_DOMAIN_INPUT = 3;
-
-const int PTYX_ERROR_DOMAIN_NONE = 0;
-
-const int PTYX_ERROR_DOMAIN_OS = 7;
-
-const int PTYX_ERROR_DOMAIN_OUTPUT = 4;
-
-const int PTYX_ERROR_DOMAIN_PROCESS = 5;
-
-const int PTYX_ERROR_DOMAIN_RUNTIME = 6;
-
-const int PTYX_ERROR_DOMAIN_STATE = 2;
-
-const int PTYX_ERROR_INFRASTRUCTURE_LOST = 8;
-
-const int PTYX_ERROR_INVALID_ARGUMENT = 1;
-
-const int PTYX_ERROR_NATIVE_FAILURE = 7;
-
-const int PTYX_ERROR_NONE = 0;
-
-const int PTYX_ERROR_QUEUE_FULL = 4;
-
-const int PTYX_ERROR_STALE_HANDLE = 2;
-
-const int PTYX_ERROR_UNSUPPORTED = 5;
-
-const int PTYX_ERROR_WRONG_STATE = 3;
-
 const int PTYX_EVENT_CLOSE_CLEANUP_FAILED = 4;
-
-const int PTYX_EVENT_CLOSE_COMPLETE = 9;
 
 const int PTYX_EVENT_CLOSE_INPUT_FAILED = 1;
 
 const int PTYX_EVENT_CLOSE_OUTPUT_FAILED = 2;
-
-const int PTYX_EVENT_EXIT = 8;
-
-const int PTYX_EVENT_INFRASTRUCTURE_FAILED = 6;
-
-const int PTYX_EVENT_INPUT_FAILED = 4;
-
-const int PTYX_EVENT_MODE_CHANGED = 10;
-
-const int PTYX_EVENT_OUTPUT = 3;
-
-const int PTYX_EVENT_OUTPUT_DONE = 7;
-
-const int PTYX_EVENT_OUTPUT_FAILED = 5;
-
-const int PTYX_EVENT_SPAWN_FAILED = 2;
-
-const int PTYX_EVENT_SPAWN_READY = 1;
 
 const int PTYX_INVALID_EVENT_TOKEN = 0;
 
@@ -594,55 +560,11 @@ const int PTYX_INVALID_RUNTIME = 0;
 
 const int PTYX_INVALID_SESSION = 0;
 
-const int PTYX_OPERATION_CLOSE = 9;
-
-const int PTYX_OPERATION_METADATA = 8;
-
-const int PTYX_OPERATION_NONE = 0;
-
-const int PTYX_OPERATION_OUTPUT = 5;
-
-const int PTYX_OPERATION_RESIZE = 6;
-
-const int PTYX_OPERATION_RUNTIME_CREATE = 1;
-
-const int PTYX_OPERATION_RUNTIME_SHUTDOWN = 2;
-
-const int PTYX_OPERATION_SPAWN = 3;
-
-const int PTYX_OPERATION_TERMINATE = 7;
-
-const int PTYX_OPERATION_WRITE = 4;
-
 const int PTYX_SNAPSHOT_HAS_MODE = 1;
 
 const int PTYX_SNAPSHOT_HAS_TTY_NAME = 2;
 
 const int PTYX_SPAWN_INHERIT_ENVIRONMENT = 1;
-
-const int PTYX_STATUS_BACKPRESSURE = 4;
-
-const int PTYX_STATUS_BUFFER_TOO_SMALL = 11;
-
-const int PTYX_STATUS_BUSY = 8;
-
-const int PTYX_STATUS_CLOSED = 6;
-
-const int PTYX_STATUS_END_OF_STREAM = 7;
-
-const int PTYX_STATUS_INTERNAL = 10;
-
-const int PTYX_STATUS_INVALID_ARGUMENT = 1;
-
-const int PTYX_STATUS_OK = 0;
-
-const int PTYX_STATUS_OS_ERROR = 9;
-
-const int PTYX_STATUS_STALE_HANDLE = 2;
-
-const int PTYX_STATUS_UNSUPPORTED = 5;
-
-const int PTYX_STATUS_WRONG_STATE = 3;
 
 /// Generation-checked identity of one Dart event-pump adapter.
 typedef ptyd_adapter_t = ffi.Uint64;
@@ -671,15 +593,15 @@ final class ptyx_error extends ffi.Struct {
   external int struct_size;
 
   /// < PTYX_ERROR_DOMAIN_* value.
-  @ptyx_error_domain_t()
+  @ffi.UnsignedInt()
   external int domain;
 
   /// < PTYX_ERROR_* value.
-  @ptyx_error_kind_t()
+  @ffi.UnsignedInt()
   external int kind;
 
   /// < PTYX_OPERATION_* value.
-  @ptyx_operation_t()
+  @ffi.UnsignedInt()
   external int operation;
 
   /// < Optional errno or Win32 status, or zero.
@@ -699,13 +621,69 @@ final class ptyx_error extends ffi.Struct {
   external ffi.Array<ffi.Uint64> reserved;
 }
 
-/// Stable error-domain value.
-typedef ptyx_error_domain_t = ffi.Uint32;
-typedef Dartptyx_error_domain_t = int;
+/// Stable subsystem that reported an error.
+sealed class ptyx_error_domain {
+  /// No error domain.
+  static const PTYX_ERROR_DOMAIN_NONE = 0;
 
-/// Stable error-kind value.
-typedef ptyx_error_kind_t = ffi.Uint32;
-typedef Dartptyx_error_kind_t = int;
+  /// Caller input validation failure.
+  static const PTYX_ERROR_DOMAIN_ARGUMENT = 1;
+
+  /// Lifecycle or handle-state failure.
+  static const PTYX_ERROR_DOMAIN_STATE = 2;
+
+  /// Terminal input direction failure.
+  static const PTYX_ERROR_DOMAIN_INPUT = 3;
+
+  /// Terminal output direction failure.
+  static const PTYX_ERROR_DOMAIN_OUTPUT = 4;
+
+  /// Child process operation failure.
+  static const PTYX_ERROR_DOMAIN_PROCESS = 5;
+
+  /// Shared runtime infrastructure failure.
+  static const PTYX_ERROR_DOMAIN_RUNTIME = 6;
+
+  /// Operating-system boundary failure.
+  static const PTYX_ERROR_DOMAIN_OS = 7;
+
+  /// Reserved value that fixes the public enum representation at 32 bits.
+  static const PTYX_ERROR_DOMAIN_ENUM_FORCE_32_BIT = 2147483647;
+}
+
+/// Stable category of an error.
+sealed class ptyx_error_kind {
+  /// No error kind.
+  static const PTYX_ERROR_NONE = 0;
+
+  /// Invalid caller value or layout.
+  static const PTYX_ERROR_INVALID_ARGUMENT = 1;
+
+  /// Retired or unknown generation-checked identity.
+  static const PTYX_ERROR_STALE_HANDLE = 2;
+
+  /// Operation rejected by the current lifecycle state.
+  static const PTYX_ERROR_WRONG_STATE = 3;
+
+  /// Bounded queue cannot accept the complete operation.
+  static const PTYX_ERROR_QUEUE_FULL = 4;
+
+  /// Capability is unavailable on this backend.
+  static const PTYX_ERROR_UNSUPPORTED = 5;
+
+  /// Session or direction is terminal.
+  static const PTYX_ERROR_CLOSED = 6;
+
+  /// Native or operating-system operation failed.
+  static const PTYX_ERROR_NATIVE_FAILURE = 7;
+
+  /// Runtime ownership or event infrastructure was lost.
+  static const PTYX_ERROR_INFRASTRUCTURE_LOST = 8;
+
+  /// Reserved value that fixes the public enum representation at 32 bits.
+  static const PTYX_ERROR_KIND_ENUM_FORCE_32_BIT = 2147483647;
+}
+
 typedef ptyx_error_t = ptyx_error;
 
 /// @brief One event transferred from a runtime.
@@ -736,7 +714,7 @@ final class ptyx_event extends ffi.Struct {
   external int struct_size;
 
   /// < PTYX_EVENT_* value.
-  @ptyx_event_kind_t()
+  @ffi.UnsignedInt()
   external int kind;
 
   /// < Kind-specific PTYX_EVENT_* bits.
@@ -774,18 +752,83 @@ final class ptyx_event extends ffi.Struct {
   external ffi.Array<ffi.Uint64> reserved;
 }
 
-/// Stable event-kind value.
-typedef ptyx_event_kind_t = ffi.Uint32;
-typedef Dartptyx_event_kind_t = int;
+/// Stable kind of an event transferred from a runtime.
+sealed class ptyx_event_kind {
+  /// Spawn committed and the session is ready for operations.
+  static const PTYX_EVENT_SPAWN_READY = 1;
+
+  /// Spawn failed and its attempted ownership was reclaimed.
+  static const PTYX_EVENT_SPAWN_FAILED = 2;
+
+  /// Ordered terminal output bytes with an owning event token.
+  static const PTYX_EVENT_OUTPUT = 3;
+
+  /// Previously accepted terminal input could not be delivered.
+  static const PTYX_EVENT_INPUT_FAILED = 4;
+
+  /// Terminal output ended with a native failure.
+  static const PTYX_EVENT_OUTPUT_FAILED = 5;
+
+  /// Runtime or process ownership infrastructure was lost.
+  static const PTYX_EVENT_INFRASTRUCTURE_FAILED = 6;
+
+  /// Every safely readable output byte was delivered.
+  static const PTYX_EVENT_OUTPUT_DONE = 7;
+
+  /// The direct child exited.
+  static const PTYX_EVENT_EXIT = 8;
+
+  /// Explicit close reached its terminal cleanup result.
+  static const PTYX_EVENT_CLOSE_COMPLETE = 9;
+
+  /// An observed terminal input mode changed.
+  static const PTYX_EVENT_MODE_CHANGED = 10;
+
+  /// Reserved value that fixes the public enum representation at 32 bits.
+  static const PTYX_EVENT_KIND_ENUM_FORCE_32_BIT = 2147483647;
+}
+
 typedef ptyx_event_t = ptyx_event;
 
 /// Generation-checked owning event identity.
 typedef ptyx_event_token_t = ffi.Uint64;
 typedef Dartptyx_event_token_t = int;
 
-/// Stable operation identifier.
-typedef ptyx_operation_t = ffi.Uint32;
-typedef Dartptyx_operation_t = int;
+/// Stable operation associated with an error.
+sealed class ptyx_operation {
+  /// No associated operation.
+  static const PTYX_OPERATION_NONE = 0;
+
+  /// Runtime construction.
+  static const PTYX_OPERATION_RUNTIME_CREATE = 1;
+
+  /// Runtime shutdown or release.
+  static const PTYX_OPERATION_RUNTIME_SHUTDOWN = 2;
+
+  /// Child and terminal spawn.
+  static const PTYX_OPERATION_SPAWN = 3;
+
+  /// Terminal input write.
+  static const PTYX_OPERATION_WRITE = 4;
+
+  /// Terminal output delivery or cancellation.
+  static const PTYX_OPERATION_OUTPUT = 5;
+
+  /// Terminal resize.
+  static const PTYX_OPERATION_RESIZE = 6;
+
+  /// Child termination.
+  static const PTYX_OPERATION_TERMINATE = 7;
+
+  /// Atomic session metadata snapshot or observation.
+  static const PTYX_OPERATION_METADATA = 8;
+
+  /// Session cleanup.
+  static const PTYX_OPERATION_CLOSE = 9;
+
+  /// Reserved value that fixes the public enum representation at 32 bits.
+  static const PTYX_OPERATION_ENUM_FORCE_32_BIT = 2147483647;
+}
 
 /// @brief Runtime creation options.
 ///
@@ -819,6 +862,10 @@ typedef ptyx_runtime_options_t = ptyx_runtime_options;
 /// Callers must ignore unknown event kinds after releasing the event and must
 /// initialize caller-sized structures to zero so a newer library can inspect
 /// struct_size safely.
+///
+/// ABI 0 requires the complete structure layout for the exact packed version.
+/// Prefix-compatible fieldwise access and old-caller/new-library tests are
+/// required before declaring ABI 1.0.
 /// /
 /// /** Generation-checked runtime identity.
 typedef ptyx_runtime_t = ffi.Uint64;
@@ -959,6 +1006,44 @@ final class ptyx_spawn_options extends ffi.Struct {
 
 typedef ptyx_spawn_options_t = ptyx_spawn_options;
 
-/// Stable function result code.
-typedef ptyx_status_t = ffi.Uint32;
-typedef Dartptyx_status_t = int;
+/// Stable result of a ptyx operation.
+sealed class ptyx_status {
+  /// Operation completed successfully.
+  static const PTYX_STATUS_OK = 0;
+
+  /// An argument or caller-sized structure is invalid.
+  static const PTYX_STATUS_INVALID_ARGUMENT = 1;
+
+  /// A generation-checked handle or token is stale.
+  static const PTYX_STATUS_STALE_HANDLE = 2;
+
+  /// The operation is invalid in the current lifecycle state.
+  static const PTYX_STATUS_WRONG_STATE = 3;
+
+  /// Bounded input storage cannot accept the complete write now.
+  static const PTYX_STATUS_BACKPRESSURE = 4;
+
+  /// The requested capability is unavailable.
+  static const PTYX_STATUS_UNSUPPORTED = 5;
+
+  /// The requested direction or session is closed.
+  static const PTYX_STATUS_CLOSED = 6;
+
+  /// The blocking event source reached its terminal state.
+  static const PTYX_STATUS_END_OF_STREAM = 7;
+
+  /// Ownership is valid but temporarily prevents the operation.
+  static const PTYX_STATUS_BUSY = 8;
+
+  /// An operating-system operation failed.
+  static const PTYX_STATUS_OS_ERROR = 9;
+
+  /// Runtime infrastructure or an internal invariant failed.
+  static const PTYX_STATUS_INTERNAL = 10;
+
+  /// Caller storage is smaller than the reported required length.
+  static const PTYX_STATUS_BUFFER_TOO_SMALL = 11;
+
+  /// Reserved value that fixes the public enum representation at 32 bits.
+  static const PTYX_STATUS_ENUM_FORCE_32_BIT = 2147483647;
+}

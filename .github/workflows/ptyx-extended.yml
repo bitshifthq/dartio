@@ -117,10 +117,10 @@ jobs:
           PTYX_MODEL_ITERATIONS: "512"
         run: |
           cargo +nightly-2026-07-20 miri test \
-            --manifest-path packages/ptyx/native/Cargo.toml \
+            --manifest-path packages/ptyx/native/ptyx/Cargo.toml \
             --lib generation_registry_model_rejects_every_retired_handle
           cargo +nightly-2026-07-20 miri test \
-            --manifest-path packages/ptyx/native/Cargo.toml \
+            --manifest-path packages/ptyx/native/ptyx/Cargo.toml \
             --lib exhausted_generations_retire_the_slot_instead_of_wrapping
       - name: run broker decoder tests under Miri
         run: |

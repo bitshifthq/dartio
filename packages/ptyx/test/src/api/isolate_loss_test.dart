@@ -121,6 +121,27 @@ Start-Sleep -Seconds 30
   );
 }
 
+Future<void> _loseDuringGuardianStartup(SendPort ready) async {
+  ptyd_test_delay_next_attach(1000);
+  ready.send(null);
+  await PtySession.spawn(
+    PtySpawnOptions(
+      executable: Platform.isWindows
+          ? r'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe'
+          : '/bin/sh',
+      arguments: Platform.isWindows
+          ? const [
+              '-NoProfile',
+              '-NonInteractive',
+              '-Command',
+              'Start-Sleep -Seconds 30',
+            ]
+          : const ['-c', 'exec sleep 30'],
+      initialSize: const PtySize(rows: 24, columns: 80),
+    ),
+  );
+}
+
 Future<bool> _processExists(int pid) async {
   if (!Platform.isWindows) {
     return (await Process.run('/bin/kill', ['-0', '$pid'])).exitCode == 0;
@@ -141,6 +162,63 @@ if (Get-Process -Id $pid -ErrorAction SilentlyContinue) {
 
 void main() {
   group('native ownership after Dart loss', () {
+    test('unarmed guardians expire after immediate owner loss', () async {
+      final script = File(
+        'test/src/api/guardian_startup_probe.dart',
+      ).absolute.path;
+      final process = await Process.start(Platform.resolvedExecutable, [
+        script,
+      ]);
+      final stderrFuture = process.stderr
+          .transform(systemEncoding.decoder)
+          .join();
+      var exited = false;
+      try {
+        final exitCode = await process.exitCode.timeout(
+          const Duration(seconds: 20),
+        );
+        exited = true;
+        expect(exitCode, 0, reason: await stderrFuture);
+      } finally {
+        if (!exited) {
+          process.kill();
+        }
+      }
+    });
+
+    test('guardian owns runtime creation before the owner can exit', () async {
+      final baseline = ptyd_test_adapter_count();
+      final ready = ReceivePort();
+      final isolate = await Isolate.spawn(
+        _loseDuringGuardianStartup,
+        ready.sendPort,
+      );
+      addTearDown(() => isolate.kill(priority: Isolate.immediate));
+      await ready.first.timeout(const Duration(seconds: 10));
+      ready.close();
+
+      final activeDeadline = DateTime.now().add(const Duration(seconds: 5));
+      while (ptyd_test_attach_delay_active() == 0 &&
+          DateTime.now().isBefore(activeDeadline)) {
+        await Future<void>.delayed(const Duration(milliseconds: 10));
+      }
+      expect(
+        ptyd_test_attach_delay_active(),
+        1,
+        reason: 'owner must be killed while native attachment is in progress',
+      );
+      isolate.kill(priority: Isolate.immediate);
+
+      final cleanupDeadline = DateTime.now().add(const Duration(seconds: 10));
+      while ((ptyd_test_attach_delay_active() != 0 ||
+              ptyd_test_adapter_count() != baseline) &&
+          DateTime.now().isBefore(cleanupDeadline)) {
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+      }
+      expect(ptyd_test_attach_delay_active(), 0);
+      expect(ptyd_test_adapter_count(), baseline);
+    });
+
     test('reclaims an unreachable session in a live isolate', () async {
       final reports = ReceivePort();
       final messages = StreamIterator(reports);

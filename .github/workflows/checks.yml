@@ -54,8 +54,8 @@ jobs:
         run: |
           dart run tool/ffigen.dart
           git diff --exit-code -- \
-            include/ptyx.h \
-            include/ptyx_dart.h \
+            native/include/ptyx/ptyx.h \
+            native/dart/include/ptyx_dart.h \
             lib/src/ffi/ptyx.g.dart \
             test/src/ffi/ptyx_test.g.dart
       - run: dart analyze --fatal-infos --fatal-warnings packages/ptyx
@@ -183,38 +183,55 @@ jobs:
           printf "PTYX_BROKER_BINARY=%s\n" \
             "$GITHUB_WORKSPACE/packages/ptyx/native/target/release/ptyx-broker" \
             >> "$GITHUB_ENV"
-      - run: cargo fmt --manifest-path packages/ptyx/native/Cargo.toml -- --check
+      - run: cargo fmt --manifest-path packages/ptyx/native/Cargo.toml --all -- --check
       - if: runner.os != 'Windows'
         run: cargo fmt --manifest-path packages/ptyx/native/broker/Cargo.toml -- --check
       - run: >-
           cargo test --manifest-path packages/ptyx/native/Cargo.toml
-          -p ptyx-c -p ptyx-engine -p ptyx --all-features
+          -p ptyx-c -p ptyx-dart -p ptyx --all-features
       - run: cargo build --manifest-path packages/ptyx/native/Cargo.toml
       - name: run C ABI harness
         if: runner.os != 'Windows'
         run: |
-          cc packages/ptyx/native/tests/abi_harness.c \
+          cc packages/ptyx/native/c/tests/abi_harness.c \
             -std=c11 -Wall -Wextra -Werror \
-            -Ipackages/ptyx/include \
+            -Ipackages/ptyx/native/include \
             -Lpackages/ptyx/native/target/debug \
             -lptyx_c \
             -o "$RUNNER_TEMP/ptyx-abi-harness"
-          c++ packages/ptyx/native/tests/abi_harness.cc \
+          c++ packages/ptyx/native/c/tests/abi_harness.cc \
             -std=c++17 -Wall -Wextra -Werror \
-            -Ipackages/ptyx/include \
+            -Ipackages/ptyx/native/include \
             -Lpackages/ptyx/native/target/debug \
             -lptyx_c \
             -o "$RUNNER_TEMP/ptyx-abi-harness-cxx"
+          c++ packages/ptyx/native/dart/tests/abi_harness.cc \
+            -std=c++17 -Wall -Wextra -Werror \
+            -Ipackages/ptyx/native/include \
+            -Ipackages/ptyx/native/dart/include \
+            -o "$RUNNER_TEMP/ptyx-dart-abi-harness-cxx"
+          cc packages/ptyx/native/c/tests/abi_harness.c \
+            -std=c11 -Wall -Wextra -Werror -fshort-enums \
+            -Ipackages/ptyx/native/include \
+            -Lpackages/ptyx/native/target/debug \
+            -lptyx_c \
+            -o "$RUNNER_TEMP/ptyx-abi-harness-short-enums"
           if [[ "$RUNNER_OS" == "macOS" ]]; then
             DYLD_LIBRARY_PATH="$GITHUB_WORKSPACE/packages/ptyx/native/target/debug" \
               "$RUNNER_TEMP/ptyx-abi-harness"
             DYLD_LIBRARY_PATH="$GITHUB_WORKSPACE/packages/ptyx/native/target/debug" \
               "$RUNNER_TEMP/ptyx-abi-harness-cxx"
+            "$RUNNER_TEMP/ptyx-dart-abi-harness-cxx"
+            DYLD_LIBRARY_PATH="$GITHUB_WORKSPACE/packages/ptyx/native/target/debug" \
+              "$RUNNER_TEMP/ptyx-abi-harness-short-enums"
           else
             LD_LIBRARY_PATH="$GITHUB_WORKSPACE/packages/ptyx/native/target/debug" \
               "$RUNNER_TEMP/ptyx-abi-harness"
             LD_LIBRARY_PATH="$GITHUB_WORKSPACE/packages/ptyx/native/target/debug" \
               "$RUNNER_TEMP/ptyx-abi-harness-cxx"
+            "$RUNNER_TEMP/ptyx-dart-abi-harness-cxx"
+            LD_LIBRARY_PATH="$GITHUB_WORKSPACE/packages/ptyx/native/target/debug" \
+              "$RUNNER_TEMP/ptyx-abi-harness-short-enums"
           fi
           if [[ "$RUNNER_OS" == "macOS" ]]; then
             LIBRARY="$GITHUB_WORKSPACE/packages/ptyx/native/target/debug/libptyx_c.dylib"
@@ -230,18 +247,24 @@ jobs:
           if /I "%RUNNER_ARCH%"=="ARM64" set "PTYX_VS_TARGET=arm64"
           call "%ProgramFiles%\Microsoft Visual Studio\2022\Enterprise\Common7\Tools\VsDevCmd.bat" -host_arch=x64 -arch=%PTYX_VS_TARGET%
           cl /nologo /std:c11 /W4 /WX ^
-            /Ipackages/ptyx/include ^
-            packages/ptyx/native/tests/abi_harness.c ^
+            /Ipackages/ptyx/native/include ^
+            packages/ptyx/native/c/tests/abi_harness.c ^
             /Fe:%RUNNER_TEMP%\ptyx-abi-harness.exe ^
             /link /LIBPATH:packages/ptyx/native/target/debug ptyx_c.dll.lib
           cl /nologo /std:c++17 /EHsc /W4 /WX ^
-            /Ipackages/ptyx/include ^
-            packages/ptyx/native/tests/abi_harness.cc ^
+            /Ipackages/ptyx/native/include ^
+            packages/ptyx/native/c/tests/abi_harness.cc ^
             /Fe:%RUNNER_TEMP%\ptyx-abi-harness-cxx.exe ^
             /link /LIBPATH:packages/ptyx/native/target/debug ptyx_c.dll.lib
+          cl /nologo /std:c++17 /EHsc /W4 /WX ^
+            /Ipackages/ptyx/native/include ^
+            /Ipackages/ptyx/native/dart/include ^
+            packages/ptyx/native/dart/tests/abi_harness.cc ^
+            /Fe:%RUNNER_TEMP%\ptyx-dart-abi-harness-cxx.exe
           set "PATH=%GITHUB_WORKSPACE%\packages\ptyx\native\target\debug;%PATH%"
           "%RUNNER_TEMP%\ptyx-abi-harness.exe"
           "%RUNNER_TEMP%\ptyx-abi-harness-cxx.exe"
+          "%RUNNER_TEMP%\ptyx-dart-abi-harness-cxx.exe"
           dart run packages/ptyx/tool/verify_abi.dart "%GITHUB_WORKSPACE%\packages\ptyx\native\target\debug\ptyx_c.dll"
       - if: runner.os != 'Windows'
         run: cargo test --manifest-path packages/ptyx/native/broker/Cargo.toml
@@ -250,22 +273,21 @@ jobs:
         run: cargo run --manifest-path packages/ptyx/native/broker/Cargo.toml
       - run: >-
           cargo clippy --manifest-path packages/ptyx/native/Cargo.toml
-          -p ptyx-c -p ptyx-engine -p ptyx
+          -p ptyx-c -p ptyx-dart -p ptyx
           --all-targets --all-features -- -D warnings
       - if: runner.os != 'Windows'
         run: cargo clippy --manifest-path packages/ptyx/native/broker/Cargo.toml --all-targets -- -D warnings
       - run: >-
           cargo doc --manifest-path packages/ptyx/native/Cargo.toml
-          -p ptyx-c -p ptyx-engine -p ptyx --all-features --no-deps
+          -p ptyx-c -p ptyx-dart -p ptyx --all-features --no-deps
         env:
           RUSTDOCFLAGS: -D warnings
       - name: validate Rust crate package contents
         if: matrix.os == 'linux-x64'
         run: |
-          cargo package --manifest-path packages/ptyx/native/Cargo.toml \
-            -p ptyx-engine --allow-dirty --no-verify
-          cargo package --manifest-path packages/ptyx/native/Cargo.toml \
-            -p ptyx --list
+          env -u PTYX_BROKER_BINARY \
+            cargo package --manifest-path packages/ptyx/native/Cargo.toml \
+            -p ptyx
       - if: runner.os != 'Windows'
         run: cargo doc --manifest-path packages/ptyx/native/broker/Cargo.toml --no-deps
         env:
@@ -321,7 +343,7 @@ jobs:
       - run: cargo clippy --manifest-path packages/ptyx/native/broker/Cargo.toml --all-targets --all-features -- -D warnings
       - run: >-
           cargo clippy --manifest-path packages/ptyx/native/Cargo.toml
-          -p ptyx-c -p ptyx-engine -p ptyx
+          -p ptyx-c -p ptyx-dart -p ptyx
           --all-targets --all-features -- -D warnings
 
   checks:

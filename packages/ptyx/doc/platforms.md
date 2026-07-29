@@ -31,7 +31,7 @@ require separate retained runtime qualification.
 
 ## Unix helper
 
-Unix process creation and reaping use the packaged `ptyx-broker`. On macOS the
+Unix process creation and reaping use the selected `ptyx-broker`. On macOS the
 controller starts it with `posix_spawn`. On Linux it uses an audited raw
 `fork`/`exec` sequence because the broker must receive a pre-created Unix
 socket endpoint. The broker is single-threaded before it forks PTY children.

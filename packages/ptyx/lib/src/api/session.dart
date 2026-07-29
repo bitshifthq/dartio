@@ -42,7 +42,7 @@ abstract interface class PtySession {
   /// unavailable, [PtySpawnException] when native process creation fails, or
   /// [PtyInfrastructureException] when controller setup cannot be completed.
   static Future<PtySession> spawn(PtySpawnOptions options) {
-    return NativeSession.spawn(options);
+    return _NativeSession.spawn(options);
   }
 
   /// Completes with the child process exit code when the child exits.
@@ -169,10 +169,12 @@ abstract interface class PtySession {
   /// Returning means the complete buffer was copied and accepted, not that the
   /// child consumed it. The caller may mutate [data] immediately afterward.
   ///
-  /// Throws [PtyInvalidArgumentException] when [data] is empty or larger than
-  /// the configured input bound, [PtyBackpressureException] when the complete
-  /// buffer cannot be accepted without waiting, [PtyInputException] after
-  /// terminal input failure, and [PtyClosedException] after [close].
+  /// One invocation accepts at most 1 MiB; larger application payloads should
+  /// be divided into ordered chunks. Throws [PtyInvalidArgumentException] when
+  /// [data] is empty, exceeds 1 MiB, or is larger than the configured input
+  /// bound, [PtyBackpressureException] when the complete buffer cannot be
+  /// accepted without waiting, [PtyInputException] after terminal input
+  /// failure, and [PtyClosedException] after [close].
   ///
   /// ```dart
   /// session.write(Uint8List.fromList('status\n'.codeUnits));
