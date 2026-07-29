@@ -579,11 +579,14 @@ final class _NativeRuntime implements Finalizable {
   void _retainTerminalDeliveryTurn() {
     // A terminal native message can synchronously queue the final output and
     // complete several Dart futures. Keep the port alive through the resulting
-    // microtasks so a CLI cannot exit before those consumers observe them.
+    // microtasks and the following event turn so a CLI cannot exit before
+    // those consumers observe them.
     _terminalDeliveryTurns++;
     Timer.run(() {
-      _terminalDeliveryTurns--;
-      _updateLiveness();
+      Timer.run(() {
+        _terminalDeliveryTurns--;
+        _updateLiveness();
+      });
     });
   }
 
