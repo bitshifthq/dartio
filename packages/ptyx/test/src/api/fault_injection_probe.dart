@@ -14,9 +14,47 @@ Future<void> main(List<String> arguments) {
       return _exerciseBrokerLoss();
     case 'reentrant-write':
       return _exerciseReentrantWriteFailure();
+    case 'exit-observation':
+      return _exerciseExitObservationFailure();
     default:
       throw ArgumentError.value(arguments, 'arguments', 'unknown probe');
   }
+}
+
+Future<void> _exerciseExitObservationFailure() async {
+  const windowsScript = '''
+Start-Sleep -Milliseconds 200
+[Console]::Write("trailing")
+Start-Sleep -Seconds 10
+''';
+  final session = await PtySession.spawn(
+    PtySpawnOptions(
+      executable: Platform.isWindows
+          ? r'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe'
+          : '/bin/sh',
+      arguments: Platform.isWindows
+          ? const ['-NoProfile', '-NonInteractive', '-Command', windowsScript]
+          : const ['-c', 'sleep 0.2; printf trailing; sleep 10'],
+      initialSize: const PtySize(rows: 24, columns: 80),
+    ),
+  );
+  final trailingOutput = session.output.first;
+  if (ptyd_test_fail_exit_observation() == 0) {
+    throw StateError('exit-observation injection requires one active session');
+  }
+  try {
+    await session.exitCode;
+    throw StateError('exitCode did not report the injected failure');
+  } on PtyExitException catch (error) {
+    if (error.nativeCode != 87) rethrow;
+  } on Object {
+    rethrow;
+  }
+  final trailing = await trailingOutput.timeout(const Duration(seconds: 5));
+  if (!String.fromCharCodes(trailing).contains('trailing')) {
+    throw StateError('exit failure discarded trailing output: $trailing');
+  }
+  await session.close();
 }
 
 Future<void> _exerciseReentrantWriteFailure() async {

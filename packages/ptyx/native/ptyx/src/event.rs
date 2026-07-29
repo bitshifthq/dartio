@@ -61,6 +61,8 @@ pub enum Event {
     InputFailed(OperationError),
     /// Native output ended with an error.
     OutputFailed(OperationError),
+    /// The direct child's exit status could not be observed.
+    ExitFailed(OperationError),
     /// Runtime or process ownership was lost.
     InfrastructureFailed(OperationError),
     /// The direct child terminated.
@@ -192,6 +194,7 @@ impl Events {
             }
             crate::engine::Notice::InputFailed { failure, .. } => Event::InputFailed(failure),
             crate::engine::Notice::OutputFailed { failure, .. } => Event::OutputFailed(failure),
+            crate::engine::Notice::ExitFailed { failure, .. } => Event::ExitFailed(failure),
             crate::engine::Notice::BrokerLost { failure, .. } => {
                 Event::InfrastructureFailed(failure)
             }

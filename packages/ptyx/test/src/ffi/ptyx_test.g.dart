@@ -32,6 +32,12 @@ external void ptyd_test_delay_next_attach(int milliseconds);
 @ffi.Native<ffi.Void Function(ffi.Uint64)>()
 external void ptyd_test_delay_next_spawn(int milliseconds);
 
+/// Injects a typed exit-observation failure for the sole diagnostic session.
+///
+/// @return One when the event was posted; otherwise zero.
+@ffi.Native<ffi.Uint32 Function()>()
+external int ptyd_test_fail_exit_observation();
+
 /// Forces the next Dart port post to fail in diagnostic builds.
 @ffi.Native<ffi.Void Function()>()
 external void ptyd_test_fail_next_post();

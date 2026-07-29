@@ -1,6 +1,6 @@
 use super::{dup_cloexec, set_cloexec, set_nonblocking, GenerationRegistry};
 use crate::engine::broker_client::{BrokerClient, BrokerOwner, BrokerSession};
-use crate::engine::control::{Control, ControlQueue, WakeGate};
+use crate::engine::control::{fail_wake_socket, wake_socket, Control, ControlQueue, WakeGate};
 use crate::engine::event::{self, Receiver as EventReceiver, Sender as EventSender};
 use crate::engine::oneshot::{self, Sender as ReplySender};
 use crate::engine::session::{InputAdmission, SessionCore};
@@ -218,8 +218,12 @@ struct ReactorWake {
 
 impl WakeWriter {
     fn wake(&self) {
-        if self.gate.request() {
-            wake_socket(self.fd.as_raw_fd());
+        if self.gate.request() && wake_socket(self.fd.as_raw_fd()).is_err() {
+            // A fatal send cannot leave already-committed commands stranded.
+            // Closing the wake direction forces the reactor to fail its
+            // pending operations and drop the command receiver.
+            self.gate.clear();
+            fail_wake_socket(self.fd.as_raw_fd());
         }
     }
 }
@@ -789,6 +793,10 @@ fn reactor(
             .filter(|descriptor| descriptor.revents != 0)
             .count() as u64;
         let mut shutdown = false;
+        if poll_descriptors[0].revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0 {
+            fail_all(&notices, &mut sessions, &mut counters, &broker, &admissions);
+            return;
+        }
         if poll_descriptors[0].revents & libc::POLLIN != 0 {
             drain_wake(wake.reader.as_raw_fd());
             wake.gate.clear();
@@ -814,7 +822,7 @@ fn reactor(
             );
             shutdown = requested_shutdown;
             if more_commands {
-                wake_socket(wake.writer.as_raw_fd());
+                let _ = wake_socket(wake.writer.as_raw_fd());
             }
         }
         for (index, handle) in poll_handles.into_iter().enumerate() {
@@ -906,6 +914,10 @@ fn reactor(
         for event in ready_events {
             let handle = event.u64;
             if handle == 0 {
+                if event.events & (libc::EPOLLHUP | libc::EPOLLERR) as u32 != 0 {
+                    fail_all(&notices, &mut sessions, &mut counters, &broker, &admissions);
+                    return;
+                }
                 drain_wake(wake.reader.as_raw_fd());
                 wake.gate.clear();
                 counters.command_wakeups += 1;
@@ -930,7 +942,7 @@ fn reactor(
                 );
                 shutdown |= requested_shutdown;
                 if more_commands {
-                    wake_socket(wake.writer.as_raw_fd());
+                    let _ = wake_socket(wake.writer.as_raw_fd());
                 }
                 continue;
             }
@@ -2076,18 +2088,6 @@ fn drain_wake(fd: RawFd) {
         if result <= 0 {
             return;
         }
-    }
-}
-
-fn wake_socket(fd: RawFd) {
-    let byte = [1_u8];
-    unsafe {
-        libc::send(
-            fd,
-            byte.as_ptr().cast(),
-            byte.len(),
-            libc::MSG_DONTWAIT | libc::MSG_NOSIGNAL,
-        );
     }
 }
 

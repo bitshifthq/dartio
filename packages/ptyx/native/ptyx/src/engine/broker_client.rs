@@ -1,3 +1,4 @@
+use crate::engine::control::{fail_wake_socket, wake_socket};
 #[cfg(target_os = "macos")]
 use crate::engine::dup_cloexec;
 use crate::engine::integrated::Command;
@@ -9,8 +10,9 @@ use std::mem::{size_of, MaybeUninit};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::ptr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -21,6 +23,8 @@ const MAX_PAYLOAD: usize = 64 * 1024;
 const FRAME_TIMEOUT: Duration = Duration::from_secs(5);
 const SPAWN_V2: u32 = 0x5854_5950;
 const CONTROL_FD: RawFd = 3;
+const REAPER_CAPACITY: usize = 16;
+static REAPER_HEALTHY: AtomicBool = AtomicBool::new(true);
 #[cfg(target_os = "macos")]
 const POSIX_SPAWN_CLOEXEC_DEFAULT: libc::c_int = 0x4000;
 
@@ -388,15 +392,8 @@ impl Drop for BrokerProcessGuard {
         if !self.armed {
             return;
         }
-        unsafe {
-            libc::kill(self.pid, libc::SIGKILL);
-        }
-        loop {
-            let result = unsafe { libc::waitpid(self.pid, ptr::null_mut(), 0) };
-            if result >= 0 || io::Error::last_os_error().kind() != io::ErrorKind::Interrupted {
-                break;
-            }
-        }
+        terminate_process(self.pid);
+        reap_process(self.pid);
     }
 }
 
@@ -431,8 +428,18 @@ fn launch_broker_at(path: &CStr) -> io::Result<(OwnedFd, libc::pid_t)> {
     }
     let empty = unsafe { empty.assume_init() };
     spawn_code(unsafe { libc::posix_spawnattr_setsigmask(&mut attrs.0, &empty) })?;
+    let mut defaults = MaybeUninit::<libc::sigset_t>::uninit();
+    if unsafe { libc::sigemptyset(defaults.as_mut_ptr()) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let mut defaults = unsafe { defaults.assume_init() };
+    if unsafe { libc::sigaddset(&mut defaults, libc::SIGCHLD) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    spawn_code(unsafe { libc::posix_spawnattr_setsigdefault(&mut attrs.0, &defaults) })?;
     #[cfg(target_os = "macos")]
-    let flags = POSIX_SPAWN_CLOEXEC_DEFAULT | libc::POSIX_SPAWN_SETSIGMASK;
+    let flags =
+        POSIX_SPAWN_CLOEXEC_DEFAULT | libc::POSIX_SPAWN_SETSIGMASK | libc::POSIX_SPAWN_SETSIGDEF;
     #[cfg(target_os = "linux")]
     let flags = libc::POSIX_SPAWN_SETSIGMASK;
     let flags = flags as libc::c_short;
@@ -707,7 +714,7 @@ pub(crate) struct BrokerClient {
 pub(crate) struct BrokerOwner {
     client: BrokerClient,
     pid: libc::pid_t,
-    thread: Mutex<Option<JoinHandle<()>>>,
+    thread: Mutex<Option<JoinHandle<bool>>>,
 }
 
 impl BrokerOwner {
@@ -716,14 +723,12 @@ impl BrokerOwner {
         reactor_commands: SyncSender<Command>,
         reactor_wake: OwnedFd,
     ) -> io::Result<Self> {
+        if !REAPER_HEALTHY.load(Ordering::Acquire) {
+            return Err(io::Error::other("broker reaper is unavailable"));
+        }
         let (control, broker_pid) = launch_broker_at(path)?;
         let broker_process = BrokerProcessGuard::new(broker_pid);
-        let mut wake_pipe = [-1; 2];
-        if unsafe { libc::pipe(wake_pipe.as_mut_ptr()) } < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        let wake_read = unsafe { OwnedFd::from_raw_fd(wake_pipe[0]) };
-        let wake_write = unsafe { OwnedFd::from_raw_fd(wake_pipe[1]) };
+        let (wake_read, wake_write) = socket_pair()?;
         set_cloexec(wake_read.as_raw_fd())?;
         set_cloexec(wake_write.as_raw_fd())?;
         set_nonblocking(wake_read.as_raw_fd())?;
@@ -751,7 +756,7 @@ impl BrokerOwner {
                     request_receiver,
                     reactor_commands,
                     reactor_wake,
-                );
+                )
             })?;
         broker_process.disarm();
         Ok(Self {
@@ -781,7 +786,7 @@ impl BrokerOwner {
                 libc::kill(self.pid, libc::SIGKILL);
             }
         }
-        thread.join().is_ok()
+        thread.join().unwrap_or(false)
     }
 }
 
@@ -853,13 +858,12 @@ impl BrokerClient {
                     io::Error::new(io::ErrorKind::BrokenPipe, "broker worker stopped")
                 }
             })?;
-        let byte = [1_u8];
-        unsafe {
-            libc::write(
-                self.shared.wake.as_raw_fd(),
-                byte.as_ptr().cast(),
-                byte.len(),
-            );
+        // Queue insertion is the admission linearization point. A wake error
+        // cannot turn an already-owned request back into a rejection; the
+        // worker's control-socket path will report infrastructure loss if the
+        // worker has actually stopped.
+        if wake_socket(self.shared.wake.as_raw_fd()).is_err() {
+            fail_wake_socket(self.shared.wake.as_raw_fd());
         }
         Ok(())
     }
@@ -895,7 +899,7 @@ impl Worker {
             })
             .is_ok()
         {
-            wake_reactor(self.reactor_wake.as_raw_fd());
+            let _ = wake_socket(self.reactor_wake.as_raw_fd());
         }
     }
 
@@ -1059,16 +1063,16 @@ impl Worker {
         Ok(response.aux == 1)
     }
 
-    fn shutdown(&mut self) {
+    fn shutdown(&mut self) -> bool {
         let request = self.request_id();
         let mut frame = Frame::new(SHUTDOWN);
         frame.request = request;
-        if send_frame(self.control.as_raw_fd(), &frame).is_ok() {
-            let _ = self.receive_for(request, SHUTDOWN_RESULT);
+        let clean = send_frame(self.control.as_raw_fd(), &frame).is_ok()
+            && self.receive_for(request, SHUTDOWN_RESULT).is_ok();
+        if !clean {
+            terminate_process(self.broker_pid);
         }
-        unsafe {
-            libc::waitpid(self.broker_pid, ptr::null_mut(), 0);
-        }
+        reap_process(self.broker_pid)
     }
 }
 
@@ -1080,7 +1084,7 @@ fn run_worker(
     requests: Receiver<Request>,
     reactor_commands: SyncSender<Command>,
     reactor_wake: OwnedFd,
-) {
+) -> bool {
     let mut worker = Worker {
         control,
         broker_pid,
@@ -1120,6 +1124,9 @@ fn run_worker(
                 Err(_) => break,
             }
         }
+        if poll[0].revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0 {
+            break;
+        }
         if poll[0].revents & libc::POLLIN != 0 {
             drain(wake.as_raw_fd());
             let mut processed = 0;
@@ -1140,14 +1147,14 @@ fn run_worker(
                         let _ = worker
                             .reactor_commands
                             .send(Command::GracefulSignalResult { handle, result });
-                        wake_reactor(worker.reactor_wake.as_raw_fd());
+                        let _ = wake_socket(worker.reactor_wake.as_raw_fd());
                     }
                     Request::ForceClose { session, handle } => {
                         let succeeded = worker.close(session).is_ok();
                         let _ = worker
                             .reactor_commands
                             .send(Command::ForceCloseResult { handle, succeeded });
-                        wake_reactor(worker.reactor_wake.as_raw_fd());
+                        let _ = wake_socket(worker.reactor_wake.as_raw_fd());
                     }
                     Request::Release { session, handle } => {
                         let succeeded =
@@ -1155,7 +1162,7 @@ fn run_worker(
                         let _ = worker
                             .reactor_commands
                             .send(Command::ReleaseResult { handle, succeeded });
-                        wake_reactor(worker.reactor_wake.as_raw_fd());
+                        let _ = wake_socket(worker.reactor_wake.as_raw_fd());
                     }
                     Request::Abort { session, reply } => {
                         let _ = reply.send(worker.abort(session));
@@ -1174,48 +1181,122 @@ fn run_worker(
                         let _ = reply.send(result);
                     }
                     Request::Shutdown => {
-                        worker.shutdown();
-                        return;
+                        return worker.shutdown();
                     }
                 }
             }
             if processed == REQUEST_QUANTUM {
-                wake_worker(worker_wake.as_raw_fd());
+                let _ = wake_socket(worker_wake.as_raw_fd());
             }
             if processed != 0 {
                 // A lifecycle request rejected while this bounded queue was
                 // full is retried by the reactor after the worker makes room.
-                wake_reactor(worker.reactor_wake.as_raw_fd());
+                let _ = wake_socket(worker.reactor_wake.as_raw_fd());
             }
         }
     }
-    unsafe {
-        libc::kill(worker.broker_pid, libc::SIGKILL);
-    }
-    unsafe {
-        libc::waitpid(worker.broker_pid, ptr::null_mut(), 0);
-    }
+    terminate_process(worker.broker_pid);
+    let reaped = reap_process(worker.broker_pid);
     if worker.reactor_commands.send(Command::BrokerLost).is_ok() {
-        wake_reactor(worker.reactor_wake.as_raw_fd());
+        let _ = wake_socket(worker.reactor_wake.as_raw_fd());
+    }
+    reaped
+}
+
+fn terminate_process(pid: libc::pid_t) {
+    loop {
+        if unsafe { libc::kill(pid, libc::SIGKILL) } == 0 {
+            return;
+        }
+        let error = io::Error::last_os_error();
+        if error.kind() == io::ErrorKind::Interrupted {
+            continue;
+        }
+        return;
     }
 }
 
-fn wake_reactor(fd: RawFd) {
-    let byte = [1_u8];
-    unsafe {
-        libc::send(
-            fd,
-            byte.as_ptr().cast(),
-            byte.len(),
-            libc::MSG_DONTWAIT | libc::MSG_NOSIGNAL,
-        );
+fn reap_process(pid: libc::pid_t) -> bool {
+    let deadline = Instant::now() + FRAME_TIMEOUT;
+    loop {
+        let result = unsafe { libc::waitpid(pid, ptr::null_mut(), libc::WNOHANG) };
+        if result == pid {
+            return true;
+        }
+        if result < 0 {
+            let error = io::Error::last_os_error();
+            if error.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            return error.raw_os_error() == Some(libc::ECHILD);
+        }
+        if Instant::now() >= deadline {
+            // Preserve eventual exact reaping without allowing runtime
+            // shutdown or a guard destructor to block indefinitely.
+            queue_reap(pid);
+            return false;
+        }
+        thread::sleep(Duration::from_millis(5));
     }
 }
 
-fn wake_worker(fd: RawFd) {
-    let byte = [1_u8];
-    unsafe {
-        libc::write(fd, byte.as_ptr().cast(), byte.len());
+fn reaper_sender() -> Option<&'static SyncSender<libc::pid_t>> {
+    static REAPER: OnceLock<Option<SyncSender<libc::pid_t>>> = OnceLock::new();
+    REAPER
+        .get_or_init(|| {
+            let (sender, receiver) = mpsc::sync_channel(REAPER_CAPACITY);
+            let thread = thread::Builder::new()
+                .name("ptyx-broker-reaper".to_owned())
+                .spawn(move || {
+                    let mut pids = Vec::with_capacity(REAPER_CAPACITY);
+                    loop {
+                        if pids.len() < REAPER_CAPACITY {
+                            match receiver.recv_timeout(Duration::from_millis(5)) {
+                                Ok(pid) => pids.push(pid),
+                                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                                Err(mpsc::RecvTimeoutError::Disconnected) if pids.is_empty() => {
+                                    return;
+                                }
+                                Err(mpsc::RecvTimeoutError::Disconnected) => {}
+                            }
+                        } else {
+                            thread::sleep(Duration::from_millis(5));
+                        }
+                        pids.retain(|pid| {
+                            let result =
+                                unsafe { libc::waitpid(*pid, ptr::null_mut(), libc::WNOHANG) };
+                            if result == *pid {
+                                return false;
+                            }
+                            if result == 0 {
+                                return true;
+                            }
+                            let error = io::Error::last_os_error();
+                            if error.kind() == io::ErrorKind::Interrupted {
+                                return true;
+                            }
+                            if error.raw_os_error() != Some(libc::ECHILD) {
+                                REAPER_HEALTHY.store(false, Ordering::Release);
+                            }
+                            false
+                        });
+                    }
+                });
+            match thread {
+                Ok(_) => Some(sender),
+                Err(_) => {
+                    REAPER_HEALTHY.store(false, Ordering::Release);
+                    None
+                }
+            }
+        })
+        .as_ref()
+}
+
+fn queue_reap(pid: libc::pid_t) {
+    let queued = reaper_sender().is_some_and(|reaper| reaper.try_send(pid).is_ok());
+    if !queued {
+        REAPER_HEALTHY.store(false, Ordering::Release);
     }
 }
 

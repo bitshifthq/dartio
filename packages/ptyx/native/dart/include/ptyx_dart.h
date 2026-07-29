@@ -157,6 +157,12 @@ PTYX_EXPORT uint32_t PTYX_CALL ptyd_test_spawn_delay_active(void);
 /** Forces the next admitted write to fail in diagnostic builds. */
 PTYX_EXPORT void PTYX_CALL ptyd_test_fail_next_write(void);
 /**
+ * Injects a typed exit-observation failure for the sole diagnostic session.
+ *
+ * @return One when the event was posted; otherwise zero.
+ */
+PTYX_EXPORT uint32_t PTYX_CALL ptyd_test_fail_exit_observation(void);
+/**
  * Delays the next runtime attachment in diagnostic builds.
  *
  * @param[in] milliseconds Delay duration.

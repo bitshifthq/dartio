@@ -20,6 +20,7 @@ static_assert(PTYX_ERROR_KIND_ENUM_FORCE_32_BIT == INT32_MAX);
 static_assert(PTYX_OPERATION_ENUM_FORCE_32_BIT == INT32_MAX);
 static_assert(PTYX_EVENT_KIND_ENUM_FORCE_32_BIT == INT32_MAX);
 static_assert(PTYX_EVENT_MODE_FAILED == 11);
+static_assert(PTYX_EVENT_EXIT_FAILED == 12);
 static_assert(PTYX_MODE_CANONICAL == UINT32_C(1));
 static_assert(PTYX_MODE_ECHO == UINT32_C(2));
 static_assert(PTYX_MODE_SIGNALS == UINT32_C(4));

@@ -160,10 +160,10 @@ await session.close();
 ```
 
 The first call atomically commits `open` to `closing`. Every caller receives
-the same completion future. Close rejects new operations, resolves pending
-capacity waits, performs graceful terminal-job termination for the configured
-deadline on Unix, escalates to forced termination when needed, stops I/O,
-reaps the direct child exactly once, and releases ports, messages, buffers,
+the same completion future. Close rejects new operations, settles already
+accepted input, performs graceful terminal-job termination for the configured
+deadline on Unix, escalates to forced termination when needed, stops I/O, reaps
+the direct child exactly once, and releases ports, messages, buffers,
 descriptors, handles, workers, and job ownership. ConPTY has no equivalent
 portable graceful request, so Windows begins Job Object termination
 immediately.

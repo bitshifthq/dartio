@@ -552,6 +552,9 @@ final class _NativeRuntime implements Finalizable {
       case ptyx_event_kind.PTYX_EVENT_EXIT:
         _retainTerminalDeliveryTurn(target);
         target._nativeExit(value);
+      case ptyx_event_kind.PTYX_EVENT_EXIT_FAILED:
+        _retainTerminalDeliveryTurn(target);
+        target._nativeExitFailed(failure!);
       case ptyx_event_kind.PTYX_EVENT_CLOSE_COMPLETE:
         _retainTerminalDeliveryTurn(target);
         _sessions.remove(session);

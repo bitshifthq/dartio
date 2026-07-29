@@ -23,6 +23,16 @@ const scorecardWorkloads = {
   'idle_100',
 };
 
+const _repeatedWorkloads = {
+  'output',
+  'transport_output',
+  'input',
+  'transport_input',
+  'bidirectional',
+  'pause_resume',
+  'discard',
+};
+
 Future<void> main(List<String> arguments) async {
   if (arguments.length != 2 ||
       !const {'scorecard', 'soak'}.contains(arguments[0])) {
@@ -55,6 +65,38 @@ Future<void> main(List<String> arguments) async {
   }
 
   final failures = validateCiResult(arguments[0], decoded);
+  final expectedRevision = Platform.environment['GITHUB_SHA'];
+  if (expectedRevision != null &&
+      expectedRevision.isNotEmpty &&
+      decoded['revision'] != expectedRevision) {
+    failures.add(
+      '${arguments[0]} revision ${decoded['revision']} does not match '
+      'GITHUB_SHA $expectedRevision',
+    );
+  }
+  final expectedPlatform = Platform.environment['RUNNER_OS']?.toLowerCase();
+  if (expectedPlatform != null &&
+      expectedPlatform.isNotEmpty &&
+      decoded['platform'] != expectedPlatform) {
+    failures.add(
+      '${arguments[0]} platform ${decoded['platform']} does not match '
+      'RUNNER_OS $expectedPlatform',
+    );
+  }
+  final expectedArchitecture = canonicalArchitecture(
+    Platform.environment['RUNNER_ARCH'],
+  );
+  final actualArchitecture = canonicalArchitecture(
+    '${decoded['architecture']}',
+  );
+  if (expectedArchitecture != null &&
+      expectedArchitecture.isNotEmpty &&
+      actualArchitecture != expectedArchitecture) {
+    failures.add(
+      '${arguments[0]} architecture ${decoded['architecture']} does not match '
+      'RUNNER_ARCH $expectedArchitecture',
+    );
+  }
   if (failures.isNotEmpty) {
     for (final failure in failures) {
       stderr.writeln(failure);
@@ -64,6 +106,16 @@ Future<void> main(List<String> arguments) async {
   }
   stdout.writeln('validated ${arguments[0]} CI result: ${file.path}');
 }
+
+/// Normalizes common OS and CI architecture spellings.
+String? canonicalArchitecture(String? value) => switch (value?.toLowerCase()) {
+  'x64' || 'x86_64' || 'amd64' => 'x64',
+  'arm64' || 'aarch64' => 'arm64',
+  'x86' || 'i386' || 'i686' => 'x86',
+  'arm' || 'armv7' || 'armv7l' => 'arm',
+  final value? when value.isNotEmpty => value,
+  _ => null,
+};
 
 /// Returns structural or completion failures for a CI [artifact] of [kind].
 List<String> validateCiResult(String kind, Map<String, Object?> artifact) {
@@ -83,8 +135,8 @@ List<String> validateCiResult(String kind, Map<String, Object?> artifact) {
       (artifact['revision']! as String).isEmpty) {
     failures.add('$kind revision must be non-empty');
   }
-  if (artifact['tree_dirty'] is! bool) {
-    failures.add('$kind tree_dirty must be boolean');
+  if (artifact['tree_dirty'] != false) {
+    failures.add('$kind tree_dirty must be false');
   }
   if (artifact['platform'] is! String ||
       (artifact['platform']! as String).isEmpty) {
@@ -98,11 +150,103 @@ List<String> validateCiResult(String kind, Map<String, Object?> artifact) {
   switch (kind) {
     case 'scorecard':
       for (final workload in scorecardWorkloads) {
-        if (artifact[workload] is! Map<String, Object?>) {
+        final result = artifact[workload];
+        if (result is! Map<String, Object?>) {
           failures.add('scorecard is missing $workload');
+          continue;
+        }
+        if (_repeatedWorkloads.contains(workload)) {
+          final runs = result['raw_runs'];
+          if (runs is! List<Object?> || runs.isEmpty) {
+            failures.add('$workload must contain at least one raw run');
+            continue;
+          }
+          for (final (index, run) in runs.indexed) {
+            if (run is! Map<String, Object?>) {
+              failures.add('$workload run $index is not an object');
+              continue;
+            }
+            final exitCode = run['exit_code'];
+            if (exitCode != 0) {
+              failures.add('$workload run $index exited with $exitCode');
+            }
+            if (!_validRepeatedRun(workload, run, '${artifact['platform']}')) {
+              failures.add('$workload run $index is missing required metrics');
+            }
+          }
+          final distribution = result['distribution'];
+          if (result['metric'] is! String ||
+              distribution is! Map<String, Object?> ||
+              distribution['samples'] is! int ||
+              (distribution['samples']! as int) <= 0) {
+            failures.add('$workload is missing its metric distribution');
+          }
         }
       }
-      if (artifact['rss_after_bytes'] is! int) {
+      final interactive = artifact['interactive'];
+      if (interactive is Map<String, Object?> &&
+          (interactive['samples'] is! int ||
+              (interactive['samples']! as int) <= 0 ||
+              interactive['p99_us'] is! num)) {
+        failures.add('interactive must contain latency samples');
+      }
+      for (final workload in const ['no_listener', 'saturation']) {
+        final result = artifact[workload];
+        if (result is Map<String, Object?> && result['exit_code'] != 0) {
+          failures.add('$workload exited with ${result['exit_code']}');
+        }
+      }
+      for (final count in const [1, 10, 100]) {
+        final name = 'idle_$count';
+        final result = artifact[name];
+        if (result is Map<String, Object?> &&
+            (result['requested_sessions'] != count ||
+                result['created_sessions'] != count ||
+                result['failure'] != null)) {
+          failures.add(
+            '$name created ${result['created_sessions']} of $count sessions',
+          );
+        }
+      }
+      final forcedClose = artifact['forced_close'];
+      if (forcedClose is Map<String, Object?> &&
+          (forcedClose['descendant_reclaimed'] != true ||
+              forcedClose['exit_code'] is! int)) {
+        failures.add('forced_close did not prove exit and descendant cleanup');
+      }
+      final fairness = artifact['fairness'];
+      if (fairness is Map<String, Object?> &&
+          (fairness['sessions'] != 16 ||
+              fairness['round_trips_per_session'] is! int ||
+              fairness['per_session'] is! List<Object?> ||
+              !_validFairness(fairness['per_session']! as List<Object?>))) {
+        failures.add('fairness did not exercise 16 sessions');
+      }
+      final activeOutput = artifact['active_output'];
+      if (activeOutput is Map<String, Object?> &&
+          (activeOutput['sessions'] != 16 ||
+              activeOutput['per_session'] is! List<Object?> ||
+              !_validActiveOutput(
+                activeOutput['per_session']! as List<Object?>,
+              ) ||
+              activeOutput['slowest_to_fastest_ratio'] is! num)) {
+        failures.add('active_output did not exercise 16 sessions');
+      }
+      final spawnClose = artifact['spawn_close'];
+      if (spawnClose is Map<String, Object?> &&
+          (spawnClose['samples'] is! int ||
+              (spawnClose['samples']! as int) <= 0)) {
+        failures.add('spawn_close must contain latency samples');
+      }
+      final observation = artifact['observation'];
+      if (observation is Map<String, Object?> &&
+          (observation['repetitions'] is! int ||
+              (observation['repetitions']! as int) <= 0 ||
+              observation['mode_samples'] is! int)) {
+        failures.add('observation must contain resize and mode samples');
+      }
+      if (artifact['rss_after_bytes'] is! int ||
+          (artifact['rss_after_bytes']! as int) <= 0) {
         failures.add('scorecard is missing rss_after_bytes');
       }
     case 'soak':
@@ -120,4 +264,73 @@ List<String> validateCiResult(String kind, Map<String, Object?> artifact) {
       }
   }
   return failures;
+}
+
+bool _validRepeatedRun(
+  String workload,
+  Map<String, Object?> run,
+  String platform,
+) {
+  bool positive(String key) => run[key] is num && (run[key]! as num) > 0;
+  return switch (workload) {
+    'output' || 'transport_output' || 'input' || 'transport_input' =>
+      positive('bytes') && positive('elapsed_us') && positive('mib_per_second'),
+    'bidirectional' =>
+      positive('sent_bytes') &&
+          _validBidirectionalReceipt(run, platform) &&
+          positive('elapsed_us') &&
+          positive('aggregate_mib_per_second'),
+    'pause_resume' =>
+      positive('bytes') && positive('pause_ms') && positive('resume_to_eof_us'),
+    'discard' => positive('generated_bytes') && positive('elapsed_us'),
+    _ => false,
+  };
+}
+
+bool _validBidirectionalReceipt(Map<String, Object?> run, String platform) {
+  final sent = run['sent_bytes'];
+  final received = run['received_bytes'];
+  if (sent is! int || received is! int) return false;
+  if (platform == 'windows') {
+    return received == 0 &&
+        run['exact_output_history_supported'] == false &&
+        run['integrity_scope'] is String &&
+        (run['integrity_scope']! as String).isNotEmpty;
+  }
+  return received == sent;
+}
+
+bool _validFairness(List<Object?> sessions) {
+  if (sessions.length != 16) return false;
+  final identities = <int>{};
+  for (final value in sessions) {
+    if (value is! Map<String, Object?> ||
+        value['session'] is! int ||
+        value['samples'] is! int ||
+        (value['samples']! as int) <= 0 ||
+        value['p99_us'] is! num) {
+      return false;
+    }
+    identities.add(value['session']! as int);
+  }
+  return identities.length == 16 &&
+      identities.every((identity) => identity >= 0 && identity < 16);
+}
+
+bool _validActiveOutput(List<Object?> sessions) {
+  if (sessions.length != 16) return false;
+  final identities = <int>{};
+  for (final value in sessions) {
+    if (value is! Map<String, Object?> ||
+        value['session'] is! int ||
+        value['elapsed_us'] is! num ||
+        (value['elapsed_us']! as num) <= 0 ||
+        value['mib_per_second'] is! num ||
+        (value['mib_per_second']! as num) <= 0) {
+      return false;
+    }
+    identities.add(value['session']! as int);
+  }
+  return identities.length == 16 &&
+      identities.every((identity) => identity >= 0 && identity < 16);
 }

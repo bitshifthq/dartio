@@ -1,4 +1,8 @@
 use std::collections::VecDeque;
+#[cfg(unix)]
+use std::io;
+#[cfg(unix)]
+use std::os::fd::RawFd;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
@@ -24,6 +28,76 @@ impl WakeGate {
 
     pub(crate) fn clear(&self) {
         self.pending.store(false, Ordering::Release);
+    }
+}
+
+#[cfg(unix)]
+fn complete_wake(mut send: impl FnMut() -> io::Result<()>) -> io::Result<()> {
+    loop {
+        match send() {
+            Ok(()) => return Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            // A full nonblocking descriptor already contains a wake token.
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(()),
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+#[cfg(unix)]
+pub(crate) fn wake_socket(fd: RawFd) -> io::Result<()> {
+    let byte = [1_u8];
+    complete_wake(|| {
+        let result = unsafe {
+            libc::send(
+                fd,
+                byte.as_ptr().cast(),
+                byte.len(),
+                libc::MSG_DONTWAIT | libc::MSG_NOSIGNAL,
+            )
+        };
+        if result >= 0 {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
+        }
+    })
+}
+
+#[cfg(unix)]
+pub(crate) fn fail_wake_socket(fd: RawFd) {
+    unsafe {
+        libc::shutdown(fd, libc::SHUT_RDWR);
+    }
+}
+
+#[cfg(all(test, unix))]
+mod wake_tests {
+    use super::complete_wake;
+    use std::collections::VecDeque;
+    use std::io;
+
+    #[test]
+    fn interrupted_wake_is_retried() {
+        let mut results =
+            VecDeque::from([Err(io::Error::from(io::ErrorKind::Interrupted)), Ok(())]);
+
+        complete_wake(|| results.pop_front().unwrap()).unwrap();
+
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn full_wake_descriptor_means_a_wake_is_already_pending() {
+        complete_wake(|| Err(io::Error::from(io::ErrorKind::WouldBlock))).unwrap();
+    }
+
+    #[test]
+    fn fatal_wake_failure_is_reported() {
+        let error = complete_wake(|| Err(io::Error::from(io::ErrorKind::BrokenPipe)))
+            .expect_err("broken wake descriptor must fail");
+
+        assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
     }
 }
 

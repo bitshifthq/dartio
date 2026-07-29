@@ -545,11 +545,11 @@ external int ptyx_session_write(
 
 const int PTYD_INVALID_ADAPTER = 0;
 
-const int PTYX_ABI_VERSION = 2;
+const int PTYX_ABI_VERSION = 3;
 
 const int PTYX_ABI_VERSION_MAJOR = 0;
 
-const int PTYX_ABI_VERSION_MINOR = 2;
+const int PTYX_ABI_VERSION_MINOR = 3;
 
 const int PTYX_CAPABILITY_CONPTY = 8;
 
@@ -713,8 +713,8 @@ typedef ptyx_error_t = ptyx_error;
 /// - PTYX_EVENT_SPAWN_FAILED carries error.
 /// - PTYX_EVENT_OUTPUT carries immutable data, data_length, and an owning
 /// token.
-/// - PTYX_EVENT_INPUT_FAILED, PTYX_EVENT_OUTPUT_FAILED, and
-/// PTYX_EVENT_INFRASTRUCTURE_FAILED carry error.
+/// - PTYX_EVENT_INPUT_FAILED, PTYX_EVENT_OUTPUT_FAILED,
+/// PTYX_EVENT_EXIT_FAILED, and PTYX_EVENT_INFRASTRUCTURE_FAILED carry error.
 /// - PTYX_EVENT_OUTPUT_DONE has no additional value.
 /// - PTYX_EVENT_EXIT carries the signed platform exit status in value.
 /// - PTYX_EVENT_CLOSE_COMPLETE carries PTYX_EVENT_CLOSE_* bits in flags and
@@ -806,6 +806,9 @@ sealed class ptyx_event_kind {
   /// Native terminal-mode observation failed and stopped.
   static const PTYX_EVENT_MODE_FAILED = 11;
 
+  /// Direct-child exit-status observation failed.
+  static const PTYX_EVENT_EXIT_FAILED = 12;
+
   /// Reserved value that fixes the public enum representation at 32 bits.
   static const PTYX_EVENT_KIND_ENUM_FORCE_32_BIT = 2147483647;
 }
@@ -847,6 +850,9 @@ sealed class ptyx_operation {
 
   /// Session cleanup.
   static const PTYX_OPERATION_CLOSE = 9;
+
+  /// Direct-child exit-status observation.
+  static const PTYX_OPERATION_EXIT = 10;
 
   /// Reserved value that fixes the public enum representation at 32 bits.
   static const PTYX_OPERATION_ENUM_FORCE_32_BIT = 2147483647;

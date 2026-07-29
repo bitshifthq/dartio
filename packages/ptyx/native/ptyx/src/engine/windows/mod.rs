@@ -105,6 +105,7 @@ struct Session {
     output_failed_notified: bool,
     read: Option<Pin<Box<IoOperation>>>,
     exit_notified: bool,
+    exit_failure: Option<OperationError>,
     pseudoconsole_close_started: bool,
     pseudoconsole_close_done: bool,
     broker_lost_notified: bool,
@@ -138,6 +139,7 @@ impl Session {
             output_failed_notified: false,
             read: None,
             exit_notified: false,
+            exit_failure: None,
             pseudoconsole_close_started: false,
             pseudoconsole_close_done: false,
             broker_lost_notified: false,
@@ -718,6 +720,14 @@ impl CloserPool {
             .lock()
             .ok()
             .and_then(|mut completed| completed.remove(&handle))
+    }
+
+    fn drain_completed(&self) -> Vec<(u64, ClosePermit)> {
+        self.state
+            .completed
+            .lock()
+            .map(|mut completed| completed.drain().collect())
+            .unwrap_or_default()
     }
 
     fn submit(&self, task: CloseTask) -> Result<(), CloseTask> {
@@ -1315,6 +1325,7 @@ fn reactor(
     let mut counters = RuntimeCounters::default();
     let mut control_scratch = VecDeque::new();
     loop {
+        collect_completed_closes(&closer, &mut sessions);
         refresh_due_outputs(
             iocp.raw(),
             &iocp_sender,
@@ -1523,7 +1534,15 @@ fn process_commands(
                             notify_input_failure(handle, session, notices, counters, failure);
                         }
                         if !session.exit_notified {
-                            if let Some(status) = session.exit_status {
+                            if let Some(failure) = session.exit_failure {
+                                session.exit_notified = true;
+                                send_lifecycle_notice(
+                                    session,
+                                    notices,
+                                    Notice::ExitFailed { handle, failure },
+                                    counters,
+                                );
+                            } else if let Some(status) = session.exit_status {
                                 session.exit_notified = true;
                                 send_lifecycle_notice(
                                     session,
@@ -1795,12 +1814,26 @@ fn handle_process_exit(
             cancel_write(session);
         } else {
             let error = io::Error::last_os_error();
-            retain_cleanup_failure(session, OperationError::from_io(Operation::Close, &error));
-            notify_broker_lost(handle, session, notices, counters);
+            let failure = OperationError::from_io(Operation::Exit, &error);
+            // Preserve process ownership and trailing output independently of
+            // the failed status query. The internal value only marks the
+            // already-signaled process terminal; it is never published.
+            session.exit_status = Some(0);
+            session.exit_failure = Some(failure);
+            fail_input(handle, session, notices, counters, input_closed());
+            cancel_write(session);
         }
     }
     if session.active && !session.exit_notified {
-        if let Some(status) = session.exit_status {
+        if let Some(failure) = session.exit_failure {
+            session.exit_notified = true;
+            send_lifecycle_notice(
+                session,
+                notices,
+                Notice::ExitFailed { handle, failure },
+                counters,
+            );
+        } else if let Some(status) = session.exit_status {
             session.exit_notified = true;
             send_lifecycle_notice(session, notices, Notice::Exit { handle, status }, counters);
         }
@@ -2057,8 +2090,23 @@ fn start_pseudoconsole_close(
     match closer.submit(task) {
         Ok(()) => session.pseudoconsole_close_started = true,
         Err(task) => {
-            session.pseudoconsole = Some(task.pseudoconsole);
+            // The qualified Windows baseline guarantees nonblocking HPCON
+            // closure. If the defensive worker cannot be created, close on the
+            // reactor and complete ownership explicitly instead of leaking or
+            // waiting for a worker that does not exist.
+            task.pseudoconsole.close();
             session.close_permit = Some(task.permit);
+            session.pseudoconsole_close_started = true;
+            session.pseudoconsole_close_done = true;
+        }
+    }
+}
+
+fn collect_completed_closes(closer: &CloserPool, sessions: &mut GenerationRegistry<Session>) {
+    for (handle, permit) in closer.drain_completed() {
+        if let Some(session) = sessions.get_mut(handle) {
+            session.close_permit = Some(permit);
+            session.pseudoconsole_close_done = true;
         }
     }
 }
@@ -2337,6 +2385,10 @@ fn reap_abandoned(
 }
 
 fn output_timeout(sessions: &GenerationRegistry<Session>) -> u32 {
+    let close_polling = sessions
+        .iter()
+        .map(|(_, session)| session)
+        .any(|session| session.pseudoconsole_close_started && !session.pseudoconsole_close_done);
     let output_deadline = sessions
         .iter()
         .map(|(_, session)| session)
@@ -2360,17 +2412,25 @@ fn output_timeout(sessions: &GenerationRegistry<Session>) -> u32 {
         (left, right) => left.or(right),
     };
     let Some(deadline) = deadline else {
-        return INFINITE;
+        // The completion packet is an optimization, not the ownership
+        // contract. Poll the completed-close registry while a close is active
+        // so a failed IOCP post cannot strand session cleanup.
+        return if close_polling { 100 } else { INFINITE };
     };
     let now = Instant::now();
     if deadline <= now {
         return 0;
     }
-    deadline
+    let timeout = deadline
         .duration_since(now)
         .as_millis()
         .max(1)
-        .min(u128::from(u32::MAX - 1)) as u32
+        .min(u128::from(u32::MAX - 1)) as u32;
+    if close_polling {
+        timeout.min(100)
+    } else {
+        timeout
+    }
 }
 
 fn output_notification_deadline(

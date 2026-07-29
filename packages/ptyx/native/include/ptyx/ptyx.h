@@ -39,7 +39,7 @@ extern "C" {
 /** ABI major version. */
 #define PTYX_ABI_VERSION_MAJOR UINT32_C(0)
 /** ABI minor version. */
-#define PTYX_ABI_VERSION_MINOR UINT32_C(2)
+#define PTYX_ABI_VERSION_MINOR UINT32_C(3)
 /** Packed ABI version returned by ptyx_abi_version(). */
 #define PTYX_ABI_VERSION                                                       \
   ((PTYX_ABI_VERSION_MAJOR << UINT32_C(16)) | PTYX_ABI_VERSION_MINOR)
@@ -195,6 +195,8 @@ typedef enum ptyx_operation {
   PTYX_OPERATION_METADATA = 8,
   /** Session cleanup. */
   PTYX_OPERATION_CLOSE = 9,
+  /** Direct-child exit-status observation. */
+  PTYX_OPERATION_EXIT = 10,
   /** Reserved value that fixes the public enum representation at 32 bits. */
   PTYX_OPERATION_ENUM_FORCE_32_BIT = INT32_MAX
 } ptyx_operation_t;
@@ -613,6 +615,8 @@ typedef enum ptyx_event_kind {
   PTYX_EVENT_MODE_CHANGED = 10,
   /** Native terminal-mode observation failed and stopped. */
   PTYX_EVENT_MODE_FAILED = 11,
+  /** Direct-child exit-status observation failed. */
+  PTYX_EVENT_EXIT_FAILED = 12,
   /** Reserved value that fixes the public enum representation at 32 bits. */
   PTYX_EVENT_KIND_ENUM_FORCE_32_BIT = INT32_MAX
 } ptyx_event_kind_t;
@@ -633,8 +637,8 @@ typedef enum ptyx_event_kind {
  * - PTYX_EVENT_SPAWN_FAILED carries error.
  * - PTYX_EVENT_OUTPUT carries immutable data, data_length, and an owning
  *   token.
- * - PTYX_EVENT_INPUT_FAILED, PTYX_EVENT_OUTPUT_FAILED, and
- *   PTYX_EVENT_INFRASTRUCTURE_FAILED carry error.
+ * - PTYX_EVENT_INPUT_FAILED, PTYX_EVENT_OUTPUT_FAILED,
+ *   PTYX_EVENT_EXIT_FAILED, and PTYX_EVENT_INFRASTRUCTURE_FAILED carry error.
  * - PTYX_EVENT_OUTPUT_DONE has no additional value.
  * - PTYX_EVENT_EXIT carries the signed platform exit status in value.
  * - PTYX_EVENT_CLOSE_COMPLETE carries PTYX_EVENT_CLOSE_* bits in flags and

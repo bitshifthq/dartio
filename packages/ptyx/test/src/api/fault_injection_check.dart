@@ -42,4 +42,18 @@ void main() {
           'probe stdout:\n${result.stdout}\nprobe stderr:\n${result.stderr}',
     );
   });
+
+  test(
+    'exit observation failure preserves trailing output and cleanup',
+    () async {
+      final result = await _runProbe('exit-observation');
+
+      expect(
+        result.exitCode,
+        0,
+        reason:
+            'probe stdout:\n${result.stdout}\nprobe stderr:\n${result.stderr}',
+      );
+    },
+  );
 }

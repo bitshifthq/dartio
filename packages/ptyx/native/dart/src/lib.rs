@@ -1,10 +1,10 @@
 use ptyx_c::private as c_api;
 use ptyx_c::private::{
-    Error, Event, Registry, SpawnOptions, ERROR_DOMAIN_ARGUMENT, ERROR_DOMAIN_RUNTIME,
-    ERROR_DOMAIN_STATE, ERROR_INFRASTRUCTURE_LOST, ERROR_INVALID_ARGUMENT, ERROR_STALE_HANDLE,
-    ERROR_WRONG_STATE, OPERATION_CLOSE, OPERATION_OUTPUT, OPERATION_RUNTIME_CREATE,
-    OPERATION_RUNTIME_SHUTDOWN, STATUS_INTERNAL, STATUS_INVALID_ARGUMENT, STATUS_OK,
-    STATUS_STALE_HANDLE, STATUS_WRONG_STATE,
+    Error, Event, Registry, SpawnOptions, ERROR_DOMAIN_ARGUMENT, ERROR_DOMAIN_PROCESS,
+    ERROR_DOMAIN_RUNTIME, ERROR_DOMAIN_STATE, ERROR_INFRASTRUCTURE_LOST, ERROR_INVALID_ARGUMENT,
+    ERROR_NATIVE_FAILURE, ERROR_STALE_HANDLE, ERROR_WRONG_STATE, OPERATION_CLOSE, OPERATION_EXIT,
+    OPERATION_OUTPUT, OPERATION_RUNTIME_CREATE, OPERATION_RUNTIME_SHUTDOWN, STATUS_INTERNAL,
+    STATUS_INVALID_ARGUMENT, STATUS_OK, STATUS_STALE_HANDLE, STATUS_WRONG_STATE,
 };
 use std::collections::HashSet;
 use std::ffi::c_void;
@@ -22,6 +22,7 @@ const EVENT_SPAWN_FAILED: u32 = 2;
 const EVENT_OUTPUT: u32 = 3;
 const EVENT_INFRASTRUCTURE_FAILED: u32 = 6;
 const EVENT_CLOSE_COMPLETE: u32 = 9;
+const EVENT_EXIT_FAILED: u32 = 12;
 static DART_INITIALIZED: AtomicBool = AtomicBool::new(false);
 
 struct PumpState {
@@ -756,6 +757,36 @@ pub extern "C" fn ptyd_test_spawn_delay_active() -> u32 {
 #[no_mangle]
 pub extern "C" fn ptyd_test_fail_next_write() {
     c_api::test_fail_next_write();
+}
+
+#[cfg(feature = "test-controls")]
+#[no_mangle]
+pub extern "C" fn ptyd_test_fail_exit_observation() -> u32 {
+    let pump = pumps()
+        .lock()
+        .ok()
+        .and_then(|registry| registry.sole().map(Arc::clone));
+    let Some(pump) = pump else {
+        return 0;
+    };
+    let session = pump
+        .state
+        .lock()
+        .ok()
+        .and_then(|state| state.sessions.iter().copied().next());
+    let Some(session) = session else {
+        return 0;
+    };
+    let mut event = Event::empty(size_of::<Event>() as u32);
+    event.kind = EVENT_EXIT_FAILED;
+    event.session = session;
+    event.error = Error::value(
+        ERROR_DOMAIN_PROCESS,
+        ERROR_NATIVE_FAILURE,
+        OPERATION_EXIT,
+        87,
+    );
+    u32::from(unsafe { post_event(pump.port, &event) })
 }
 
 #[cfg(feature = "test-controls")]

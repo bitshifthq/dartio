@@ -61,6 +61,10 @@ pub enum Notice {
         handle: u64,
         failure: OperationError,
     },
+    ExitFailed {
+        handle: u64,
+        failure: OperationError,
+    },
     BrokerLost {
         handle: u64,
         failure: OperationError,
@@ -102,6 +106,7 @@ impl Notice {
             Self::Output { handle, .. }
             | Self::InputFailed { handle, .. }
             | Self::OutputFailed { handle, .. }
+            | Self::ExitFailed { handle, .. }
             | Self::BrokerLost { handle, .. }
             | Self::OutputDone(handle)
             | Self::Closed { handle, .. } => *handle,

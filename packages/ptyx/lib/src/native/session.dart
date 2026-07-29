@@ -341,6 +341,12 @@ final class _NativeSession implements Finalizable, PtySession {
     }
   }
 
+  void _nativeExitFailed(_NativeFailure failure) {
+    if (!_exit.isCompleted) {
+      _exit.completeError(_exception(failure));
+    }
+  }
+
   void _nativeCloseComplete(int _, _NativeFailure? failure) {
     _controller.detachFinalizer(this);
     _discardPendingOutput();
@@ -638,6 +644,11 @@ PtyException _exception(_NativeFailure failure, {String? operation}) {
       operation: publicOperation,
       nativeCode: nativeCode,
     ),
+    ptyx_operation.PTYX_OPERATION_EXIT => PtyExitException(
+      failure.message,
+      operation: publicOperation,
+      nativeCode: nativeCode,
+    ),
     ptyx_operation.PTYX_OPERATION_RESIZE => PtyResizeException(
       failure.message,
       operation: publicOperation,
@@ -684,6 +695,7 @@ String _operationName(int operation) => switch (operation) {
   ptyx_operation.PTYX_OPERATION_OUTPUT => 'output',
   ptyx_operation.PTYX_OPERATION_RESIZE => 'resize',
   ptyx_operation.PTYX_OPERATION_TERMINATE => 'kill',
+  ptyx_operation.PTYX_OPERATION_EXIT => 'exit',
   ptyx_operation.PTYX_OPERATION_METADATA => 'metadata',
   ptyx_operation.PTYX_OPERATION_CLOSE => 'close',
   _ => 'controller',

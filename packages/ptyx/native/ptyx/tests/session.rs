@@ -226,6 +226,7 @@ fn run_input_round_trip(
             Event::Exited(_) => exited = true,
             Event::InputFailed(_)
             | Event::OutputFailed(_)
+            | Event::ExitFailed(_)
             | Event::InfrastructureFailed(_)
             | Event::Closed(_)
             | Event::ModeChanged(_)

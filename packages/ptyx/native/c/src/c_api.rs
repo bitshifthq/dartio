@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::Duration;
 
-const ABI_VERSION: u32 = 2;
+const ABI_VERSION: u32 = 3;
 pub const STATUS_OK: u32 = 0;
 pub const STATUS_INVALID_ARGUMENT: u32 = 1;
 pub const STATUS_STALE_HANDLE: u32 = 2;
@@ -33,7 +33,7 @@ pub const ERROR_DOMAIN_ARGUMENT: u32 = 1;
 pub const ERROR_DOMAIN_STATE: u32 = 2;
 const ERROR_DOMAIN_INPUT: u32 = 3;
 const ERROR_DOMAIN_OUTPUT: u32 = 4;
-const ERROR_DOMAIN_PROCESS: u32 = 5;
+pub const ERROR_DOMAIN_PROCESS: u32 = 5;
 pub const ERROR_DOMAIN_RUNTIME: u32 = 6;
 const ERROR_DOMAIN_OS: u32 = 7;
 
@@ -44,7 +44,7 @@ pub const ERROR_WRONG_STATE: u32 = 3;
 const ERROR_QUEUE_FULL: u32 = 4;
 const ERROR_UNSUPPORTED: u32 = 5;
 const ERROR_CLOSED: u32 = 6;
-const ERROR_NATIVE_FAILURE: u32 = 7;
+pub const ERROR_NATIVE_FAILURE: u32 = 7;
 pub const ERROR_INFRASTRUCTURE_LOST: u32 = 8;
 
 const OPERATION_NONE: u32 = 0;
@@ -57,6 +57,7 @@ const OPERATION_RESIZE: u32 = 6;
 const OPERATION_TERMINATE: u32 = 7;
 const OPERATION_METADATA: u32 = 8;
 pub const OPERATION_CLOSE: u32 = 9;
+pub const OPERATION_EXIT: u32 = 10;
 
 const EVENT_SPAWN_READY: u32 = 1;
 const EVENT_SPAWN_FAILED: u32 = 2;
@@ -71,6 +72,7 @@ const EVENT_CLOSE_COMPLETE: u32 = 9;
 const EVENT_MODE_CHANGED: u32 = 10;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 const EVENT_MODE_FAILED: u32 = 11;
+const EVENT_EXIT_FAILED: u32 = 12;
 
 const EVENT_CLOSE_INPUT_FAILED: u32 = 1;
 const EVENT_CLOSE_OUTPUT_FAILED: u32 = 2;
@@ -976,6 +978,7 @@ fn operation_error(failure: OperationError) -> Error {
         Operation::Output => OPERATION_OUTPUT,
         Operation::Resize => OPERATION_RESIZE,
         Operation::Terminate => OPERATION_TERMINATE,
+        Operation::Exit => OPERATION_EXIT,
         Operation::Metadata => OPERATION_METADATA,
         Operation::Close => OPERATION_CLOSE,
         _ => OPERATION_NONE,
@@ -1003,7 +1006,7 @@ fn operation_error(failure: OperationError) -> Error {
         FailureKind::Unsupported | FailureKind::NativeFailure => match failure.operation() {
             Operation::Write => ERROR_DOMAIN_INPUT,
             Operation::Output => ERROR_DOMAIN_OUTPUT,
-            Operation::Spawn | Operation::Terminate => ERROR_DOMAIN_PROCESS,
+            Operation::Spawn | Operation::Terminate | Operation::Exit => ERROR_DOMAIN_PROCESS,
             _ => ERROR_DOMAIN_OS,
         },
         _ => ERROR_DOMAIN_OS,
@@ -1089,6 +1092,10 @@ unsafe fn populate_event(
         }
         Notice::OutputFailed { failure, .. } => {
             event.kind = EVENT_OUTPUT_FAILED;
+            event.error = operation_error(failure);
+        }
+        Notice::ExitFailed { failure, .. } => {
+            event.kind = EVENT_EXIT_FAILED;
             event.error = operation_error(failure);
         }
         Notice::BrokerLost { failure, .. } => {
@@ -1906,8 +1913,9 @@ mod tests {
         active_session_for_write, copy_write_result, decode_handle, io_error, operation_error,
         operation_status, sessions, write_boundary, Error, Event, Registry, RuntimeOptions,
         SessionSnapshot, SpawnOptions, ERROR_DOMAIN_ARGUMENT, ERROR_DOMAIN_PROCESS,
-        ERROR_INVALID_ARGUMENT, ERROR_NATIVE_FAILURE, OPERATION_SPAWN, OPERATION_TERMINATE,
-        STATUS_BACKPRESSURE, STATUS_INVALID_ARGUMENT, STATUS_OK, STATUS_OS_ERROR,
+        ERROR_INVALID_ARGUMENT, ERROR_NATIVE_FAILURE, OPERATION_EXIT, OPERATION_SPAWN,
+        OPERATION_TERMINATE, STATUS_BACKPRESSURE, STATUS_INVALID_ARGUMENT, STATUS_OK,
+        STATUS_OS_ERROR,
     };
     use ptyx::__private_adapter::CopyWriteResult;
     use ptyx::{FailureKind, Operation, OperationError};
@@ -1974,6 +1982,17 @@ mod tests {
         assert_eq!(error.kind, ERROR_NATIVE_FAILURE);
         assert_eq!(error.operation, OPERATION_TERMINATE);
         assert_eq!(error.native_code, 73);
+    }
+
+    #[test]
+    fn exit_observation_failure_preserves_its_process_identity() {
+        let failure = OperationError::new(Operation::Exit, FailureKind::NativeFailure, Some(87));
+        let error = operation_error(failure);
+
+        assert_eq!(operation_status(failure), STATUS_OS_ERROR);
+        assert_eq!(error.domain, ERROR_DOMAIN_PROCESS);
+        assert_eq!(error.operation, OPERATION_EXIT);
+        assert_eq!(error.native_code, 87);
     }
 
     #[test]

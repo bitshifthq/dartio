@@ -21,6 +21,8 @@ pub enum Operation {
     Resize,
     /// Child or terminal-job termination.
     Terminate,
+    /// Direct-child exit-status observation.
+    Exit,
     /// Atomic metadata snapshot or terminal-mode observation.
     Metadata,
     /// Session cleanup.
@@ -36,6 +38,7 @@ impl fmt::Display for Operation {
             Self::Output => "output",
             Self::Resize => "resize",
             Self::Terminate => "termination",
+            Self::Exit => "exit observation",
             Self::Metadata => "metadata",
             Self::Close => "close",
         })
