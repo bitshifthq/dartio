@@ -223,11 +223,15 @@ impl Stream for Events {
 
 impl Drop for Events {
     fn drop(&mut self) {
-        let notices = self.receiver.close();
         if self.observing_modes {
             let _ = self.control.observe_modes(false);
         }
+        // Cancellation is a synchronous reactor command. Complete it before
+        // closing the route so output cannot be rejected between route
+        // closure and native drain-and-discard, which would abandon a session
+        // whose independent close completion is still awaited.
         let _ = self.control.cancel_output();
+        let notices = self.receiver.close();
         for notice in notices {
             if let ptyx_engine::Notice::Output { bytes, .. } = notice {
                 self.control.release_output(bytes.len());
