@@ -104,7 +104,7 @@ impl Session {
 
     fn record_release_result(&mut self, succeeded: bool) {
         self.release = ReleaseState::Complete;
-        self.cleanup_failed = !succeeded;
+        self.cleanup_failed |= !succeeded;
     }
 
     fn completed_close_result(&self) -> Option<CloseResult> {
@@ -2439,6 +2439,16 @@ mod tests {
                 ..crate::engine::CloseResult::default()
             })
         );
+    }
+
+    #[test]
+    fn successful_release_retains_an_earlier_cleanup_failure() {
+        let mut session = session(4096);
+        session.cleanup_failed = true;
+
+        session.record_release_result(true);
+
+        assert!(session.cleanup_failed);
     }
 
     #[test]
