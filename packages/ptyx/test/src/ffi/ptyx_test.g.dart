@@ -46,6 +46,13 @@ external void ptyd_test_fail_next_write();
 @ffi.Native<ffi.Uint32 Function()>()
 external int ptyd_test_kill_broker();
 
+/// Returns the number of sessions tracked by live Dart adapters.
+///
+/// @return Tracked session count, or UINT32_MAX when native state is
+/// unavailable.
+@ffi.Native<ffi.Uint32 Function()>()
+external int ptyd_test_session_count();
+
 /// Reports whether the diagnostic spawn delay is active.
 ///
 /// @return One while a delayed worker is active; otherwise zero.

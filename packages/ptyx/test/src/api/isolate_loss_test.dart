@@ -76,18 +76,22 @@ Future<int> _spawnAndDropQuietSession() async {
 }
 
 Future<void> _collectDroppedSession(SendPort reports) async {
+  final baseline = ptyd_test_session_count();
   final pid = await _spawnAndDropQuietSession();
   reports.send(pid);
   final retained = <Uint8List>[];
   final deadline = DateTime.now().add(const Duration(seconds: 10));
-  while (await _processExists(pid) && DateTime.now().isBefore(deadline)) {
+  while (ptyd_test_session_count() != baseline &&
+      DateTime.now().isBefore(deadline)) {
     retained.add(Uint8List(1024 * 1024));
     if (retained.length == 16) {
       retained.clear();
     }
     await Future<void>.delayed(const Duration(milliseconds: 10));
   }
-  reports.send(!await _processExists(pid));
+  reports.send(
+    ptyd_test_session_count() == baseline && !await _processExists(pid),
+  );
 }
 
 Future<void> _loseDuringStagedSpawn((SendPort, String) message) async {

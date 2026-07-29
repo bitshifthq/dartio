@@ -174,6 +174,13 @@ PTYX_EXPORT uint32_t PTYX_CALL ptyd_test_attach_delay_active(void);
  * @return Live adapter count, or UINT32_MAX when the registry is unavailable.
  */
 PTYX_EXPORT uint32_t PTYX_CALL ptyd_test_adapter_count(void);
+/**
+ * Returns the number of sessions tracked by live Dart adapters.
+ *
+ * @return Tracked session count, or UINT32_MAX when native state is
+ * unavailable.
+ */
+PTYX_EXPORT uint32_t PTYX_CALL ptyd_test_session_count(void);
 #endif
 
 #ifdef __cplusplus

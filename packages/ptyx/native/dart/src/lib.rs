@@ -794,6 +794,24 @@ pub extern "C" fn ptyd_test_adapter_count() -> u32 {
         .map_or(u32::MAX, |registry| registry.live_count() as u32)
 }
 
+#[cfg(feature = "test-controls")]
+#[no_mangle]
+pub extern "C" fn ptyd_test_session_count() -> u32 {
+    let Ok(registry) = pumps().lock() else {
+        return u32::MAX;
+    };
+    let adapters = registry.values().cloned().collect::<Vec<_>>();
+    drop(registry);
+
+    adapters
+        .iter()
+        .try_fold(0_u32, |total, pump| {
+            let state = pump.state.lock().ok()?;
+            total.checked_add(u32::try_from(state.sessions.len()).ok()?)
+        })
+        .unwrap_or(u32::MAX)
+}
+
 unsafe extern "C" {
     fn Dart_InitializeApiDL(data: *mut c_void) -> libc::intptr_t;
     fn ptyx_dart_post_event(
