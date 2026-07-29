@@ -121,6 +121,18 @@ PTYX_EXPORT ptyx_status_t PTYX_CALL ptyd_runtime_detach(ptyd_adapter_t *adapter,
  */
 PTYX_EXPORT void PTYX_CALL ptyd_runtime_finalize(void *token);
 
+/**
+ * @brief Native finalizer for a session handle encoded as a pointer address.
+ *
+ * Transfers ownership to the process-wide cleanup worker and returns without
+ * waiting. Cleanup is idempotent and generation checked, so it is safe when
+ * explicit close or adapter teardown races finalization.
+ *
+ * @param[in] token Session handle encoded as a pointer-sized integer.
+ * @return Nothing.
+ */
+PTYX_EXPORT void PTYX_CALL ptyd_session_finalize(void *token);
+
 #if defined(PTYX_TEST_CONTROLS)
 /** Forces the next Dart port post to fail in diagnostic builds. */
 PTYX_EXPORT void PTYX_CALL ptyd_test_fail_next_post(void);

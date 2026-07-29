@@ -581,7 +581,7 @@ mod tests {
     };
 
     const RESIZE_PROBE_ENVIRONMENT: &str = "PTYX_CONPTY_RESIZE_PROBE_CHILD";
-    const RESIZE_PROBE_TEST: &str = "windows::spawn::tests::conpty_resize_probe_child";
+    const RESIZE_PROBE_TEST: &str = "engine::windows::spawn::tests::conpty_resize_probe_child";
     const RESIZE_PROBE_BEFORE: &str = "PTYX_RESIZE_BEFORE";
     const RESIZE_PROBE_AFTER: &str = "PTYX_RESIZE_AFTER";
     const PROBE_TIMEOUT: Duration = Duration::from_secs(5);

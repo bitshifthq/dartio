@@ -255,6 +255,10 @@ impl<T> Registry<T> {
             .flatten()
     }
 
+    pub fn values(&self) -> impl Iterator<Item = &T> {
+        self.slots.iter().filter_map(|slot| slot.value.as_ref())
+    }
+
     #[cfg(feature = "test-controls")]
     pub fn sole(&self) -> Option<&T> {
         let mut values = self.slots.iter().filter_map(|slot| slot.value.as_ref());

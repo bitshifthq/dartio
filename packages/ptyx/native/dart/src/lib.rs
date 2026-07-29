@@ -65,16 +65,24 @@ fn pump(handle: u64) -> Option<Arc<Pump>> {
     pumps().lock().ok()?.get(handle).map(Arc::clone)
 }
 
-fn cleanup_sender() -> Option<&'static Sender<u64>> {
-    static CLEANUP: OnceLock<Option<Sender<u64>>> = OnceLock::new();
+enum Cleanup {
+    Adapter(u64),
+    Session(u64),
+}
+
+fn cleanup_sender() -> Option<&'static Sender<Cleanup>> {
+    static CLEANUP: OnceLock<Option<Sender<Cleanup>>> = OnceLock::new();
     CLEANUP
         .get_or_init(|| {
             let (sender, receiver) = mpsc::channel();
             thread::Builder::new()
                 .name("ptyx-dart-cleanup".into())
                 .spawn(move || {
-                    while let Ok(handle) = receiver.recv() {
-                        detach_handle(handle);
+                    while let Ok(cleanup) = receiver.recv() {
+                        match cleanup {
+                            Cleanup::Adapter(handle) => detach_handle(handle),
+                            Cleanup::Session(handle) => release_session_handle(handle),
+                        }
                     }
                 })
                 .ok()
@@ -437,7 +445,18 @@ pub extern "C" fn ptyd_runtime_finalize(token: *mut c_void) {
         return;
     }
     if let Some(sender) = cleanup_sender() {
-        let _ = sender.send(handle);
+        let _ = sender.send(Cleanup::Adapter(handle));
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn ptyd_session_finalize(token: *mut c_void) {
+    let handle = token.addr() as u64;
+    if handle == 0 {
+        return;
+    }
+    if let Some(sender) = cleanup_sender() {
+        let _ = sender.send(Cleanup::Session(handle));
     }
 }
 
@@ -621,6 +640,55 @@ fn detach_handle(handle: u64) {
     }
 }
 
+fn release_session_handle(handle: u64) {
+    let candidates = pumps()
+        .lock()
+        .map(|registry| registry.values().cloned().collect::<Vec<_>>())
+        .unwrap_or_default();
+    let owner = candidates.into_iter().find(|pump| {
+        pump.state
+            .lock()
+            .map(|state| state.sessions.contains(&handle))
+            .unwrap_or(false)
+    });
+    if let Some(owner) = owner {
+        let status = release_tracked_session(&owner, handle, || {
+            let mut released = handle;
+            unsafe { c_api::ptyx_session_release(&mut released, ptr::null_mut()) }
+        });
+        if matches!(status, STATUS_OK | STATUS_STALE_HANDLE) {
+            let mut event = Event::empty(size_of::<Event>() as u32);
+            event.kind = EVENT_CLOSE_COMPLETE;
+            event.session = handle;
+            unsafe {
+                post_event(owner.port, &event);
+            }
+        }
+        return;
+    }
+    let mut released = handle;
+    unsafe {
+        c_api::ptyx_session_release(&mut released, ptr::null_mut());
+    }
+}
+
+fn release_tracked_session(pump: &Pump, handle: u64, release: impl FnOnce() -> u32) -> u32 {
+    let Ok(_cleanup) = pump.cleanup.lock() else {
+        return STATUS_INTERNAL;
+    };
+    let Ok(mut state) = pump.state.lock() else {
+        return STATUS_INTERNAL;
+    };
+    if !state.sessions.contains(&handle) {
+        return STATUS_STALE_HANDLE;
+    }
+    let status = release();
+    if matches!(status, STATUS_OK | STATUS_STALE_HANDLE) {
+        state.sessions.remove(&handle);
+    }
+    status
+}
+
 static LIBRARY_PINNED: OnceLock<bool> = OnceLock::new();
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -749,7 +817,7 @@ unsafe extern "C" {
 
 #[cfg(test)]
 mod tests {
-    use super::{detach_handle, ptyd_runtime_detach, pumps, Pump};
+    use super::{detach_handle, ptyd_runtime_detach, pumps, release_tracked_session, Pump};
     use ptyx_c::private::{self as c_api, Error, STATUS_OK};
     use std::sync::Arc;
 
@@ -774,5 +842,30 @@ mod tests {
         assert_eq!(status, STATUS_OK);
         assert_eq!(explicit, 0);
         assert!(pump.cleaned.load(std::sync::atomic::Ordering::Acquire));
+    }
+
+    #[test]
+    fn session_finalization_is_serialized_with_adapter_cleanup() {
+        let pump = Arc::new(Pump::new(0, 1));
+        pump.state.lock().expect("pump state").sessions.insert(7);
+        let cleanup = pump.cleanup.lock().expect("cleanup lock");
+        let (started, waiting) = std::sync::mpsc::channel();
+        let finalizer = std::thread::spawn({
+            let pump = Arc::clone(&pump);
+            move || {
+                started.send(()).expect("report finalizer start");
+                release_tracked_session(&pump, 7, || STATUS_OK)
+            }
+        });
+        waiting.recv().expect("finalizer started");
+
+        assert!(
+            pump.state.lock().expect("pump state").sessions.contains(&7),
+            "adapter cleanup must still observe a session while finalization waits"
+        );
+
+        drop(cleanup);
+        assert_eq!(finalizer.join().expect("finalizer thread"), STATUS_OK);
+        assert!(!pump.state.lock().expect("pump state").sessions.contains(&7));
     }
 }

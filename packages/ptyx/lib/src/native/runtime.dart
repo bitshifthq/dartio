@@ -42,7 +42,14 @@ Future<void> _guardNativeOwner(SendPort ready) async {
   } finally {
     unarmedLease.cancel();
     if (adapter != PTYD_INVALID_ADAPTER) {
-      ptyd_runtime_finalize(Pointer<Void>.fromAddress(adapter));
+      final remaining = using((arena) {
+        final handle = arena<ptyd_adapter_t>()..value = adapter;
+        ptyd_runtime_detach(handle, nullptr);
+        return handle.value;
+      });
+      if (remaining != PTYD_INVALID_ADAPTER) {
+        ptyd_runtime_finalize(Pointer<Void>.fromAddress(remaining));
+      }
     }
   }
 }
@@ -96,6 +103,9 @@ final class _NativeRuntime implements Finalizable {
   static final _adapterFinalizer = NativeFinalizer(
     Native.addressOf<NativeFinalizerFunction>(ptyd_runtime_finalize),
   );
+  static final _sessionFinalizer = NativeFinalizer(
+    Native.addressOf<NativeFinalizerFunction>(ptyd_session_finalize),
+  );
 
   static final Future<_NativeRuntime> instance = _create();
 
@@ -104,8 +114,6 @@ final class _NativeRuntime implements Finalizable {
   final int capabilityBits;
   final Map<int, _PendingSpawn> _pendingSpawns = {};
   final Map<int, WeakReference<_NativeSession>> _sessions = {};
-  late final _sessionFinalizer = Finalizer<int>(releaseSession);
-
   _NativeRuntime._(this._port, this._adapter, this.capabilityBits) {
     _adapterFinalizer.attach(
       this,
@@ -282,7 +290,12 @@ final class _NativeRuntime implements Finalizable {
   }
 
   void attachFinalizer(_NativeSession target, int handle) {
-    _sessionFinalizer.attach(target, handle, detach: target);
+    _sessionFinalizer.attach(
+      target,
+      Pointer<Void>.fromAddress(handle),
+      detach: target,
+      externalSize: 64 * 1024,
+    );
   }
 
   void detachFinalizer(_NativeSession target) {

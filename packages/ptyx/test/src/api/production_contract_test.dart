@@ -274,12 +274,20 @@ void main() {
     );
 
     test('enforces the exact 64 KiB encoded spawn payload', () async {
-      final executableBytes = utf8.encode(missingExecutable).length;
-      final workingDirectoryBytes = utf8.encode(Directory.current.path).length;
+      final nativeUnitBytes = Platform.isWindows ? 2 : 1;
+      int nativeBytes(String value) => Platform.isWindows
+          ? value.length * nativeUnitBytes
+          : utf8.encode(value).length;
+      final executableBytes = nativeBytes(missingExecutable);
+      final workingDirectoryBytes = nativeBytes(Directory.current.path);
       const framingBytes = 36 + 4 * 2;
       final atLimit =
           'x' *
-          (64 * 1024 - framingBytes - executableBytes - workingDirectoryBytes);
+          ((64 * 1024 -
+                  framingBytes -
+                  executableBytes -
+                  workingDirectoryBytes) ~/
+              nativeUnitBytes);
 
       await expectLater(
         PtySession.spawn(

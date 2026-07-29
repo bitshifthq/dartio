@@ -15,6 +15,7 @@ const VERSION: u16 = 1;
 const HEADER: usize = 32;
 const MAX_PAYLOAD: usize = 64 * 1024;
 const FRAME_TIMEOUT: Duration = Duration::from_secs(30);
+const SPAWN_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 const SPAWN_V2: u32 = 0x5854_5950;
 const CONTROL_FD: RawFd = 3;
 #[cfg(target_os = "macos")]
@@ -1578,6 +1579,7 @@ fn spawn_target(request: &SpawnRequest) -> io::Result<Spawned> {
     let error_write = unsafe { OwnedFd::from_raw_fd(pipe_fds[1]) };
     set_cloexec(error_read.as_raw_fd())?;
     set_cloexec(error_write.as_raw_fd())?;
+    set_nonblocking(error_read.as_raw_fd())?;
     let pointers: Vec<*const libc::c_char> = request
         .argv
         .iter()
@@ -1623,7 +1625,10 @@ fn spawn_target(request: &SpawnRequest) -> io::Result<Spawned> {
     }
     drop(error_write);
     drop(slave);
-    match read_exec_result(error_read.as_raw_fd()) {
+    match read_exec_result(
+        error_read.as_raw_fd(),
+        Instant::now() + SPAWN_HANDSHAKE_TIMEOUT,
+    ) {
         Ok(None) => Ok(Spawned { pid, master }),
         Ok(Some(code)) => {
             let _ = wait_exact(pid);
@@ -1831,7 +1836,7 @@ unsafe fn set_current_errno(code: libc::c_int) {
     *libc::__errno_location() = code;
 }
 
-fn read_exec_result(fd: RawFd) -> io::Result<Option<i32>> {
+fn read_exec_result(fd: RawFd, deadline: Instant) -> io::Result<Option<i32>> {
     let mut bytes = [0_u8; size_of::<i32>()];
     let mut offset = 0;
     loop {
@@ -1861,6 +1866,19 @@ fn read_exec_result(fd: RawFd) -> io::Result<Option<i32>> {
         }
         let error = io::Error::last_os_error();
         if error.kind() == io::ErrorKind::Interrupted {
+            continue;
+        }
+        if error.kind() == io::ErrorKind::WouldBlock {
+            if let Err(wait_error) = wait_for_io(fd, libc::POLLIN, deadline) {
+                return if wait_error.kind() == io::ErrorKind::TimedOut {
+                    Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "spawn exec handshake deadline exceeded",
+                    ))
+                } else {
+                    Err(wait_error)
+                };
+            }
             continue;
         }
         return Err(error);
@@ -2205,7 +2223,10 @@ fn await_exit(pid: libc::pid_t) -> io::Result<ExitStatus> {
 
 fn kill_and_reap(pid: libc::pid_t) {
     unsafe {
+        // The child may not have reached setsid yet, so target both the
+        // intended process group and the child itself.
         libc::kill(-pid, libc::SIGKILL);
+        libc::kill(pid, libc::SIGKILL);
     }
     let _ = wait_exact(pid);
 }
@@ -2676,6 +2697,20 @@ mod tests {
             session.flush_result(sequence),
             Err(InputFailure::SessionClosing)
         );
+    }
+
+    #[test]
+    fn exec_handshake_has_a_finite_deadline() {
+        let mut descriptors = [-1; 2];
+        assert_eq!(unsafe { libc::pipe(descriptors.as_mut_ptr()) }, 0);
+        let read = unsafe { OwnedFd::from_raw_fd(descriptors[0]) };
+        let _held_writer = unsafe { OwnedFd::from_raw_fd(descriptors[1]) };
+        set_nonblocking(read.as_raw_fd()).unwrap();
+
+        let error = read_exec_result(read.as_raw_fd(), Instant::now() + Duration::from_millis(25))
+            .unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
     }
 
     #[test]

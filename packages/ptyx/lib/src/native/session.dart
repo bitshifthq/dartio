@@ -2,7 +2,7 @@ part of '../api/api.dart';
 
 const _maxDartWriteBytes = 1024 * 1024;
 
-final class _NativeSession implements PtySession {
+final class _NativeSession implements Finalizable, PtySession {
   final _NativeRuntime _controller;
   final int _handle;
   final int _inputCapacity;

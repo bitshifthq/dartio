@@ -99,6 +99,17 @@ external int ptyd_runtime_detach(
 @ffi.Native<ffi.Void Function(ffi.Pointer<ffi.Void>)>()
 external void ptyd_runtime_finalize(ffi.Pointer<ffi.Void> token);
 
+/// @brief Native finalizer for a session handle encoded as a pointer address.
+///
+/// Transfers ownership to the process-wide cleanup worker and returns without
+/// waiting. Cleanup is idempotent and generation checked, so it is safe when
+/// explicit close or adapter teardown races finalization.
+///
+/// @param[in] token Session handle encoded as a pointer-sized integer.
+/// @return Nothing.
+@ffi.Native<ffi.Void Function(ffi.Pointer<ffi.Void>)>()
+external void ptyd_session_finalize(ffi.Pointer<ffi.Void> token);
+
 /// @brief Explicitly abandons and releases a tracked session.
 ///
 /// @param[in] adapter Owning adapter.

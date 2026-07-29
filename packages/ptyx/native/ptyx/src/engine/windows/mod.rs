@@ -749,7 +749,7 @@ pub struct IntegratedRuntime {
     command_submission: Arc<Mutex<()>>,
     admissions: Arc<Mutex<HashMap<u64, Arc<InputAdmission>>>>,
     #[cfg(feature = "__private_adapter")]
-    notice_emitter: NoticeEmitter,
+    notice_emitter: Mutex<Option<NoticeEmitter>>,
     notices: Mutex<Option<NoticeReceiver>>,
     iocp: IocpSender,
     controls: Arc<ControlQueue>,
@@ -816,7 +816,7 @@ impl IntegratedRuntime {
             command_submission,
             admissions,
             #[cfg(feature = "__private_adapter")]
-            notice_emitter,
+            notice_emitter: Mutex::new(Some(notice_emitter)),
             notices: Mutex::new(Some(notices)),
             iocp: iocp_sender,
             controls,
@@ -857,7 +857,14 @@ impl IntegratedRuntime {
     ) -> io::Result<()> {
         validate_capacities(input_capacity, output_capacity)?;
         config.validate()?;
-        let reservation = self.notice_emitter.try_reserve().ok_or_else(|| {
+        let emitter = self
+            .notice_emitter
+            .lock()
+            .map_err(|_| io::Error::other("notification emitter lock poisoned"))?
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "runtime is shutting down"))?;
+        let reservation = emitter.try_reserve().ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::WouldBlock,
                 "native notification capacity is exhausted",
@@ -1028,13 +1035,17 @@ impl IntegratedRuntime {
         let spawn = self.spawn_pool.shutdown();
         let _ = self.commands.send(Command::Shutdown);
         let _ = self.iocp.post_command();
-        spawn
-            && self
-                .thread
-                .lock()
-                .ok()
-                .and_then(|mut value| value.take())
-                .is_none_or(|thread| thread.join().is_ok())
+        let reactor = self
+            .thread
+            .lock()
+            .ok()
+            .and_then(|mut value| value.take())
+            .is_none_or(|thread| thread.join().is_ok());
+        #[cfg(feature = "__private_adapter")]
+        if let Ok(mut emitter) = self.notice_emitter.lock() {
+            emitter.take();
+        }
+        spawn && reactor
     }
 }
 
@@ -2244,6 +2255,8 @@ fn shutdown_all(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "__private_adapter")]
+    use super::IntegratedRuntime;
     use super::{
         admit_owned_write, admit_write_with, output_notification_deadline, output_terminal_notice,
         try_command_submission, CloseAdmission, NoticeBudget, OutputTerminalNotice,
@@ -2254,6 +2267,31 @@ mod tests {
     use std::io;
     use std::sync::Mutex;
     use std::sync::{mpsc, Arc};
+    #[cfg(feature = "__private_adapter")]
+    use std::time::Duration;
+
+    #[cfg(feature = "__private_adapter")]
+    #[test]
+    fn shutdown_closes_the_global_notification_receiver() {
+        let runtime = IntegratedRuntime::try_new().expect("create Windows runtime");
+        let notices = runtime
+            .take_notifications()
+            .expect("take global notification receiver");
+        let (finished, completion) = mpsc::channel();
+        let waiter = std::thread::spawn(move || {
+            finished
+                .send(notices.recv().is_none())
+                .expect("report notification closure");
+        });
+
+        assert!(runtime.shutdown());
+        assert_eq!(
+            completion.recv_timeout(Duration::from_secs(5)),
+            Ok(true),
+            "runtime shutdown must close the notification channel"
+        );
+        waiter.join().expect("notification waiter");
+    }
 
     #[test]
     fn notice_budget_rejects_reservations_beyond_its_limit() {
