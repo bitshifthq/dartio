@@ -158,24 +158,24 @@ jobs:
               nm -D --defined-only "$LIBRARY" > "$RUNNER_TEMP/ptyx-symbols.txt"
               ;;
             Windows)
-            LIBRARY="$RELEASE/ptyx_dart.dll"
-            VSWHERE="/c/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe"
-            case "${{ matrix.rust_target }}" in
-              x86_64-*) DUMPBIN_PATTERN='VC\Tools\MSVC\**\bin\Hostx64\x64\dumpbin.exe' ;;
-              aarch64-*) DUMPBIN_PATTERN='VC\Tools\MSVC\**\bin\Hostarm64\arm64\dumpbin.exe' ;;
-              *)
-                echo "::error::Unsupported Windows dumpbin target ${{ matrix.rust_target }}"
-                exit 1
-                ;;
-            esac
-            DUMPBIN="$(
-              "$VSWHERE" \
-                -latest \
-                -products '*' \
-                -find "$DUMPBIN_PATTERN" |
-                tr -d '\r' |
-                head -n 1
-            )"
+              LIBRARY="$RELEASE/ptyx_dart.dll"
+              VSWHERE="/c/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe"
+              case "${{ matrix.rust_target }}" in
+                x86_64-*) DUMPBIN_PATTERN='VC\Tools\MSVC\**\bin\Hostx64\x64\dumpbin.exe' ;;
+                aarch64-*) DUMPBIN_PATTERN='VC\Tools\MSVC\**\bin\Hostarm64\arm64\dumpbin.exe' ;;
+                *)
+                  echo "::error::Unsupported Windows dumpbin target ${{ matrix.rust_target }}"
+                  exit 1
+                  ;;
+              esac
+              DUMPBIN="$(
+                "$VSWHERE" \
+                  -latest \
+                  -products '*' \
+                  -find "$DUMPBIN_PATTERN" |
+                  tr -d '\r' |
+                  head -n 1
+              )"
               if [[ -z "$DUMPBIN" ]]; then
                 echo "::error::Visual Studio dumpbin.exe was not found"
                 exit 1
