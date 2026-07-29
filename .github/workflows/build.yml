@@ -145,6 +145,18 @@ jobs:
             --release \
             --target ${{ matrix.rust_target }} \
             --target-dir target/ptyx/${{ matrix.target }}
+      - name: read Windows exports
+        if: runner.os == 'Windows'
+        shell: cmd
+        run: |
+          set "PTYX_VS_TARGET="
+          if /I "${{ matrix.rust_target }}"=="x86_64-pc-windows-msvc" set "PTYX_VS_TARGET=x64"
+          if /I "${{ matrix.rust_target }}"=="aarch64-pc-windows-msvc" set "PTYX_VS_TARGET=arm64"
+          if not defined PTYX_VS_TARGET exit /b 1
+          call "%ProgramFiles%\Microsoft Visual Studio\2022\Enterprise\Common7\Tools\VsDevCmd.bat" -host_arch=x64 -arch=%PTYX_VS_TARGET%
+          dumpbin /nologo /exports ^
+            "%GITHUB_WORKSPACE%\target\ptyx\${{ matrix.target }}\${{ matrix.rust_target }}\release\ptyx_dart.dll" ^
+            > "%RUNNER_TEMP%\ptyx-symbols.txt"
       - name: verify combined Dart asset symbols
         run: |
           RELEASE="$GITHUB_WORKSPACE/target/ptyx/${{ matrix.target }}/${{ matrix.rust_target }}/release"
@@ -159,30 +171,7 @@ jobs:
               ;;
             Windows)
               LIBRARY="$RELEASE/ptyx_dart.dll"
-              VSWHERE="/c/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe"
-              case "${{ matrix.rust_target }}" in
-                x86_64-*) DUMPBIN_PATTERN='VC\Tools\MSVC\**\bin\Hostx64\x64\dumpbin.exe' ;;
-                aarch64-*) DUMPBIN_PATTERN='VC\Tools\MSVC\**\bin\Hostarm64\arm64\dumpbin.exe' ;;
-                *)
-                  echo "::error::Unsupported Windows dumpbin target ${{ matrix.rust_target }}"
-                  exit 1
-                  ;;
-              esac
-              DUMPBIN="$(
-                "$VSWHERE" \
-                  -latest \
-                  -products '*' \
-                  -find "$DUMPBIN_PATTERN" |
-                  tr -d '\r' |
-                  head -n 1
-              )"
-              if [[ -z "$DUMPBIN" ]]; then
-                echo "::error::Visual Studio dumpbin.exe was not found"
-                exit 1
-              fi
-              "$(cygpath -u "$DUMPBIN")" \
-                /nologo /exports "$LIBRARY" \
-                > "$RUNNER_TEMP/ptyx-symbols.txt"
+              test -s "$RUNNER_TEMP/ptyx-symbols.txt"
               ;;
           esac
           for symbol in \
