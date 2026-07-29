@@ -38,7 +38,15 @@ Start-Sleep -Seconds 10
       initialSize: const PtySize(rows: 24, columns: 80),
     ),
   );
-  final trailingOutput = session.output.first;
+  final trailingOutput = Completer<void>();
+  final output = StringBuffer();
+  late final StreamSubscription<Uint8List> outputSubscription;
+  outputSubscription = session.output.listen((chunk) {
+    output.write(String.fromCharCodes(chunk));
+    if (!trailingOutput.isCompleted && output.toString().contains('trailing')) {
+      trailingOutput.complete();
+    }
+  }, onError: trailingOutput.completeError);
   if (ptyd_test_fail_exit_observation() == 0) {
     throw StateError('exit-observation injection requires one active session');
   }
@@ -50,10 +58,8 @@ Start-Sleep -Seconds 10
   } on Object {
     rethrow;
   }
-  final trailing = await trailingOutput.timeout(const Duration(seconds: 5));
-  if (!String.fromCharCodes(trailing).contains('trailing')) {
-    throw StateError('exit failure discarded trailing output: $trailing');
-  }
+  await trailingOutput.future.timeout(const Duration(seconds: 5));
+  await outputSubscription.cancel();
   await session.close();
 }
 
