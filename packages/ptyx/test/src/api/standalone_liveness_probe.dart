@@ -6,32 +6,6 @@ import 'dart:typed_data';
 import 'package:ptyx/ptyx.dart';
 
 Future<void> main() async {
-  try {
-    await PtySession.spawn(
-      const PtySpawnOptions(
-        executable: '/definitely/missing/ptyx-liveness-probe',
-        initialSize: PtySize(rows: 24, columns: 80),
-      ),
-    );
-    throw StateError('missing executable unexpectedly spawned');
-  } on PtyException {
-    await Future<void>.value();
-  }
-
-  for (var iteration = 0; iteration < 5; iteration++) {
-    final fast = await PtySession.spawn(
-      PtySpawnOptions(
-        executable: Platform.resolvedExecutable,
-        arguments: [File('benchmark/fixture.dart').absolute.path, 'exit', '0'],
-        initialSize: const PtySize(rows: 24, columns: 80),
-      ),
-    );
-    if (await fast.exitCode != 0) {
-      throw StateError('fast probe child failed at iteration $iteration');
-    }
-    await fast.close();
-  }
-
   final session = await PtySession.spawn(
     PtySpawnOptions(
       executable: Platform.resolvedExecutable,

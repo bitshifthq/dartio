@@ -5,10 +5,10 @@ import 'package:test/test.dart';
 
 void main() {
   group('standalone isolate liveness', () {
-    test('awaiting native output and exit keeps a CLI alive', () async {
-      final script = File(
-        'test/src/api/standalone_liveness_probe.dart',
-      ).absolute.path;
+    Future<({int exitCode, String output, String errorOutput})> runProbe(
+      String name,
+    ) async {
+      final script = File('test/src/api/$name.dart').absolute.path;
       final process = await Process.start(Platform.resolvedExecutable, [
         script,
       ]);
@@ -20,15 +20,35 @@ void main() {
           const Duration(seconds: 20),
         );
         exited = true;
-        final output = await stdoutFuture;
-        final errorOutput = await stderrFuture;
-        expect(exitCode, 0, reason: errorOutput);
-        expect(output, contains('ptyx-standalone-alive'));
+        return (
+          exitCode: exitCode,
+          output: await stdoutFuture,
+          errorOutput: await stderrFuture,
+        );
       } finally {
         if (!exited) {
           process.kill();
         }
       }
+    }
+
+    test('awaiting native output and exit keeps a CLI alive', () async {
+      final result = await runProbe('standalone_liveness_probe');
+
+      expect(result.exitCode, 0, reason: result.errorOutput);
+      expect(result.output, contains('ptyx-standalone-alive'));
+    });
+
+    test('awaiting a failed spawn keeps a CLI alive', () async {
+      final result = await runProbe(
+        'standalone_spawn_failure_liveness_probe',
+      );
+
+      expect(result.exitCode, 0, reason: result.errorOutput);
+      expect(
+        result.output,
+        contains('ptyx-standalone-spawn-failure-alive'),
+      );
     });
   });
 }
