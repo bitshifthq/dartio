@@ -65,6 +65,7 @@ const EVENT_INFRASTRUCTURE_FAILED: u32 = 6;
 const EVENT_OUTPUT_DONE: u32 = 7;
 const EVENT_EXIT: u32 = 8;
 const EVENT_CLOSE_COMPLETE: u32 = 9;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 const EVENT_MODE_CHANGED: u32 = 10;
 
 const EVENT_CLOSE_INPUT_FAILED: u32 = 1;
@@ -1021,6 +1022,7 @@ unsafe fn populate_event(
                 sessions.remove(&engine_handle);
             }
         }
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         Notice::ModeChanged { modes, .. } => {
             event.kind = EVENT_MODE_CHANGED;
             event.value =
