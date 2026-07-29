@@ -136,26 +136,129 @@ jobs:
           done
 
   fuzz:
-    name: broker-protocol-fuzz
+    name: broker-protocol-decoders-fuzz
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dart-lang/setup-dart@65eb853c7ba17dde3be364c3d2858773e7144260 # v1.7.2
+        with:
+          sdk: 3.11.0
       - run: rustup toolchain install nightly-2026-07-20 --profile minimal
       - run: cargo install cargo-fuzz --locked --version 0.13.2
-      - name: fuzz spawn protocol with AddressSanitizer
+      - name: fuzz both production protocol decoders with AddressSanitizer
         working-directory: packages/ptyx/native/fuzz
-        run: >-
-          cargo +nightly-2026-07-20 fuzz run spawn_protocol
-          -- -max_total_time=300 -timeout=5
+        run: |
+          dart run tool/generate_corpus.dart --check
+          cargo +nightly-2026-07-20 fuzz build broker_decoder
+          cargo +nightly-2026-07-20 fuzz build controller_decoder
+          cargo_fuzz_version="$(cargo fuzz --version)"
+          suite_started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+          broker_started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          broker_started_epoch="$(date +%s)"
+          set +e
+          cargo +nightly-2026-07-20 fuzz run broker_decoder \
+            -- -max_total_time=600 -timeout=5
+          broker_exit_code=$?
+          set -e
+          broker_finished_epoch="$(date +%s)"
+          broker_finished_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+          controller_started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          controller_started_epoch="$(date +%s)"
+          set +e
+          cargo +nightly-2026-07-20 fuzz run controller_decoder \
+            -- -max_total_time=600 -timeout=5
+          controller_exit_code=$?
+          set -e
+          controller_finished_epoch="$(date +%s)"
+          controller_finished_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+          tree_dirty=true
+          if git diff --quiet && git diff --cached --quiet; then
+            tree_dirty=false
+          fi
+          suite_finished_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          passed=false
+          broker_duration="$((broker_finished_epoch - broker_started_epoch))"
+          controller_duration="$((controller_finished_epoch - controller_started_epoch))"
+          if (( broker_exit_code == 0 &&
+                controller_exit_code == 0 &&
+                broker_duration >= 600 &&
+                controller_duration >= 600 )); then
+            passed=true
+          fi
+          jq -n \
+            --arg revision "$GITHUB_SHA" \
+            --arg cargo_fuzz_version "$cargo_fuzz_version" \
+            --arg suite_started_at "$suite_started_at" \
+            --arg suite_finished_at "$suite_finished_at" \
+            --arg broker_started_at "$broker_started_at" \
+            --arg broker_finished_at "$broker_finished_at" \
+            --arg controller_started_at "$controller_started_at" \
+            --arg controller_finished_at "$controller_finished_at" \
+            --argjson tree_dirty "$tree_dirty" \
+            --argjson passed "$passed" \
+            --argjson broker_exit_code "$broker_exit_code" \
+            --argjson broker_duration "$broker_duration" \
+            --argjson controller_exit_code "$controller_exit_code" \
+            --argjson controller_duration "$controller_duration" \
+            '{
+              schema: 1,
+              suite: "ptyx-fuzz-acceptance",
+              revision: $revision,
+              tree_dirty: $tree_dirty,
+              passed: $passed,
+              platform: "linux",
+              architecture: "x64",
+              cargo_fuzz_version: $cargo_fuzz_version,
+              command: ["ptyx-extended", "fuzz"],
+              checks: {
+                broker_decoder:
+                  ($broker_exit_code == 0 and $broker_duration >= 600),
+                controller_decoder:
+                  ($controller_exit_code == 0 and $controller_duration >= 600)
+              },
+              started_at_utc: $suite_started_at,
+              finished_at_utc: $suite_finished_at,
+              targets: {
+                broker_decoder: {
+                  exit_code: $broker_exit_code,
+                  duration_seconds: $broker_duration,
+                  command: [
+                    "cargo", "+nightly-2026-07-20", "fuzz", "run",
+                    "broker_decoder", "--", "-max_total_time=600", "-timeout=5"
+                  ],
+                  started_at_utc: $broker_started_at,
+                  finished_at_utc: $broker_finished_at
+                },
+                controller_decoder: {
+                  exit_code: $controller_exit_code,
+                  duration_seconds: $controller_duration,
+                  command: [
+                    "cargo", "+nightly-2026-07-20", "fuzz", "run",
+                    "controller_decoder", "--", "-max_total_time=600",
+                    "-timeout=5"
+                  ],
+                  started_at_utc: $controller_started_at,
+                  finished_at_utc: $controller_finished_at
+                }
+              }
+            }' > fuzz-evidence.json
+
+          if [[ "$passed" != true ]]; then
+            exit 1
+          fi
       - name: retain fuzz artifacts
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: ptyx-spawn-protocol-fuzz-${{ github.sha }}
+          name: ptyx-broker-protocol-fuzz-${{ github.sha }}
           path: |
             packages/ptyx/native/fuzz/artifacts
             packages/ptyx/native/fuzz/corpus
+            packages/ptyx/native/fuzz/fuzz-evidence.json
           if-no-files-found: warn
           retention-days: 90
 

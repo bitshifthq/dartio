@@ -5,14 +5,22 @@ target. The public API is intended for the targets below, but a target is
 qualified only after the exact native end-to-end job completes on that
 operating system and architecture.
 
-| Target | Backend | Build evidence | Runtime qualification |
+| Target | Backend | Current retained evidence | Remaining qualification |
 | --- | --- | --- | --- |
-| macOS x64 | `poll` reactor and Unix broker | hosted native build | API, native, ABI, lifecycle, fault, scorecard, and five-minute soak jobs |
-| macOS arm64 | `poll` reactor and Unix broker | hosted native build | API, native, ABI, lifecycle, fault, scorecard, and five-minute soak jobs |
-| Linux x64 | `epoll` reactor and Unix broker | hosted native build | API, native, ABI, lifecycle, fault, scorecard, and five-minute soak jobs |
-| Linux arm64 | `epoll` reactor and Unix broker | hosted native build | API, native, ABI, lifecycle, fault, scorecard, and five-minute soak jobs |
-| Windows x64 | ConPTY, IOCP, and Job Object | hosted native build | API, native, ABI, lifecycle, fault, and five-minute soak jobs; diagnostic scorecard pending |
-| Windows arm64 | ConPTY, IOCP, and Job Object | hosted native build | API, native, ABI, lifecycle, fault, and five-minute soak jobs; diagnostic scorecard pending |
+| macOS x64 | `poll` reactor and Unix broker | API, native, ABI, lifecycle, and build jobs | Exact-final-revision scorecard and extended soak |
+| macOS arm64 | `poll` reactor and Unix broker | API, native, ABI, lifecycle, and build jobs | Exact-final-revision scorecard and extended soak |
+| Linux x64 | `epoll` reactor and Unix broker | API, native, ABI, lifecycle, and build jobs | Exact-final-revision scorecard and extended soak |
+| Linux arm64 | `epoll` reactor and Unix broker | API, native, ABI, lifecycle, and build jobs | Exact-final-revision scorecard and extended soak |
+| Windows x64 | ConPTY, IOCP, and Job Object | API, native, ABI, lifecycle, export, and build jobs | Exact-final-revision scorecard and extended soak |
+| Windows arm64 | ConPTY, IOCP, and Job Object | API, native, ABI, lifecycle, export, and build jobs | Exact-final-revision scorecard and extended soak |
+
+The normal six-target matrix is retained in
+[Actions run 30468330811](https://github.com/bitshifthq/dartio/actions/runs/30468330811)
+for revision `9cc2e43`. That run deliberately skipped the extended jobs. It
+therefore proves the listed runtime and build checks for that revision, not
+scorecard, sanitizer, fuzz, or soak qualification for later revisions.
+Extended evidence must name its exact revision and retained artifact before
+this table can record it as passing.
 
 Android, iOS, and web are not advertised. Linux arm64 cross-compilation is
 useful build evidence but does not replace its retained hosted runtime

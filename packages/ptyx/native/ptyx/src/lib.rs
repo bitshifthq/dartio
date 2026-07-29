@@ -23,6 +23,16 @@ pub mod __private_adapter {
     pub use crate::engine::{BrokerSpawn, Failure, FailureKind, IntegratedRuntime, Notice};
 }
 
+/// Private entry points that let fuzz targets exercise production decoders.
+#[cfg(all(fuzzing, any(target_os = "linux", target_os = "macos")))]
+#[doc(hidden)]
+pub mod __fuzzing {
+    /// Exercises the controller-side broker protocol frame decoder.
+    pub fn broker_protocol_frame(bytes: &[u8]) {
+        crate::engine::fuzz_broker_protocol_frame(bytes);
+    }
+}
+
 pub use error::{
     CloseError, ControlError, InvalidSize, MetadataError, RecvError, RuntimeError, SpawnError,
     WriteError, WriteErrorKind,

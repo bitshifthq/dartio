@@ -4,16 +4,29 @@ version = "0.0.0"
 edition = "2021"
 publish = false
 
+[workspace]
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fuzzing)"] }
+
 [package.metadata]
 cargo-fuzz = true
 
 [dependencies]
 libc = "0.2"
 libfuzzer-sys = "0.4"
+ptyx = { path = "../ptyx" }
 
 [[bin]]
-name = "spawn_protocol"
-path = "fuzz_targets/spawn_protocol.rs"
+name = "broker_decoder"
+path = "fuzz_targets/broker_decoder.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "controller_decoder"
+path = "fuzz_targets/controller_decoder.rs"
 test = false
 doc = false
 bench = false

@@ -128,9 +128,25 @@ Map<String, Object?> _resultEvidence(String key) {
         },
     };
   } else if (key == 'fuzz') {
+    result['cargo_fuzz_version'] = 'cargo-fuzz 0.13.2';
     result['targets'] = {
       for (final name in const ['broker_decoder', 'controller_decoder'])
-        name: {'exit_code': 0, 'duration_seconds': 600},
+        name: {
+          'exit_code': 0,
+          'duration_seconds': 600,
+          'command': [
+            'cargo',
+            '+nightly-2026-07-20',
+            'fuzz',
+            'run',
+            name,
+            '--',
+            '-max_total_time=600',
+            '-timeout=5',
+          ],
+          'started_at_utc': '2026-01-01T00:00:00Z',
+          'finished_at_utc': '2026-01-01T00:10:00Z',
+        },
     };
   } else if (key == 'fault-and-publication') {
     result.addAll({
@@ -314,7 +330,14 @@ void main() {
           'fuzz' => jsonEncode({
             ..._resultEvidence('fuzz'),
             'targets': {
-              'broker_decoder': {'exit_code': 1, 'duration_seconds': 1},
+              for (final name in const ['broker_decoder', 'controller_decoder'])
+                name: {
+                  'exit_code': 0,
+                  'duration_seconds': 600,
+                  'command': ['sleep', '600'],
+                  'started_at_utc': '2026-01-01T00:00:00Z',
+                  'finished_at_utc': '2026-01-01T00:10:00Z',
+                },
             },
           }),
           _ => jsonEncode(_resultEvidence(entry.key)),

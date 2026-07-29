@@ -126,6 +126,11 @@ impl Frame {
     }
 }
 
+#[cfg(fuzzing)]
+pub(crate) fn fuzz_protocol_frame(bytes: &[u8]) {
+    let _ = Frame::decode(bytes);
+}
+
 fn send_frame(fd: RawFd, frame: &Frame) -> io::Result<()> {
     let bytes = frame.encode()?;
     let deadline = Instant::now() + FRAME_TIMEOUT;

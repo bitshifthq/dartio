@@ -314,13 +314,32 @@ List<String> _verifyResult(
     }
   } else if (key == 'fuzz') {
     final targets = artifact['targets'];
-    if (targets is! Map<String, Object?> ||
+    if (artifact['cargo_fuzz_version'] != 'cargo-fuzz 0.13.2' ||
+        targets is! Map<String, Object?> ||
         !const ['broker_decoder', 'controller_decoder'].every((name) {
           final result = targets[name];
+          final started = result is Map<String, Object?>
+              ? DateTime.tryParse('${result['started_at_utc']}')
+              : null;
+          final finished = result is Map<String, Object?>
+              ? DateTime.tryParse('${result['finished_at_utc']}')
+              : null;
+          final duration = result is Map<String, Object?>
+              ? result['duration_seconds']
+              : null;
+          final command = result is Map<String, Object?>
+              ? result['command']
+              : null;
           return result is Map<String, Object?> &&
               result['exit_code'] == 0 &&
-              result['duration_seconds'] is int &&
-              (result['duration_seconds']! as int) >= 600;
+              duration is int &&
+              duration >= 600 &&
+              command is List<Object?> &&
+              _matchesFuzzCommand(command, name) &&
+              started != null &&
+              finished != null &&
+              !finished.isBefore(started) &&
+              finished.difference(started).inSeconds >= duration;
         })) {
       failures.add('fuzz evidence must prove both decoder targets');
     }
@@ -338,6 +357,24 @@ List<String> _verifyResult(
     }
   }
   return failures;
+}
+
+bool _matchesFuzzCommand(List<Object?> command, String target) {
+  final expected = <Object?>[
+    'cargo',
+    '+nightly-2026-07-20',
+    'fuzz',
+    'run',
+    target,
+    '--',
+    '-max_total_time=600',
+    '-timeout=5',
+  ];
+  if (command.length != expected.length) return false;
+  for (var index = 0; index < expected.length; index++) {
+    if (command[index] != expected[index]) return false;
+  }
+  return true;
 }
 
 List<String> _verifySoak(File file, Map<String, Object?> manifest) {

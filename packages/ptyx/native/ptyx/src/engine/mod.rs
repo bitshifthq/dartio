@@ -66,6 +66,11 @@ pub use windows::{
     IntegratedRuntime, NoticeReceiver as RuntimeEvents, SessionNoticeReceiver as SessionEvents,
 };
 
+#[cfg(all(fuzzing, any(target_os = "linux", target_os = "macos")))]
+pub(crate) fn fuzz_broker_protocol_frame(bytes: &[u8]) {
+    broker_client::fuzz_protocol_frame(bytes);
+}
+
 struct Slot<T> {
     generation: u32,
     value: Option<T>,

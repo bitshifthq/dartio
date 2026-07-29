@@ -1859,8 +1859,13 @@ fn decode_spawn(payload: &[u8]) -> io::Result<SpawnRequest> {
 }
 
 #[doc(hidden)]
-pub fn fuzz_spawn_payload(payload: &[u8]) {
-    let _ = decode_spawn(payload);
+#[cfg(fuzzing)]
+pub fn fuzz_protocol_frame(bytes: &[u8]) {
+    if let Ok(frame) = Frame::decode(bytes) {
+        if frame.kind == SPAWN {
+            let _ = decode_spawn(&frame.payload);
+        }
+    }
 }
 
 fn decode_spawn_v2(inject: bool, payload: &[u8]) -> io::Result<SpawnRequest> {
