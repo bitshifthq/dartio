@@ -36,6 +36,15 @@ On Windows, named controller pipes use unpredictable names, first-instance
 creation, and a restrictive access-control list. The child is associated with
 a kill-on-close Job Object during process creation.
 
+## Dependency integrity
+
+The production and fuzz Rust lockfiles are checked separately against the
+RustSec advisory database. The committed policy permits only reviewed SPDX
+licenses, rejects unapproved registries and Git dependencies, and evaluates
+the dependency graph for every supported macOS, Linux, and Windows target.
+Warnings are errors so a new license, source, advisory, or unmaintained direct
+dependency requires an explicit review and policy change.
+
 ## Resource denial
 
 Public and native boundaries cap argument and environment counts, individual

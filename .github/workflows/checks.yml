@@ -377,6 +377,40 @@ jobs:
           -p ptyx-c -p ptyx-dart -p ptyx
           --all-targets --all-features -- -D warnings
 
+  rust-dependencies:
+    name: rust-dependencies
+    needs: [changes]
+    if: needs.changes.outputs.ptyx == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: validate production dependencies
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2
+        with:
+          manifest-path: packages/ptyx/native/Cargo.toml
+          arguments: >-
+            --locked
+            --config packages/ptyx/native/deny.toml
+          command: check
+          command-arguments: >-
+            -D warnings
+            advisories
+            licenses
+            sources
+      - name: validate fuzz dependencies
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2
+        with:
+          manifest-path: packages/ptyx/native/fuzz/Cargo.toml
+          arguments: >-
+            --locked
+            --config packages/ptyx/native/deny.toml
+          command: check
+          command-arguments: >-
+            -D warnings
+            advisories
+            licenses
+            sources
+
   checks:
     name: checks
     if: always()
@@ -386,6 +420,7 @@ jobs:
       - dart-tests
       - rust
       - clippy
+      - rust-dependencies
     runs-on: ubuntu-latest
     steps:
       - name: verify required checks
@@ -396,6 +431,7 @@ jobs:
           DART_TESTS_RESULT: ${{ needs.dart-tests.result }}
           RUST_RESULT: ${{ needs.rust.result }}
           CLIPPY_RESULT: ${{ needs.clippy.result }}
+          RUST_DEPENDENCIES_RESULT: ${{ needs.rust-dependencies.result }}
         run: |
           if [[ "$CHANGES_RESULT" != "success" ]]; then
             echo "Change detection did not succeed."
@@ -416,7 +452,8 @@ jobs:
             "$DART_QUALITY_RESULT" \
             "$DART_TESTS_RESULT" \
             "$RUST_RESULT" \
-            "$CLIPPY_RESULT"
+            "$CLIPPY_RESULT" \
+            "$RUST_DEPENDENCIES_RESULT"
           do
             if [[ "$result" != "success" ]]; then
               echo "A required PTYX check did not succeed: $result"
