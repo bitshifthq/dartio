@@ -431,10 +431,20 @@ fn launch_broker_at(path: &CStr) -> io::Result<Client> {
     }
     let empty = unsafe { empty.assume_init() };
     spawn_code(unsafe { libc::posix_spawnattr_setsigmask(&mut attrs.0, &empty) })?;
+    let mut defaults = MaybeUninit::<libc::sigset_t>::uninit();
+    if unsafe { libc::sigemptyset(defaults.as_mut_ptr()) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let mut defaults = unsafe { defaults.assume_init() };
+    if unsafe { libc::sigaddset(&mut defaults, libc::SIGCHLD) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    spawn_code(unsafe { libc::posix_spawnattr_setsigdefault(&mut attrs.0, &defaults) })?;
     #[cfg(target_os = "macos")]
-    let flags = POSIX_SPAWN_CLOEXEC_DEFAULT | libc::POSIX_SPAWN_SETSIGMASK;
+    let flags =
+        POSIX_SPAWN_CLOEXEC_DEFAULT | libc::POSIX_SPAWN_SETSIGMASK | libc::POSIX_SPAWN_SETSIGDEF;
     #[cfg(target_os = "linux")]
-    let flags = libc::POSIX_SPAWN_SETSIGMASK;
+    let flags = libc::POSIX_SPAWN_SETSIGMASK | libc::POSIX_SPAWN_SETSIGDEF;
     let flags = flags as libc::c_short;
     spawn_code(unsafe { libc::posix_spawnattr_setflags(&mut attrs.0, flags) })?;
     // Explicitly close a pre-existing fd 3 before replacing it. Hosted
@@ -1489,6 +1499,7 @@ fn allocate_pty(mut size: libc::winsize) -> io::Result<(OwnedFd, OwnedFd)> {
     Ok((master, slave))
 }
 
+#[cfg(target_os = "linux")]
 fn spawn_target(request: &SpawnRequest) -> io::Result<Spawned> {
     if request.argv.is_empty() {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "empty argv"));
@@ -1561,6 +1572,223 @@ fn spawn_target(request: &SpawnRequest) -> io::Result<Spawned> {
             kill_and_reap(pid);
             Err(error)
         }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn spawn_target(request: &SpawnRequest) -> io::Result<Spawned> {
+    if request.argv.is_empty() {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "empty argv"));
+    }
+    let (master, slave) = allocate_pty(request.size)?;
+    let mut pipe_fds = [-1; 2];
+    if unsafe { libc::pipe(pipe_fds.as_mut_ptr()) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let error_read = unsafe { OwnedFd::from_raw_fd(pipe_fds[0]) };
+    let error_write = unsafe { OwnedFd::from_raw_fd(pipe_fds[1]) };
+    set_cloexec(error_read.as_raw_fd())?;
+    set_cloexec(error_write.as_raw_fd())?;
+    set_nonblocking(error_read.as_raw_fd())?;
+
+    let executable = CString::new(std::env::current_exe()?.as_os_str().as_encoded_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "broker path contains NUL"))?;
+    let helper = CString::new("--spawn-helper").unwrap();
+    let has_cwd = CString::new(if request.cwd.is_some() { "1" } else { "0" }).unwrap();
+    let mut arguments = vec![executable.clone(), helper, has_cwd];
+    if let Some(cwd) = &request.cwd {
+        arguments.push(cwd.clone());
+    }
+    arguments.push(
+        CString::new(if request.environment.is_some() {
+            "1"
+        } else {
+            "0"
+        })
+        .unwrap(),
+    );
+    if let Some(environment) = &request.environment {
+        arguments.push(CString::new(environment.len().to_string()).unwrap());
+        arguments.extend(environment.iter().cloned());
+    }
+    arguments.extend(request.argv.iter().cloned());
+    let mut argument_pointers: Vec<*mut libc::c_char> = arguments
+        .iter()
+        .map(|value| value.as_ptr().cast_mut())
+        .chain(std::iter::once(ptr::null_mut()))
+        .collect();
+    let mut attrs_raw = MaybeUninit::<libc::posix_spawnattr_t>::uninit();
+    spawn_code(unsafe { libc::posix_spawnattr_init(attrs_raw.as_mut_ptr()) })?;
+    let mut attrs = SpawnAttrs(unsafe { attrs_raw.assume_init() });
+    let mut actions_raw = MaybeUninit::<libc::posix_spawn_file_actions_t>::uninit();
+    spawn_code(unsafe { libc::posix_spawn_file_actions_init(actions_raw.as_mut_ptr()) })?;
+    let mut actions = FileActions(unsafe { actions_raw.assume_init() });
+    let mut empty = MaybeUninit::<libc::sigset_t>::uninit();
+    if unsafe { libc::sigemptyset(empty.as_mut_ptr()) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let empty = unsafe { empty.assume_init() };
+    spawn_code(unsafe { libc::posix_spawnattr_setsigmask(&mut attrs.0, &empty) })?;
+    spawn_code(unsafe {
+        libc::posix_spawnattr_setflags(
+            &mut attrs.0,
+            (POSIX_SPAWN_CLOEXEC_DEFAULT | libc::POSIX_SPAWN_SETSIGMASK) as libc::c_short,
+        )
+    })?;
+
+    const HELPER_SLAVE_FD: RawFd = 4;
+    const HELPER_ERROR_FD: RawFd = 5;
+    let helper_slave = unsafe {
+        libc::fcntl(
+            slave.as_raw_fd(),
+            libc::F_DUPFD_CLOEXEC,
+            HELPER_ERROR_FD + 1,
+        )
+    };
+    if helper_slave < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let helper_slave = unsafe { OwnedFd::from_raw_fd(helper_slave) };
+    let helper_error = unsafe {
+        libc::fcntl(
+            error_write.as_raw_fd(),
+            libc::F_DUPFD_CLOEXEC,
+            HELPER_ERROR_FD + 1,
+        )
+    };
+    if helper_error < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let helper_error = unsafe { OwnedFd::from_raw_fd(helper_error) };
+    spawn_code(unsafe {
+        libc::posix_spawn_file_actions_adddup2(
+            &mut actions.0,
+            helper_slave.as_raw_fd(),
+            HELPER_SLAVE_FD,
+        )
+    })?;
+    spawn_code(unsafe {
+        libc::posix_spawn_file_actions_adddup2(
+            &mut actions.0,
+            helper_error.as_raw_fd(),
+            HELPER_ERROR_FD,
+        )
+    })?;
+    let mut pid = 0;
+    spawn_code(unsafe {
+        libc::posix_spawn(
+            &mut pid,
+            executable.as_ptr(),
+            &actions.0,
+            &attrs.0,
+            argument_pointers.as_mut_ptr(),
+            environ,
+        )
+    })?;
+    drop(helper_error);
+    drop(helper_slave);
+    drop(error_write);
+    drop(slave);
+    match read_exec_result(
+        error_read.as_raw_fd(),
+        Instant::now() + SPAWN_HANDSHAKE_TIMEOUT,
+    ) {
+        Ok(None) => Ok(Spawned { pid, master }),
+        Ok(Some(code)) => {
+            let _ = wait_exact(pid);
+            Err(io::Error::from_raw_os_error(code))
+        }
+        Err(error) => {
+            kill_and_reap(pid);
+            Err(error)
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn spawn_helper() -> ! {
+    const HELPER_SLAVE_FD: RawFd = 4;
+    const HELPER_ERROR_FD: RawFd = 5;
+    let arguments: Vec<CString> = std::env::args_os()
+        .skip(2)
+        .map(|value| CString::new(value.as_encoded_bytes()))
+        .collect::<Result<_, _>>()
+        .unwrap_or_else(|_| unsafe {
+            set_current_errno(libc::EINVAL);
+            child_fail(HELPER_ERROR_FD);
+        });
+    let has_cwd = arguments.first().map(CString::as_bytes);
+    let (cwd, environment_offset) = match has_cwd {
+        Some(b"0") if arguments.len() >= 3 => (None, 1),
+        Some(b"1") if arguments.len() >= 4 => (Some(arguments[1].as_c_str()), 2),
+        _ => unsafe {
+            set_current_errno(libc::EINVAL);
+            child_fail(HELPER_ERROR_FD);
+        },
+    };
+    let (environment, target_offset) = match arguments[environment_offset].as_bytes() {
+        b"0" => (None, environment_offset + 1),
+        b"1" if arguments.len() > environment_offset + 1 => {
+            let count = arguments[environment_offset + 1]
+                .to_str()
+                .ok()
+                .and_then(|value| value.parse::<usize>().ok())
+                .unwrap_or_else(|| unsafe {
+                    set_current_errno(libc::EINVAL);
+                    child_fail(HELPER_ERROR_FD);
+                });
+            let start = environment_offset + 2;
+            let end = start.checked_add(count).unwrap_or_else(|| unsafe {
+                set_current_errno(libc::EINVAL);
+                child_fail(HELPER_ERROR_FD);
+            });
+            if end >= arguments.len() {
+                unsafe {
+                    set_current_errno(libc::EINVAL);
+                    child_fail(HELPER_ERROR_FD);
+                }
+            }
+            (Some(&arguments[start..end]), end)
+        }
+        _ => unsafe {
+            set_current_errno(libc::EINVAL);
+            child_fail(HELPER_ERROR_FD);
+        },
+    };
+    let target = &arguments[target_offset..];
+    if target.is_empty() {
+        unsafe {
+            set_current_errno(libc::EINVAL);
+            child_fail(HELPER_ERROR_FD);
+        }
+    }
+    let pointers: Vec<*const libc::c_char> = target
+        .iter()
+        .map(|value| value.as_ptr())
+        .chain(std::iter::once(ptr::null()))
+        .collect();
+    let environment_pointers: Option<Vec<*const libc::c_char>> = environment.map(|entries| {
+        entries
+            .iter()
+            .map(|value| value.as_ptr())
+            .chain(std::iter::once(ptr::null()))
+            .collect()
+    });
+    let candidates = executable_candidates(target[0].as_c_str()).unwrap_or_else(|error| unsafe {
+        set_current_errno(error.raw_os_error().unwrap_or(libc::EINVAL));
+        child_fail(HELPER_ERROR_FD);
+    });
+    let descriptor_limit = unsafe { libc::getdtablesize() };
+    unsafe {
+        exec_target(
+            &candidates,
+            &pointers,
+            environment_pointers.as_deref(),
+            cwd,
+            HELPER_SLAVE_FD,
+            HELPER_ERROR_FD,
+            &descriptor_limit,
+        )
     }
 }
 
@@ -1676,11 +1904,6 @@ type DescriptorCleanup = RawFd;
 #[cfg(target_os = "linux")]
 fn prepare_descriptor_cleanup(_highest_descriptor: RawFd) -> io::Result<DescriptorCleanup> {
     Ok(unsafe { libc::getdtablesize() })
-}
-
-#[cfg(target_os = "macos")]
-fn prepare_descriptor_cleanup(highest_descriptor: RawFd) -> io::Result<DescriptorCleanup> {
-    Ok(highest_descriptor)
 }
 
 #[cfg(target_os = "linux")]
@@ -2565,6 +2788,8 @@ fn run_harness() -> io::Result<()> {
 fn main() -> io::Result<()> {
     match std::env::args().nth(1).as_deref() {
         Some("--broker") => Broker::run(),
+        #[cfg(target_os = "macos")]
+        Some("--spawn-helper") => spawn_helper(),
         Some("--child-inspect") => {
             child_inspect();
             Ok(())

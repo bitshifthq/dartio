@@ -980,7 +980,10 @@ Future<Map<String, Object?>> _fairness(
           Future<void>(() async {
             final value = _interactiveByte(round + index);
             final stopwatch = Stopwatch()..start();
-            pairs[index].session.write(Uint8List.fromList([value]));
+            await _writeAfterBackpressure(
+              pairs[index].session,
+              Uint8List.fromList([value]),
+            );
             final received = Platform.isWindows
                 ? await _readReport(
                     pairs[index].bytes,
