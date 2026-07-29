@@ -95,7 +95,7 @@ Future<void> main(List<String> arguments) async {
       longSession.resize(
         PtySize(rows: 24 + cycles % 8, columns: 80 + cycles % 16),
       );
-      _writeFixtureInput(longSession, interactive);
+      await _writeFixtureInput(longSession, interactive);
       if (Platform.isWindows) {
         await _expectReport(
           longOutput,
@@ -229,7 +229,7 @@ Future<void> _warmLongLivedSession() async {
   );
   try {
     await _expectReady(output);
-    session.write(Uint8List.fromList(const [65]));
+    await _writeFixtureInput(session, Uint8List.fromList(const [65]));
     if (Platform.isWindows) {
       await _expectReport(output, 'PTYX-INPUT 1 65', -1);
     } else {
@@ -272,7 +272,7 @@ Future<int> _runCycle(int cycle) async {
               }
             }
           });
-    _writeFixtureInput(session, input);
+    await _writeFixtureInput(session, input);
     await outputDone.timeout(_operationTimeout);
     final exitCode = await session.exitCode.timeout(_operationTimeout);
     if (exitCode != 0) {
@@ -304,8 +304,19 @@ Future<void> _expectReport(
   throw StateError('cycle $cycle ended before child report $report');
 }
 
-void _writeFixtureInput(PtySession session, Uint8List bytes) {
-  session.write(bytes);
+Future<void> _writeFixtureInput(PtySession session, Uint8List bytes) async {
+  final deadline = DateTime.now().add(_operationTimeout);
+  while (true) {
+    try {
+      session.write(bytes);
+      return;
+    } on PtyBackpressureException {
+      if (DateTime.now().isAfter(deadline)) {
+        rethrow;
+      }
+      await Future<void>.delayed(Duration.zero);
+    }
+  }
 }
 
 Future<PtySession> _spawnFixture(String operation, int byteCount) async {
