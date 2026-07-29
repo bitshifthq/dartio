@@ -2,7 +2,6 @@ import 'dart:convert';
 import 'dart:ffi';
 import 'dart:io';
 
-const _expectedAbi = 1;
 const _symbols = [
   'ptyx_abi_version',
   'ptyx_error_format',
@@ -34,8 +33,12 @@ void main(List<String> arguments) {
   final abi = library.lookupFunction<Uint32 Function(), int Function()>(
     'ptyx_abi_version',
   )();
-  if (abi != _expectedAbi) {
-    throw StateError('ABI mismatch: expected $_expectedAbi, found $abi');
+  final header = File.fromUri(
+    Platform.script.resolve('../native/include/ptyx/ptyx.h'),
+  );
+  final expectedAbi = parseAbiVersion(header.readAsStringSync());
+  if (abi != expectedAbi) {
+    throw StateError('ABI mismatch: expected $expectedAbi, found $abi');
   }
   for (final symbol in _symbols) {
     library.lookup<NativeFunction<Void Function()>>(symbol);
@@ -52,6 +55,28 @@ void main(List<String> arguments) {
   stdout.writeln(
     jsonEncode({'abi': abi, 'symbols': _symbols.length, 'library': file.path}),
   );
+}
+
+/// Reads the packed ABI version from the authoritative public [header].
+int parseAbiVersion(String header) {
+  int value(String name) {
+    final match = RegExp(
+      '^#define[ \\t]+$name[ \\t]+UINT32_C\\((\\d+)\\)',
+      multiLine: true,
+    ).firstMatch(header);
+    if (match == null) {
+      throw FormatException('Public header does not define $name.');
+    }
+    final value = int.parse(match[1]!);
+    if (value > 0xffff) {
+      throw FormatException('$name exceeds its packed 16-bit field.');
+    }
+    return value;
+  }
+
+  final major = value('PTYX_ABI_VERSION_MAJOR');
+  final minor = value('PTYX_ABI_VERSION_MINOR');
+  return (major << 16) | minor;
 }
 
 Set<String> _exportedPtySymbols(File library) {
