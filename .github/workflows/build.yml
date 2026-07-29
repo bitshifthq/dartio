@@ -159,7 +159,22 @@ jobs:
               ;;
             Windows)
               LIBRARY="$RELEASE/ptyx_dart.dll"
-              dumpbin.exe /nologo /exports "$LIBRARY" > "$RUNNER_TEMP/ptyx-symbols.txt"
+              VSWHERE="/c/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe"
+              DUMPBIN="$(
+                "$VSWHERE" \
+                  -latest \
+                  -products '*' \
+                  -find 'VC\Tools\MSVC\**\bin\Host*\*\dumpbin.exe' |
+                  tr -d '\r' |
+                  head -n 1
+              )"
+              if [[ -z "$DUMPBIN" ]]; then
+                echo "::error::Visual Studio dumpbin.exe was not found"
+                exit 1
+              fi
+              "$(cygpath -u "$DUMPBIN")" \
+                /nologo /exports "$LIBRARY" \
+                > "$RUNNER_TEMP/ptyx-symbols.txt"
               ;;
           esac
           for symbol in \
@@ -185,6 +200,7 @@ jobs:
             ptyd_runtime_attach \
             ptyd_runtime_detach \
             ptyd_runtime_finalize \
+            ptyd_session_finalize \
             ptyd_session_release \
             ptyd_session_spawn_start
           do
