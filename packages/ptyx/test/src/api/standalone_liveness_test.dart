@@ -40,15 +40,10 @@ void main() {
     });
 
     test('awaiting a failed spawn keeps a CLI alive', () async {
-      final result = await runProbe(
-        'standalone_spawn_failure_liveness_probe',
-      );
+      final result = await runProbe('standalone_spawn_failure_liveness_probe');
 
       expect(result.exitCode, 0, reason: result.errorOutput);
-      expect(
-        result.output,
-        contains('ptyx-standalone-spawn-failure-alive'),
-      );
+      expect(result.output, contains('ptyx-standalone-spawn-failure-alive'));
     });
   });
 }
