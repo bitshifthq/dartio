@@ -53,15 +53,15 @@ Future<void> main() async {
   session.write(Uint8List.fromList(const [1]));
   final exitCode = await session.exitCode;
   await outputDone.future;
-  await output.cancel();
-  if (exitCode != 0) {
-    throw StateError('probe child exited with $exitCode');
-  }
-  if (received < 1024 * 1024) {
-    throw StateError('probe received only $received output bytes');
-  }
   final completionLease = ReceivePort();
   try {
+    await output.cancel();
+    if (exitCode != 0) {
+      throw StateError('probe child exited with $exitCode');
+    }
+    if (received < 1024 * 1024) {
+      throw StateError('probe received only $received output bytes');
+    }
     await session.close();
     stdout.writeln('ptyx-standalone-alive');
     await stdout.flush();
