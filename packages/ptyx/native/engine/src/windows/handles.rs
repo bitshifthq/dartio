@@ -4,6 +4,7 @@ use std::mem::{size_of, zeroed};
 use std::pin::Pin;
 use std::ptr::{null, null_mut};
 
+use bytes::Bytes;
 use windows_sys::Win32::Foundation::{CloseHandle, LocalFree, HANDLE, INVALID_HANDLE_VALUE};
 use windows_sys::Win32::Security::Authorization::{
     ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
@@ -210,9 +211,14 @@ pub(crate) enum IoKind {
 #[repr(C)]
 pub(crate) struct IoOperation {
     overlapped: OVERLAPPED,
-    pub(crate) buffer: Vec<u8>,
+    buffer: IoBuffer,
     pub(crate) offset: usize,
     pub(crate) kind: IoKind,
+}
+
+enum IoBuffer {
+    Read(Vec<u8>),
+    Write(Bytes),
 }
 
 // The operation is pinned before its addresses reach Windows and remains owned
@@ -223,16 +229,16 @@ impl IoOperation {
     pub(crate) fn read(capacity: usize) -> Pin<Box<Self>> {
         Box::pin(Self {
             overlapped: unsafe { zeroed() },
-            buffer: vec![0; capacity],
+            buffer: IoBuffer::Read(vec![0; capacity]),
             offset: 0,
             kind: IoKind::Read,
         })
     }
 
-    pub(crate) fn write(buffer: Vec<u8>) -> Pin<Box<Self>> {
+    pub(crate) fn write(buffer: Bytes) -> Pin<Box<Self>> {
         Box::pin(Self {
             overlapped: unsafe { zeroed() },
-            buffer,
+            buffer: IoBuffer::Write(buffer),
             offset: 0,
             kind: IoKind::Write,
         })
@@ -247,16 +253,38 @@ impl IoOperation {
     }
 
     pub(crate) fn remaining_ptr(&self) -> *const u8 {
-        unsafe { self.buffer.as_ptr().add(self.offset) }
+        unsafe { self.bytes().as_ptr().add(self.offset) }
     }
 
     pub(crate) fn remaining_len(&self) -> usize {
-        self.buffer.len() - self.offset
+        self.bytes().len() - self.offset
+    }
+
+    pub(crate) fn read_buffer_mut(&mut self) -> &mut [u8] {
+        match &mut self.buffer {
+            IoBuffer::Read(buffer) => buffer,
+            IoBuffer::Write(_) => panic!("write operation has no mutable read buffer"),
+        }
+    }
+
+    pub(crate) fn into_read_buffer(self: Pin<Box<Self>>) -> Vec<u8> {
+        let operation = Pin::into_inner(self);
+        match operation.buffer {
+            IoBuffer::Read(buffer) => buffer,
+            IoBuffer::Write(_) => panic!("write operation has no read buffer"),
+        }
     }
 
     pub(crate) fn reset_overlapped(self: &mut Pin<Box<Self>>) {
         unsafe {
             self.as_mut().get_unchecked_mut().overlapped = zeroed();
+        }
+    }
+
+    fn bytes(&self) -> &[u8] {
+        match &self.buffer {
+            IoBuffer::Read(buffer) => buffer,
+            IoBuffer::Write(buffer) => buffer,
         }
     }
 }

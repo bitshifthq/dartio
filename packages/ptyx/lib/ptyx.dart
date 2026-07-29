@@ -8,4 +8,30 @@
 /// cannot satisfy the package's resource-cleanup contract.
 library;
 
-export 'src/api/api.dart';
+export 'src/api/api.dart'
+    show
+        PtyBackpressureException,
+        PtyCapabilities,
+        PtyCloseException,
+        PtyClosedException,
+        PtyEnvironmentMode,
+        PtyErrorCategory,
+        PtyException,
+        PtyExitException,
+        PtyExitStatus,
+        PtyExited,
+        PtyInfrastructureException,
+        PtyInputException,
+        PtyInvalidArgumentException,
+        PtyMetadataException,
+        PtyModeException,
+        PtyOutputException,
+        PtyResizeException,
+        PtySession,
+        PtySignalException,
+        PtySignaled,
+        PtySize,
+        PtySpawnException,
+        PtySpawnOptions,
+        PtyTermMode,
+        PtyUnsupportedException;

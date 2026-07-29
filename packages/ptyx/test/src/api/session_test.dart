@@ -8,6 +8,7 @@ import 'package:ptyx/ptyx.dart';
 import 'package:test/test.dart';
 
 import '../../../benchmark/vt_payload.dart';
+import '../ffi/ptyx_test.g.dart';
 
 void main() {
   group('PtySession', () {
@@ -331,6 +332,50 @@ void main() {
         );
       }, testOn: 'posix');
 
+      test('a paused noisy session does not stall a peer', () async {
+        final noisy = infiniteOutputCommand();
+        final saturated = await spawn(
+          PtySpawnOptions(
+            executable: noisy.executable,
+            arguments: noisy.arguments,
+            initialSize: defaultSize,
+            maxBufferedOutput: 8 * 1024 * 1024,
+          ),
+        );
+        final firstChunk = Completer<void>();
+        late final StreamSubscription<Uint8List> subscription;
+        subscription = fixtureOutput(saturated).listen((_) {
+          subscription.pause();
+          firstChunk.complete();
+        });
+        addTearDown(subscription.cancel);
+        await firstChunk.future.timeout(shortTimeout);
+        final saturationDeadline = DateTime.now().add(shortTimeout);
+        while (ptyd_test_outstanding_event_count() < 64 &&
+            DateTime.now().isBefore(saturationDeadline)) {
+          await Future<void>.delayed(const Duration(milliseconds: 5));
+        }
+        expect(
+          ptyd_test_outstanding_event_count(),
+          greaterThanOrEqualTo(64),
+          reason: 'the noisy session must fill the former global event window',
+        );
+
+        final peer = await spawnScript(
+          platformScript(
+            posix: 'printf peer',
+            windows: '[Console]::Write("peer")',
+          ),
+        );
+        final peerOutput = await fixtureOutput(
+          peer,
+        ).expand((chunk) => chunk).take(4).toList().timeout(shortTimeout);
+
+        expect(utf8.decode(peerOutput), 'peer');
+        await expectLater(peer.close().timeout(shortTimeout), completes);
+        await expectLater(saturated.close().timeout(shortTimeout), completes);
+      });
+
       test(
         'resumes ConPTY output through its final terminal state',
         () async {
@@ -522,6 +567,19 @@ void main() {
         ).expand((chunk) => chunk).take(4).toList().timeout(shortTimeout);
 
         expect(utf8.decode(bytes), 'ping');
+      });
+
+      test('copies accepted input before returning', () async {
+        final session = await spawnScript(inputEcho);
+        final input = Uint8List.fromList(utf8.encode('safe\n'));
+
+        session.write(input);
+        input.fillRange(0, input.length, 'x'.codeUnitAt(0));
+        final bytes = await fixtureOutput(
+          session,
+        ).expand((chunk) => chunk).take(4).toList().timeout(shortTimeout);
+
+        expect(utf8.decode(bytes), 'safe');
       });
 
       test('preserves high-volume input', () async {
@@ -728,6 +786,22 @@ void main() {
         await fixtureOutput(session).first.timeout(shortTimeout);
 
         await expectLater(session.close().timeout(shortTimeout), completes);
+      });
+
+      test('completes while an output subscription is paused', () async {
+        final session = await spawnCommand(infiniteOutputCommand());
+        final firstChunk = Completer<void>();
+        late final StreamSubscription<Uint8List> subscription;
+        subscription = fixtureOutput(session).listen((_) {
+          subscription.pause();
+          firstChunk.complete();
+        });
+        addTearDown(subscription.cancel);
+        await firstChunk.future.timeout(shortTimeout);
+
+        final closing = session.close();
+
+        await expectLater(closing.timeout(shortTimeout), completes);
       });
 
       test('does not wait for output held by an escaped descendant', () async {

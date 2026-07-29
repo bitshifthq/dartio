@@ -1,21 +1,10 @@
-@DefaultAsset('package:ptyx/ptyx.dart')
-library;
-
 import 'dart:async';
-import 'dart:ffi';
 import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:ptyx/ptyx.dart';
 
-@Native<Void Function()>(symbol: 'ptyi_test_fail_next_post')
-external void failNextNativePost();
-
-@Native<Void Function()>(symbol: 'ptyi_test_kill_broker')
-external void killNativeBroker();
-
-@Native<Void Function()>(symbol: 'ptyi_test_fail_next_write_infrastructure')
-external void failNextWriteWithInfrastructureLoss();
+import '../ffi/ptyx_test.g.dart';
 
 Future<void> main(List<String> arguments) {
   switch (arguments.length == 1 ? arguments.single : null) {
@@ -51,7 +40,7 @@ Future<void> _exerciseReentrantWriteFailure() async {
   late final StreamSubscription<Uint8List> subscription;
   subscription = session.output.listen(
     (_) {
-      failNextWriteWithInfrastructureLoss();
+      ptyd_test_fail_next_write();
       try {
         session.write(Uint8List.fromList(const [1]));
       } on PtyInfrastructureException {
@@ -100,7 +89,7 @@ Future<void> _exerciseFailedPost() async {
   );
   final outputFailure = _expectInfrastructure(session.output.drain<Object?>());
 
-  failNextNativePost();
+  ptyd_test_fail_next_post();
 
   await outputFailure.timeout(const Duration(seconds: 5));
   await _expectInfrastructure(session.exitCode);
@@ -127,7 +116,9 @@ Future<void> _exerciseBrokerLoss() async {
   final pid = session.pid!;
   final outputFailure = _expectInfrastructure(session.output.drain<Object?>());
 
-  killNativeBroker();
+  if (ptyd_test_kill_broker() == 0) {
+    throw StateError('broker-loss injection requires one active adapter');
+  }
 
   await outputFailure.timeout(const Duration(seconds: 5));
   await _expectInfrastructure(session.exitCode);

@@ -1,0 +1,16 @@
+[package]
+name = "ptyx"
+version = "0.0.1"
+edition = "2021"
+rust-version = "1.87"
+description = "Opinionated high-throughput cross-platform pseudo-terminal sessions"
+license = "MIT"
+repository = "https://github.com/bitshifthq/dartio"
+readme = "README.md"
+keywords = ["pty", "terminal", "conpty", "process"]
+categories = ["os", "api-bindings"]
+
+[dependencies]
+bytes = "1"
+futures-core = "0.3"
+ptyx-engine = { version = "0.0.1", path = "../engine" }

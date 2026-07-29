@@ -63,7 +63,7 @@ The standalone ABI smoke harness verifies the ABI version and every
 authoritative header symbol in a built artifact:
 
 ```sh
-dart run tool/verify_abi.dart native/target/release/libptyx.dylib
+dart run tool/verify_abi.dart native/target/release/libptyx_c.dylib
 ```
 
 The scorecard refuses `--output` retention from a dirty tree. The

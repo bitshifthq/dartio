@@ -1,13 +1,22 @@
 use super::{dup_cloexec, set_cloexec, set_nonblocking, GenerationRegistry};
-use crate::broker_client::{BrokerClient, BrokerOwner, BrokerSession, BrokerSpawn};
+use crate::broker_client::{BrokerClient, BrokerOwner, BrokerSession};
+use crate::control::{Control, ControlQueue, WakeGate};
 use crate::event::{self, Receiver as EventReceiver, Sender as EventSender};
 use crate::oneshot::{self, Sender as ReplySender};
-use crate::{Notice, WRITE_INFRASTRUCTURE_FAILURE};
+use crate::session::{InputAdmission, QueuedOutput, SessionCore};
+use crate::spawn::BrokerSpawn;
+use crate::{
+    CloseResult, Completion, Failure, Notice, SessionSnapshot, WRITE_INFRASTRUCTURE_FAILURE,
+};
+use bytes::Bytes;
 use std::collections::{HashMap, VecDeque};
 use std::ffi::CString;
 use std::io;
+#[cfg(target_os = "linux")]
 use std::mem::MaybeUninit;
+use std::ops::{Deref, DerefMut};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::path::Path;
 #[cfg(target_os = "macos")]
 use std::ptr;
 use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
@@ -23,6 +32,15 @@ const OUTPUT_DELAY: Duration = Duration::from_millis(1);
 const COMMAND_QUANTUM: usize = 64;
 const COMMAND_CAPACITY: usize = 1024;
 const ACTIVATION_TIMEOUT: Duration = Duration::from_secs(5);
+const MODE_POLL_MIN: Duration = Duration::from_millis(40);
+const MODE_POLL_MAX: Duration = Duration::from_millis(250);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ReleaseState {
+    Needed,
+    Pending,
+    Complete,
+}
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct RuntimeCounters {
@@ -36,77 +54,20 @@ pub struct RuntimeCounters {
     pub notifications: u64,
 }
 
-struct QueuedInput {
-    bytes: Vec<u8>,
-    offset: usize,
-}
-
-struct QueuedOutput {
-    bytes: Vec<u8>,
-    offset: usize,
-}
-
-pub(crate) struct InputAdmission {
-    capacity: usize,
-    state: Mutex<InputAdmissionState>,
-}
-
-struct InputAdmissionState {
-    bytes: usize,
-    open: bool,
-}
-
-impl InputAdmission {
-    fn new(capacity: usize) -> Self {
-        Self {
-            capacity,
-            state: Mutex::new(InputAdmissionState {
-                bytes: 0,
-                open: true,
-            }),
-        }
-    }
-
-    fn release(&self, bytes: usize) {
-        if let Ok(mut state) = self.state.lock() {
-            debug_assert!(bytes <= state.bytes);
-            state.bytes = state.bytes.saturating_sub(bytes);
-        }
-    }
-
-    fn close(&self) {
-        if let Ok(mut state) = self.state.lock() {
-            state.open = false;
-        }
-    }
-}
-
 struct Session {
+    core: SessionCore,
     broker_session: u64,
     pid: libc::pid_t,
     master: OwnedFd,
-    admission: Arc<InputAdmission>,
-    input_bytes: usize,
-    input: VecDeque<QueuedInput>,
-    input_failed: bool,
-    input_failure_pending: bool,
-    input_failure_notified: bool,
-    output_capacity: usize,
-    output_bytes: usize,
-    output: VecDeque<QueuedOutput>,
-    output_outstanding: usize,
-    output_deadline: Option<Instant>,
-    output_done_notified: bool,
-    output_failed: bool,
-    paused: bool,
-    output_eof: bool,
-    exit_status: Option<i64>,
-    close_started: bool,
-    active: bool,
-    activation_deadline: Option<Instant>,
-    abandoned: bool,
     read_filter_enabled: Option<bool>,
     write_filter_enabled: Option<bool>,
+    mode_deadline: Option<Instant>,
+    mode_interval: Duration,
+    observed_mode: Option<[bool; 3]>,
+    graceful_close_timeout: Duration,
+    close_deadline: Option<Instant>,
+    close_escalated: bool,
+    release: ReleaseState,
     #[cfg(target_os = "linux")]
     readiness_registered: bool,
 }
@@ -116,91 +77,54 @@ impl Session {
         broker: BrokerSession,
         admission: Arc<InputAdmission>,
         output_capacity: usize,
+        graceful_close_timeout: Duration,
     ) -> Self {
+        let mut core = SessionCore::new(admission, output_capacity);
+        core.activation_deadline = Some(Instant::now() + ACTIVATION_TIMEOUT);
         Self {
+            core,
             broker_session: broker.id,
             pid: broker.pid,
             master: broker.master,
-            admission,
-            input_bytes: 0,
-            input: VecDeque::new(),
-            input_failed: false,
-            input_failure_pending: false,
-            input_failure_notified: false,
-            output_capacity,
-            output_bytes: 0,
-            output: VecDeque::new(),
-            output_outstanding: 0,
-            output_deadline: None,
-            output_done_notified: false,
-            output_failed: false,
-            paused: true,
-            output_eof: false,
-            exit_status: None,
-            close_started: false,
-            active: false,
-            activation_deadline: Some(Instant::now() + ACTIVATION_TIMEOUT),
-            abandoned: false,
             read_filter_enabled: None,
             write_filter_enabled: None,
+            mode_deadline: None,
+            mode_interval: MODE_POLL_MIN,
+            observed_mode: None,
+            graceful_close_timeout,
+            close_deadline: None,
+            close_escalated: false,
+            release: ReleaseState::Needed,
             #[cfg(target_os = "linux")]
             readiness_registered: false,
         }
     }
 
-    fn enqueue_write(&mut self, bytes: Vec<u8>) -> Result<(), Vec<u8>> {
-        if self.close_started || self.input_failed || bytes.is_empty() {
-            return Err(bytes);
-        }
-        self.input_bytes += bytes.len();
-        self.input.push_back(QueuedInput { bytes, offset: 0 });
-        Ok(())
+    fn record_release_result(&mut self, succeeded: bool) {
+        self.release = ReleaseState::Complete;
+        self.cleanup_failed = !succeeded;
     }
 
-    fn pull(&mut self, maximum: usize) -> Vec<u8> {
-        let amount = maximum.min(self.output_bytes);
-        if self
-            .output
-            .front()
-            .is_some_and(|front| front.offset == 0 && front.bytes.len() == amount)
-        {
-            let bytes = self.output.pop_front().unwrap().bytes;
-            self.output_bytes -= bytes.len();
-            self.output_outstanding += bytes.len();
-            if self.output.is_empty() {
-                self.output_deadline = None;
-            }
-            return bytes;
-        }
-        let mut bytes = Vec::with_capacity(amount);
-        while bytes.len() < amount {
-            let front = self.output.front_mut().unwrap();
-            let available = front.bytes.len() - front.offset;
-            let take = available.min(amount - bytes.len());
-            bytes.extend_from_slice(&front.bytes[front.offset..front.offset + take]);
-            front.offset += take;
-            if front.offset == front.bytes.len() {
-                self.output.pop_front();
-            }
-        }
-        self.output_bytes -= bytes.len();
-        self.output_outstanding += bytes.len();
-        if self.output.is_empty() {
-            self.output_deadline = None;
-        }
-        bytes
+    fn completed_close_result(&self) -> Option<CloseResult> {
+        (self.release == ReleaseState::Complete).then_some(CloseResult {
+            input_failed: self.input_failure_pending,
+            output_failed: self.output_failed,
+            cleanup_failed: self.cleanup_failed,
+        })
     }
+}
 
-    fn credit(&mut self, bytes: usize) -> bool {
-        if bytes > self.output_outstanding {
-            return false;
-        }
-        self.output_outstanding -= bytes;
-        true
+impl Deref for Session {
+    type Target = SessionCore;
+
+    fn deref(&self) -> &Self::Target {
+        &self.core
     }
+}
 
-    fn output_total(&self) -> usize {
-        self.output_bytes + self.output_outstanding
+impl DerefMut for Session {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.core
     }
 }
 
@@ -209,6 +133,7 @@ pub(crate) enum Command {
         broker: BrokerSession,
         input_capacity: usize,
         output_capacity: usize,
+        graceful_close_timeout: Duration,
         reply: ReplySender<io::Result<u64>>,
     },
     Activate {
@@ -217,16 +142,11 @@ pub(crate) enum Command {
     },
     Write {
         handle: u64,
-        bytes: Vec<u8>,
+        bytes: Bytes,
         admission: Arc<InputAdmission>,
     },
-    CreditAsync {
+    CancelOutput {
         handle: u64,
-        bytes: usize,
-    },
-    Pause {
-        handle: u64,
-        paused: bool,
         reply: ReplySender<bool>,
     },
     ExitStatus {
@@ -241,6 +161,10 @@ pub(crate) enum Command {
         handle: u64,
         reply: ReplySender<Option<[u32; 4]>>,
     },
+    Snapshot {
+        handle: u64,
+        reply: ReplySender<Option<SessionSnapshot>>,
+    },
     Resize {
         handle: u64,
         size: [u32; 4],
@@ -249,6 +173,11 @@ pub(crate) enum Command {
     Mode {
         handle: u64,
         reply: ReplySender<Option<[bool; 3]>>,
+    },
+    ObserveMode {
+        handle: u64,
+        observe: bool,
+        reply: ReplySender<bool>,
     },
     TtyName {
         handle: u64,
@@ -263,29 +192,144 @@ pub(crate) enum Command {
         handle: u64,
         reply: ReplySender<bool>,
     },
-    Destroy {
+    CloseStart {
         handle: u64,
+        completion: ReplySender<CloseResult>,
         reply: ReplySender<bool>,
-    },
-    Abandon {
-        handle: u64,
     },
     BrokerExit {
         broker_session: u64,
         status: i32,
     },
     BrokerLost,
+    GracefulSignalResult {
+        handle: u64,
+        result: Option<bool>,
+    },
+    ForceCloseResult {
+        handle: u64,
+        succeeded: bool,
+    },
+    ReleaseResult {
+        handle: u64,
+        succeeded: bool,
+    },
     Shutdown,
 }
 
-struct WakeWriter(OwnedFd);
+#[derive(Clone)]
+struct WakeWriter {
+    fd: Arc<OwnedFd>,
+    gate: Arc<WakeGate>,
+}
+
+struct ReactorWake {
+    reader: OwnedFd,
+    writer: OwnedFd,
+    gate: Arc<WakeGate>,
+}
 
 impl WakeWriter {
     fn wake(&self) {
-        let byte = [1_u8];
-        unsafe {
-            libc::write(self.0.as_raw_fd(), byte.as_ptr().cast(), byte.len());
+        if self.gate.request() {
+            wake_socket(self.fd.as_raw_fd());
         }
+    }
+}
+
+struct SpawnTask {
+    config: BrokerSpawn,
+    input_capacity: usize,
+    output_capacity: usize,
+    target: SpawnTarget,
+}
+
+enum SpawnTarget {
+    Completion(ReplySender<io::Result<u64>>),
+    Notice { request: u64 },
+}
+
+struct SpawnPool {
+    sender: Mutex<Option<SyncSender<SpawnTask>>>,
+    thread: Mutex<Option<JoinHandle<()>>>,
+}
+
+impl SpawnPool {
+    fn new(
+        broker: BrokerClient,
+        commands: SyncSender<Command>,
+        wake: WakeWriter,
+        controls: Arc<ControlQueue>,
+        notices: EventSender<Notice>,
+    ) -> io::Result<Self> {
+        let (sender, receiver) = mpsc::sync_channel::<SpawnTask>(64);
+        let thread = thread::Builder::new()
+            .name("ptyx-spawn".to_owned())
+            .spawn(move || {
+                while let Ok(task) = receiver.recv() {
+                    let result = stage_spawn(
+                        &broker,
+                        &commands,
+                        &wake,
+                        task.config,
+                        task.input_capacity,
+                        task.output_capacity,
+                    );
+                    let staged = result.as_ref().ok().copied();
+                    let delivered = match task.target {
+                        SpawnTarget::Completion(reply) => reply.send(result),
+                        SpawnTarget::Notice { request } => {
+                            let notice = match result {
+                                Ok(handle) => Notice::SpawnReady { request, handle },
+                                Err(error) => Notice::SpawnFailed {
+                                    request,
+                                    failure: Failure::from(&error),
+                                },
+                            };
+                            notices.send(notice.handle(), notice).is_ok()
+                        }
+                    };
+                    if !delivered {
+                        if let Some(handle) = staged {
+                            controls.push(Control::Abandon { handle });
+                            wake.wake();
+                        }
+                    }
+                }
+            })?;
+        Ok(Self {
+            sender: Mutex::new(Some(sender)),
+            thread: Mutex::new(Some(thread)),
+        })
+    }
+
+    fn submit(&self, task: SpawnTask) -> io::Result<()> {
+        let sender = self
+            .sender
+            .lock()
+            .map_err(|_| io::Error::other("spawn queue lock poisoned"))?
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "runtime is shutting down"))?;
+        sender.try_send(task).map_err(|error| match error {
+            TrySendError::Full(_) => {
+                io::Error::new(io::ErrorKind::WouldBlock, "spawn queue is full")
+            }
+            TrySendError::Disconnected(_) => {
+                io::Error::new(io::ErrorKind::BrokenPipe, "spawn worker stopped")
+            }
+        })
+    }
+
+    fn shutdown(&self) -> bool {
+        if let Ok(mut sender) = self.sender.lock() {
+            sender.take();
+        }
+        self.thread
+            .lock()
+            .ok()
+            .and_then(|mut thread| thread.take())
+            .is_none_or(|thread| thread.join().is_ok())
     }
 }
 
@@ -294,23 +338,24 @@ pub struct IntegratedRuntime {
     admissions: Arc<Mutex<HashMap<u64, Arc<InputAdmission>>>>,
     notices: Mutex<Option<EventReceiver<Notice>>>,
     wake: WakeWriter,
+    controls: Arc<ControlQueue>,
+    spawn_pool: SpawnPool,
     thread: Mutex<Option<JoinHandle<()>>>,
     broker: BrokerOwner,
 }
 
 impl IntegratedRuntime {
-    pub fn try_new() -> io::Result<Self> {
-        let mut pipe = [-1; 2];
+    pub fn try_new(broker_path: &Path) -> io::Result<Self> {
+        let mut sockets = [-1; 2];
         #[cfg(target_os = "macos")]
-        let pipe_result = unsafe { libc::pipe(pipe.as_mut_ptr()) };
+        let socket_type = libc::SOCK_STREAM;
         #[cfg(target_os = "linux")]
-        let pipe_result =
-            unsafe { libc::pipe2(pipe.as_mut_ptr(), libc::O_CLOEXEC | libc::O_NONBLOCK) };
-        if pipe_result < 0 {
+        let socket_type = libc::SOCK_STREAM | libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK;
+        if unsafe { libc::socketpair(libc::AF_UNIX, socket_type, 0, sockets.as_mut_ptr()) } < 0 {
             return Err(io::Error::last_os_error());
         }
-        let read = unsafe { OwnedFd::from_raw_fd(pipe[0]) };
-        let write = unsafe { OwnedFd::from_raw_fd(pipe[1]) };
+        let read = unsafe { OwnedFd::from_raw_fd(sockets[0]) };
+        let write = unsafe { OwnedFd::from_raw_fd(sockets[1]) };
         set_cloexec(read.as_raw_fd())?;
         set_cloexec(write.as_raw_fd())?;
         set_nonblocking(read.as_raw_fd())?;
@@ -319,31 +364,50 @@ impl IntegratedRuntime {
         let (command_sender, command_receiver) = mpsc::sync_channel(COMMAND_CAPACITY);
         let (notice_sender, notice_receiver) = event::channel();
         let broker_reactor_wake = dup_cloexec(write.as_raw_fd())?;
-        let materialized = crate::broker_materializer::broker_path()?;
-        let broker_path = CString::new(materialized.as_os_str().as_encoded_bytes())
+        let broker_path = CString::new(broker_path.as_os_str().as_encoded_bytes())
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "NUL broker path"))?;
         let broker =
             BrokerOwner::launch(&broker_path, command_sender.clone(), broker_reactor_wake)?;
         let broker_client = broker.client();
+        let wake_gate = Arc::new(WakeGate::new());
+        let wake = WakeWriter {
+            fd: Arc::new(write),
+            gate: Arc::clone(&wake_gate),
+        };
         let admissions = Arc::new(Mutex::new(HashMap::new()));
+        let controls = Arc::new(ControlQueue::new());
+        let spawn_pool = SpawnPool::new(
+            broker_client.clone(),
+            command_sender.clone(),
+            wake.clone(),
+            Arc::clone(&controls),
+            notice_sender.clone(),
+        )?;
         let reactor_admissions = Arc::clone(&admissions);
+        let reactor_controls = Arc::clone(&controls);
         let thread = thread::Builder::new()
             .name("ptyx-integrated-reactor".to_owned())
             .spawn(move || {
                 reactor(
-                    read,
-                    reactor_wake,
+                    ReactorWake {
+                        reader: read,
+                        writer: reactor_wake,
+                        gate: wake_gate,
+                    },
                     command_receiver,
                     notice_sender,
                     broker_client,
                     reactor_admissions,
+                    reactor_controls,
                 )
             })?;
         Ok(Self {
             commands: command_sender,
             admissions,
             notices: Mutex::new(Some(notice_receiver)),
-            wake: WakeWriter(write),
+            wake,
+            controls,
+            spawn_pool,
             thread: Mutex::new(Some(thread)),
             broker,
         })
@@ -353,36 +417,50 @@ impl IntegratedRuntime {
         self.notices.lock().ok()?.take()
     }
 
-    pub(crate) fn spawn_staged(
+    pub fn spawn_staged(
         &self,
         config: BrokerSpawn,
         input_capacity: usize,
         output_capacity: usize,
     ) -> io::Result<u64> {
-        if input_capacity == 0
-            || input_capacity > 64 * 1024 * 1024
-            || output_capacity == 0
-            || output_capacity > 64 * 1024 * 1024
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "capacities must be nonzero",
-            ));
-        }
-        let broker = self.broker.client().spawn(config)?;
-        let broker_session = broker.id;
-        match self.request_result(|reply| Command::Add {
-            broker,
+        self.spawn_start(config, input_capacity, output_capacity)?
+            .wait()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "spawn worker stopped"))?
+    }
+
+    pub fn spawn_start(
+        &self,
+        config: BrokerSpawn,
+        input_capacity: usize,
+        output_capacity: usize,
+    ) -> io::Result<Completion<io::Result<u64>>> {
+        validate_capacities(input_capacity, output_capacity)?;
+        config.validate()?;
+        let (reply, receiver) = oneshot::channel();
+        self.spawn_pool.submit(SpawnTask {
+            config,
             input_capacity,
             output_capacity,
-            reply,
-        }) {
-            Ok(result) => result,
-            Err(error) => {
-                let _ = self.broker.client().abort(broker_session);
-                Err(error)
-            }
-        }
+            target: SpawnTarget::Completion(reply),
+        })?;
+        Ok(Completion::new(receiver))
+    }
+
+    pub fn spawn_start_notified(
+        &self,
+        request: u64,
+        config: BrokerSpawn,
+        input_capacity: usize,
+        output_capacity: usize,
+    ) -> io::Result<()> {
+        validate_capacities(input_capacity, output_capacity)?;
+        config.validate()?;
+        self.spawn_pool.submit(SpawnTask {
+            config,
+            input_capacity,
+            output_capacity,
+            target: SpawnTarget::Notice { request },
+        })
     }
 
     pub fn activate(&self, handle: u64) -> bool {
@@ -393,7 +471,7 @@ impl IntegratedRuntime {
         self.request_result(|reply| Command::Activate { handle, reply })?
     }
 
-    pub fn write(&self, handle: u64, bytes: Vec<u8>) -> i64 {
+    pub fn write(&self, handle: u64, bytes: Bytes) -> i64 {
         let admission = match self.admissions.lock() {
             Ok(admissions) => match admissions.get(&handle).cloned() {
                 Some(admission) => admission,
@@ -401,7 +479,26 @@ impl IntegratedRuntime {
             },
             Err(_) => return WRITE_INFRASTRUCTURE_FAILURE,
         };
-        let result = admit_write(&self.commands, handle, bytes, admission);
+        let length = bytes.len();
+        let result = admit_write_with(&self.commands, handle, length, admission, || bytes);
+        if result != 1 {
+            return result;
+        }
+        self.wake.wake();
+        1
+    }
+
+    pub fn write_copy(&self, handle: u64, bytes: &[u8]) -> i64 {
+        let admission = match self.admissions.lock() {
+            Ok(admissions) => match admissions.get(&handle).cloned() {
+                Some(admission) => admission,
+                None => return -1,
+            },
+            Err(_) => return WRITE_INFRASTRUCTURE_FAILURE,
+        };
+        let result = admit_write_with(&self.commands, handle, bytes.len(), admission, || {
+            Bytes::copy_from_slice(bytes)
+        });
         if result != 1 {
             return result;
         }
@@ -410,24 +507,14 @@ impl IntegratedRuntime {
     }
 
     pub fn credit_async(&self, handle: u64, bytes: usize) -> bool {
-        if self
-            .commands
-            .try_send(Command::CreditAsync { handle, bytes })
-            .is_err()
-        {
-            return false;
-        }
+        self.controls.push(Control::Credit { handle, bytes });
         self.wake.wake();
         true
     }
 
-    pub fn pause(&self, handle: u64, paused: bool) -> bool {
-        self.request_result(|reply| Command::Pause {
-            handle,
-            paused,
-            reply,
-        })
-        .unwrap_or(false)
+    pub fn cancel_output(&self, handle: u64) -> bool {
+        self.request_result(|reply| Command::CancelOutput { handle, reply })
+            .unwrap_or(false)
     }
 
     pub fn exit_status(&self, handle: u64) -> Option<i64> {
@@ -448,6 +535,12 @@ impl IntegratedRuntime {
             .flatten()
     }
 
+    pub fn snapshot(&self, handle: u64) -> Option<SessionSnapshot> {
+        self.request_result(|reply| Command::Snapshot { handle, reply })
+            .ok()
+            .flatten()
+    }
+
     pub fn resize(&self, handle: u64, size: [u32; 4]) -> bool {
         self.request_result(|reply| Command::Resize {
             handle,
@@ -461,6 +554,15 @@ impl IntegratedRuntime {
         self.request_result(|reply| Command::Mode { handle, reply })
             .ok()
             .flatten()
+    }
+
+    pub fn observe_mode(&self, handle: u64, observe: bool) -> bool {
+        self.request_result(|reply| Command::ObserveMode {
+            handle,
+            observe,
+            reply,
+        })
+        .unwrap_or(false)
     }
 
     pub fn tty_name(&self, handle: u64) -> Option<Vec<u8>> {
@@ -492,16 +594,25 @@ impl IntegratedRuntime {
             .unwrap_or(false)
     }
 
-    pub fn destroy(&self, handle: u64) -> bool {
-        let destroyed = self
-            .request_result(|reply| Command::Destroy { handle, reply })
-            .unwrap_or(false);
-        if destroyed {
-            if let Ok(mut admissions) = self.admissions.lock() {
-                admissions.remove(&handle);
-            }
+    pub fn close_start(&self, handle: u64) -> io::Result<Completion<CloseResult>> {
+        if let Some(admission) = self
+            .admissions
+            .lock()
+            .ok()
+            .and_then(|admissions| admissions.get(&handle).cloned())
+        {
+            admission.close();
         }
-        destroyed
+        let (completion, receiver) = oneshot::channel();
+        let accepted = self.request_result(|reply| Command::CloseStart {
+            handle,
+            completion,
+            reply,
+        })?;
+        if !accepted {
+            return Err(io::Error::new(io::ErrorKind::NotFound, "stale session"));
+        }
+        Ok(Completion::new(receiver))
     }
 
     pub fn try_abandon(&self, handle: u64) -> bool {
@@ -513,9 +624,7 @@ impl IntegratedRuntime {
         {
             admission.close();
         }
-        if self.commands.try_send(Command::Abandon { handle }).is_err() {
-            return false;
-        }
+        self.controls.push(Control::Abandon { handle });
         self.wake.wake();
         true
     }
@@ -544,31 +653,87 @@ impl Drop for IntegratedRuntime {
 }
 
 impl IntegratedRuntime {
-    pub(crate) fn shutdown(&self) -> bool {
+    pub fn shutdown(&self) -> bool {
+        let spawn = self.spawn_pool.shutdown();
+        let reactor = self.thread.lock().ok().and_then(|mut value| value.take());
+        let Some(reactor) = reactor else {
+            return spawn && self.broker.shutdown();
+        };
         let _ = self.commands.send(Command::Shutdown);
         self.wake.wake();
-        let reactor = self
-            .thread
-            .lock()
-            .ok()
-            .and_then(|mut value| value.take())
-            .is_none_or(|thread| thread.join().is_ok());
-        reactor && self.broker.shutdown()
+        let reactor = reactor.join().is_ok();
+        spawn && reactor && self.broker.shutdown()
+    }
+}
+
+fn validate_capacities(input_capacity: usize, output_capacity: usize) -> io::Result<()> {
+    if input_capacity == 0
+        || input_capacity > 64 * 1024 * 1024
+        || output_capacity == 0
+        || output_capacity > 64 * 1024 * 1024
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "capacities must be in 1..=67108864",
+        ));
+    }
+    Ok(())
+}
+
+fn stage_spawn(
+    broker: &BrokerClient,
+    commands: &SyncSender<Command>,
+    wake: &WakeWriter,
+    config: BrokerSpawn,
+    input_capacity: usize,
+    output_capacity: usize,
+) -> io::Result<u64> {
+    let graceful_close_timeout = config.graceful_close_timeout;
+    let spawned = broker.spawn(config)?;
+    let broker_session = spawned.id;
+    let (reply, receiver) = oneshot::channel();
+    if commands
+        .send(Command::Add {
+            broker: spawned,
+            input_capacity,
+            output_capacity,
+            graceful_close_timeout,
+            reply,
+        })
+        .is_err()
+    {
+        let _ = broker.abort(broker_session);
+        return Err(io::Error::new(
+            io::ErrorKind::BrokenPipe,
+            "ptyx reactor stopped",
+        ));
+    }
+    wake.wake();
+    match receiver.recv() {
+        Some(result) => result,
+        None => {
+            let _ = broker.abort(broker_session);
+            Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "ptyx reactor stopped",
+            ))
+        }
     }
 }
 
 #[cfg(target_os = "macos")]
 fn reactor(
-    wake: OwnedFd,
-    self_wake: OwnedFd,
+    wake: ReactorWake,
     commands: Receiver<Command>,
     notices: EventSender<Notice>,
     broker: BrokerClient,
     admissions: Arc<Mutex<HashMap<u64, Arc<InputAdmission>>>>,
+    controls: Arc<ControlQueue>,
 ) {
     let mut sessions: GenerationRegistry<Session> = GenerationRegistry::new();
     let mut pending_broker_exits = HashMap::new();
     let mut counters = RuntimeCounters::default();
+    let mut control_scratch = VecDeque::new();
     let mut rotation = 0;
     loop {
         let mut handles = sessions.handles();
@@ -580,7 +745,7 @@ fn reactor(
         let mut poll_descriptors = Vec::with_capacity(handles.len() + 1);
         let mut poll_handles = Vec::with_capacity(handles.len());
         poll_descriptors.push(libc::pollfd {
-            fd: wake.as_raw_fd(),
+            fd: wake.reader.as_raw_fd(),
             events: libc::POLLIN,
             revents: 0,
         });
@@ -625,8 +790,18 @@ fn reactor(
             .count() as u64;
         let mut shutdown = false;
         if poll_descriptors[0].revents & libc::POLLIN != 0 {
-            drain_wake(wake.as_raw_fd());
+            drain_wake(wake.reader.as_raw_fd());
+            wake.gate.clear();
             counters.command_wakeups += 1;
+            process_controls(
+                -1,
+                &controls,
+                &mut control_scratch,
+                &notices,
+                &mut sessions,
+                &mut counters,
+                &broker,
+            );
             let (requested_shutdown, more_commands) = process_commands(
                 -1,
                 &commands,
@@ -639,10 +814,7 @@ fn reactor(
             );
             shutdown = requested_shutdown;
             if more_commands {
-                let byte = [1_u8];
-                unsafe {
-                    libc::write(self_wake.as_raw_fd(), byte.as_ptr().cast(), byte.len());
-                }
+                wake_socket(wake.writer.as_raw_fd());
             }
         }
         for (index, handle) in poll_handles.into_iter().enumerate() {
@@ -655,6 +827,9 @@ fn reactor(
             }
         }
         refresh_due_outputs(-1, &notices, &mut sessions, &mut counters);
+        refresh_modes(&notices, &mut sessions, &mut counters);
+        escalate_due_closes(&mut sessions, &broker);
+        reap_closed(&notices, &mut sessions, &mut counters, &broker, &admissions);
         reap_abandoned(&mut sessions, &broker, &admissions);
         if shutdown {
             shutdown_all(&mut sessions, &broker, &admissions);
@@ -665,12 +840,12 @@ fn reactor(
 
 #[cfg(target_os = "linux")]
 fn reactor(
-    wake: OwnedFd,
-    self_wake: OwnedFd,
+    wake: ReactorWake,
     commands: Receiver<Command>,
     notices: EventSender<Notice>,
     broker: BrokerClient,
     admissions: Arc<Mutex<HashMap<u64, Arc<InputAdmission>>>>,
+    controls: Arc<ControlQueue>,
 ) {
     let epoll = unsafe { libc::epoll_create1(libc::EPOLL_CLOEXEC) };
     if epoll < 0 {
@@ -685,7 +860,7 @@ fn reactor(
         libc::epoll_ctl(
             epoll.as_raw_fd(),
             libc::EPOLL_CTL_ADD,
-            wake.as_raw_fd(),
+            wake.reader.as_raw_fd(),
             &mut wake_event,
         )
     } < 0
@@ -696,6 +871,7 @@ fn reactor(
     let mut sessions: GenerationRegistry<Session> = GenerationRegistry::new();
     let mut pending_broker_exits = HashMap::new();
     let mut counters = RuntimeCounters::default();
+    let mut control_scratch = VecDeque::new();
     let mut rotation = 0;
     loop {
         let mut events: [MaybeUninit<libc::epoll_event>; 128] =
@@ -730,8 +906,18 @@ fn reactor(
         for event in ready_events {
             let handle = event.u64;
             if handle == 0 {
-                drain_wake(wake.as_raw_fd());
+                drain_wake(wake.reader.as_raw_fd());
+                wake.gate.clear();
                 counters.command_wakeups += 1;
+                process_controls(
+                    epoll.as_raw_fd(),
+                    &controls,
+                    &mut control_scratch,
+                    &notices,
+                    &mut sessions,
+                    &mut counters,
+                    &broker,
+                );
                 let (requested_shutdown, more_commands) = process_commands(
                     epoll.as_raw_fd(),
                     &commands,
@@ -744,10 +930,7 @@ fn reactor(
                 );
                 shutdown |= requested_shutdown;
                 if more_commands {
-                    let byte = [1_u8];
-                    unsafe {
-                        libc::write(self_wake.as_raw_fd(), byte.as_ptr().cast(), byte.len());
-                    }
+                    wake_socket(wake.writer.as_raw_fd());
                 }
                 continue;
             }
@@ -771,6 +954,9 @@ fn reactor(
             }
         }
         refresh_due_outputs(epoll.as_raw_fd(), &notices, &mut sessions, &mut counters);
+        refresh_modes(&notices, &mut sessions, &mut counters);
+        escalate_due_closes(&mut sessions, &broker);
+        reap_closed(&notices, &mut sessions, &mut counters, &broker, &admissions);
         reap_abandoned(&mut sessions, &broker, &admissions);
         if shutdown {
             shutdown_all(&mut sessions, &broker, &admissions);
@@ -801,11 +987,16 @@ fn process_commands(
                 broker,
                 input_capacity,
                 output_capacity,
+                graceful_close_timeout,
                 reply,
             } => {
                 let admission = Arc::new(InputAdmission::new(input_capacity));
-                let mut session =
-                    Session::from_broker(broker, Arc::clone(&admission), output_capacity);
+                let mut session = Session::from_broker(
+                    broker,
+                    Arc::clone(&admission),
+                    output_capacity,
+                    graceful_close_timeout,
+                );
                 session.exit_status = pending_broker_exits
                     .remove(&session.broker_session)
                     .map(i64::from);
@@ -832,17 +1023,17 @@ fn process_commands(
                 if result.is_ok() {
                     if let Some(session) = sessions.get_mut(handle) {
                         session.active = true;
+                        session.paused = false;
                         session.activation_deadline = None;
                         if session.input_failure_pending {
                             notify_input_failure(handle, session, notices, counters);
                         }
                     }
                     read_ready(kqueue, handle, notices, sessions, counters);
-                    if sessions
-                        .get(handle)
-                        .is_some_and(|session| session.exit_status.is_some())
+                    if let Some(status) =
+                        sessions.get(handle).and_then(|session| session.exit_status)
                     {
-                        send_notice(notices, Notice::Exit(handle), counters);
+                        send_notice(notices, Notice::Exit { handle, status }, counters);
                     }
                     refresh_output(kqueue, handle, notices, sessions, counters);
                 } else if let Some(session) = sessions.get_mut(handle) {
@@ -861,12 +1052,12 @@ fn process_commands(
                 let accepted = if let Some(session) = sessions.get_mut(handle) {
                     let accepted = session.enqueue_write(bytes).is_ok();
                     if !accepted {
-                        admission.release(length);
+                        admission.release(length, 1);
                         notify_input_failure(handle, session, notices, counters);
                     }
                     accepted
                 } else {
-                    admission.release(length);
+                    admission.release(length, 1);
                     false
                 };
                 if accepted {
@@ -876,28 +1067,19 @@ fn process_commands(
                     }
                 }
             }
-            Command::CreditAsync { handle, bytes } => {
-                if sessions
-                    .get_mut(handle)
-                    .is_some_and(|session| session.credit(bytes))
-                    && sessions.get(handle).is_some_and(|session| session.active)
-                {
-                    refresh_output(kqueue, handle, notices, sessions, counters);
-                }
-            }
-            Command::Pause {
-                handle,
-                paused,
-                reply,
-            } => {
+            Command::CancelOutput { handle, reply } => {
                 let found = if let Some(session) = sessions.get_mut(handle) {
-                    session.paused = paused;
+                    session.discarding = true;
+                    session.paused = false;
+                    session.output.clear();
+                    session.output_bytes = 0;
+                    session.output_deadline = None;
                     true
                 } else {
                     false
                 };
-                if sessions.get(handle).is_some_and(|session| session.active) {
-                    refresh_output(kqueue, handle, notices, sessions, counters);
+                if found {
+                    read_ready(kqueue, handle, notices, sessions, counters);
                 }
                 let _ = reply.send(found);
             }
@@ -910,6 +1092,17 @@ fn process_commands(
             Command::Size { handle, reply } => {
                 let size = sessions.get(handle).and_then(session_size);
                 let _ = reply.send(size);
+            }
+            Command::Snapshot { handle, reply } => {
+                let snapshot = sessions.get(handle).and_then(|session| {
+                    Some(SessionSnapshot {
+                        pid: i64::from(session.pid),
+                        size: session_size(session)?,
+                        mode: session_mode(session),
+                        tty_name: session_tty_name(session),
+                    })
+                });
+                let _ = reply.send(snapshot);
             }
             Command::Resize {
                 handle,
@@ -932,6 +1125,26 @@ fn process_commands(
             Command::Mode { handle, reply } => {
                 let mode = sessions.get(handle).and_then(session_mode);
                 let _ = reply.send(mode);
+            }
+            Command::ObserveMode {
+                handle,
+                observe,
+                reply,
+            } => {
+                let found = if let Some(session) = sessions.get_mut(handle) {
+                    if observe {
+                        session.observed_mode = session_mode(session);
+                        session.mode_interval = MODE_POLL_MIN;
+                        session.mode_deadline = Some(Instant::now() + MODE_POLL_MIN);
+                    } else {
+                        session.observed_mode = None;
+                        session.mode_deadline = None;
+                    }
+                    true
+                } else {
+                    false
+                };
+                let _ = reply.send(found);
             }
             Command::TtyName { handle, reply } => {
                 let name = sessions.get(handle).and_then(session_tty_name);
@@ -962,39 +1175,21 @@ fn process_commands(
                 }
             }
             Command::Close { handle, reply } => {
-                let closed = sessions.get_mut(handle).is_some_and(|session| {
-                    fail_input(handle, session, notices, counters);
-                    close_session(session, broker_client)
-                });
+                let closed = sessions
+                    .get_mut(handle)
+                    .is_some_and(|session| start_graceful_close(handle, session, broker_client));
                 let _ = reply.send(closed);
             }
-            Command::Destroy { handle, reply } => {
-                let removable = sessions
-                    .get(handle)
-                    .is_some_and(|session| session.exit_status.is_some());
-                let released = removable
-                    && sessions.get(handle).is_some_and(|session| {
-                        broker_client.release_async(session.broker_session).is_ok()
-                    });
-                let removed = released && sessions.remove(handle).is_some();
-                let _ = reply.send(removed);
-            }
-            Command::Abandon { handle } => {
-                if let Some(session) = sessions.get_mut(handle) {
-                    session.abandoned = true;
-                    session.active = false;
-                    session.paused = false;
-                    session.admission.close();
-                    session.admission.release(session.input_bytes);
-                    session.input.clear();
-                    session.input_bytes = 0;
-                    session.output.clear();
-                    session.output_bytes = 0;
-                    session.output_outstanding = 0;
-                    let _ = close_session(session, broker_client);
-                    let _ = update_read_filter(kqueue, handle, session, true);
-                    let _ = update_write_filter(kqueue, handle, session, false);
-                }
+            Command::CloseStart {
+                handle,
+                completion,
+                reply,
+            } => {
+                let accepted = sessions.get_mut(handle).is_some_and(|session| {
+                    session.close_waiters.push(completion);
+                    start_graceful_close(handle, session, broker_client)
+                });
+                let _ = reply.send(accepted);
             }
             Command::BrokerExit {
                 broker_session,
@@ -1007,13 +1202,21 @@ fn process_commands(
                 }) {
                     if let Some(session) = sessions.get_mut(handle) {
                         session.exit_status = Some(i64::from(status));
+                        session.close_deadline = None;
                         if !session.abandoned {
                             fail_input(handle, session, notices, counters);
                         }
                     }
                     read_ready(kqueue, handle, notices, sessions, counters);
                     if sessions.get(handle).is_some_and(|session| session.active) {
-                        send_notice(notices, Notice::Exit(handle), counters);
+                        send_notice(
+                            notices,
+                            Notice::Exit {
+                                handle,
+                                status: i64::from(status),
+                            },
+                            counters,
+                        );
                     }
                 } else {
                     pending_broker_exits.insert(broker_session, status);
@@ -1023,10 +1226,74 @@ fn process_commands(
                 pending_broker_exits.clear();
                 fail_all(notices, sessions, counters, broker_client, admissions);
             }
+            Command::GracefulSignalResult { handle, result } => {
+                if result.is_none() {
+                    if let Some(session) = sessions.get_mut(handle) {
+                        if record_cleanup_result(session, false) {
+                            escalate_close(handle, session, broker_client);
+                        }
+                    }
+                }
+            }
+            Command::ForceCloseResult { handle, succeeded } => {
+                if let Some(session) = sessions.get_mut(handle) {
+                    record_cleanup_result(session, succeeded);
+                }
+            }
+            Command::ReleaseResult { handle, succeeded } => {
+                if let Some(session) = sessions.get_mut(handle) {
+                    session.record_release_result(succeeded);
+                }
+            }
             Command::Shutdown => return (true, false),
         }
     }
     (false, processed == COMMAND_QUANTUM)
+}
+
+fn process_controls(
+    kqueue: RawFd,
+    controls: &ControlQueue,
+    scratch: &mut VecDeque<Control>,
+    notices: &EventSender<Notice>,
+    sessions: &mut GenerationRegistry<Session>,
+    counters: &mut RuntimeCounters,
+    broker: &BrokerClient,
+) {
+    controls.swap_into(scratch);
+    for control in scratch.drain(..) {
+        match control {
+            Control::Credit { handle, bytes } => {
+                if sessions
+                    .get_mut(handle)
+                    .is_some_and(|session| session.credit(bytes))
+                    && sessions.get(handle).is_some_and(|session| session.active)
+                {
+                    refresh_output(kqueue, handle, notices, sessions, counters);
+                }
+            }
+            Control::Abandon { handle } => {
+                if let Some(session) = sessions.get_mut(handle) {
+                    session.abandoned = true;
+                    session.active = false;
+                    session.paused = false;
+                    session.admission.close();
+                    session
+                        .admission
+                        .release(session.input_bytes, session.input_entries);
+                    session.input.clear();
+                    session.input_bytes = 0;
+                    session.input_entries = 0;
+                    session.output.clear();
+                    session.output_bytes = 0;
+                    session.output_outstanding = 0;
+                    let _ = close_session(session, broker);
+                    let _ = update_read_filter(kqueue, handle, session, true);
+                    let _ = update_write_filter(kqueue, handle, session, false);
+                }
+            }
+        }
+    }
 }
 
 fn register_session(kqueue: RawFd, handle: u64, session: &mut Session) -> io::Result<()> {
@@ -1158,14 +1425,18 @@ fn read_ready(
     let mut syscalls = 0;
     while bytes < BYTE_QUANTUM
         && syscalls < SYSCALL_QUANTUM
-        && !session.paused
+        && (!session.paused || session.discarding)
         && !session.output_eof
-        && session.output_total() < session.output_capacity
+        && (session.discarding || session.output_total() < session.output_capacity)
     {
-        let maximum = (session.output_capacity - session.output_total())
-            .min(64 * 1024)
-            .min(BYTE_QUANTUM - bytes);
-        let mut buffer = MaybeUninit::<[u8; 64 * 1024]>::uninit();
+        let maximum = if session.discarding {
+            64 * 1024
+        } else {
+            session.output_capacity - session.output_total()
+        }
+        .min(64 * 1024)
+        .min(BYTE_QUANTUM - bytes);
+        let mut buffer = Vec::<u8>::with_capacity(maximum);
         let result = unsafe {
             libc::read(
                 session.master.as_raw_fd(),
@@ -1179,18 +1450,19 @@ fn read_ready(
             let amount = result as usize;
             counters.read_bytes += amount as u64;
             bytes += amount;
-            if session.abandoned {
+            if session.abandoned || session.discarding {
                 continue;
             }
             if session.output_bytes == 0 {
                 session.output_deadline = Some(Instant::now() + OUTPUT_DELAY);
             }
             session.output_bytes += amount;
+            // `read` initialized exactly this prefix.
+            unsafe {
+                buffer.set_len(amount);
+            }
             session.output.push_back(QueuedOutput {
-                // `read` initialized exactly this prefix.
-                bytes: unsafe {
-                    std::slice::from_raw_parts(buffer.as_ptr().cast(), amount).to_vec()
-                },
+                bytes: Bytes::from(buffer),
                 offset: 0,
             });
             continue;
@@ -1231,14 +1503,15 @@ fn write_ready(
     };
     let mut bytes = 0;
     let mut syscalls = 0;
+    let master = session.master.as_raw_fd();
     while bytes < BYTE_QUANTUM && syscalls < SYSCALL_QUANTUM {
-        let Some(front) = session.input.front_mut() else {
+        let Some(front) = session.core.input.front() else {
             break;
         };
         let maximum = (front.bytes.len() - front.offset).min(BYTE_QUANTUM - bytes);
         let result = unsafe {
             libc::write(
-                session.master.as_raw_fd(),
+                master,
                 front.bytes[front.offset..front.offset + maximum]
                     .as_ptr()
                     .cast(),
@@ -1251,11 +1524,23 @@ fn write_ready(
             let amount = result as usize;
             counters.write_bytes += amount as u64;
             bytes += amount;
-            front.offset += amount;
-            session.input_bytes -= amount;
-            session.admission.release(amount);
-            if front.offset == front.bytes.len() {
-                session.input.pop_front();
+            let complete = {
+                let front = session
+                    .core
+                    .input
+                    .front_mut()
+                    .expect("input front remains present during write");
+                front.offset += amount;
+                front.offset == front.bytes.len()
+            };
+            session.core.input_bytes -= amount;
+            session
+                .core
+                .admission
+                .release(amount, usize::from(complete));
+            if complete {
+                session.core.input_entries -= 1;
+                session.core.input.pop_front();
             }
             continue;
         }
@@ -1285,9 +1570,12 @@ fn fail_input(
     let accepted_input_pending = !session.input.is_empty();
     session.input_failed = true;
     session.admission.close();
-    session.admission.release(session.input_bytes);
+    session
+        .admission
+        .release(session.input_bytes, session.input_entries);
     session.input.clear();
     session.input_bytes = 0;
+    session.input_entries = 0;
     if accepted_input_pending {
         notify_input_failure(handle, session, notices, counters);
     }
@@ -1316,8 +1604,9 @@ fn refresh_output(
     let Some(session) = sessions.get_mut(handle) else {
         return;
     };
-    let enabled =
-        !session.paused && !session.output_eof && session.output_total() < session.output_capacity;
+    let enabled = !session.paused
+        && !session.output_eof
+        && (session.discarding || session.output_total() < session.output_capacity);
     let _ = update_read_filter(kqueue, handle, session, enabled);
     let output_ready = session.output_bytes <= INTERACTIVE_BATCH
         || session.output_bytes >= OUTPUT_BATCH
@@ -1325,8 +1614,8 @@ fn refresh_output(
         || session
             .output_deadline
             .is_some_and(|deadline| deadline <= Instant::now());
-    if session.active && output_ready && !session.output.is_empty() {
-        let bytes = session.pull(OUTPUT_BATCH);
+    if session.active && !session.discarding && output_ready && !session.output.is_empty() {
+        let bytes = session.pull_output(OUTPUT_BATCH);
         send_notice(notices, Notice::Output { handle, bytes }, counters);
     }
     if session.active
@@ -1350,23 +1639,36 @@ fn refresh_output(
 
 fn output_poll_timeout(sessions: &GenerationRegistry<Session>) -> i32 {
     let output_deadline = sessions
-        .handles()
-        .into_iter()
-        .filter_map(|handle| sessions.get(handle))
+        .iter()
+        .map(|(_, session)| session)
         .filter(|session| !session.output.is_empty())
         .filter_map(|session| session.output_deadline)
         .min();
     let activation_deadline = sessions
-        .handles()
-        .into_iter()
-        .filter_map(|handle| sessions.get(handle))
+        .iter()
+        .map(|(_, session)| session)
         .filter(|session| !session.active && !session.abandoned)
         .filter_map(|session| session.activation_deadline)
         .min();
-    let deadline = match (output_deadline, activation_deadline) {
-        (Some(left), Some(right)) => Some(left.min(right)),
-        (left, right) => left.or(right),
-    };
+    let mode_deadline = sessions
+        .iter()
+        .map(|(_, session)| session)
+        .filter_map(|session| session.mode_deadline)
+        .min();
+    let close_deadline = sessions
+        .iter()
+        .map(|(_, session)| session)
+        .filter_map(|session| session.close_deadline)
+        .min();
+    let deadline = [
+        output_deadline,
+        activation_deadline,
+        mode_deadline,
+        close_deadline,
+    ]
+    .into_iter()
+    .flatten()
+    .min();
     let Some(deadline) = deadline else {
         return -1;
     };
@@ -1389,6 +1691,38 @@ fn refresh_due_outputs(
     }
 }
 
+fn refresh_modes(
+    notices: &EventSender<Notice>,
+    sessions: &mut GenerationRegistry<Session>,
+    counters: &mut RuntimeCounters,
+) {
+    let now = Instant::now();
+    for handle in sessions.handles() {
+        let due = sessions
+            .get(handle)
+            .and_then(|session| session.mode_deadline)
+            .is_some_and(|deadline| deadline <= now);
+        if !due {
+            continue;
+        }
+        let mode = sessions.get(handle).and_then(session_mode);
+        let Some(session) = sessions.get_mut(handle) else {
+            continue;
+        };
+        let changed = mode.is_some() && mode != session.observed_mode;
+        if changed {
+            session.observed_mode = mode;
+            session.mode_interval = MODE_POLL_MIN;
+            if let Some(modes) = mode {
+                send_notice(notices, Notice::ModeChanged { handle, modes }, counters);
+            }
+        } else {
+            session.mode_interval = (session.mode_interval * 2).min(MODE_POLL_MAX);
+        }
+        session.mode_deadline = Some(now + session.mode_interval);
+    }
+}
+
 fn close_session(session: &mut Session, broker: &BrokerClient) -> bool {
     if session.close_started {
         return true;
@@ -1404,6 +1738,138 @@ fn close_session(session: &mut Session, broker: &BrokerClient) -> bool {
     session.admission.close();
     session.close_started = true;
     true
+}
+
+fn start_graceful_close(handle: u64, session: &mut Session, broker: &BrokerClient) -> bool {
+    if session.close_started {
+        return true;
+    }
+    session.admission.close();
+    session.close_started = true;
+    if session.exit_status.is_some() {
+        // The direct child can exit while descendants retain the PTY and its
+        // output descriptor. Ask the broker to kill the owned process group;
+        // otherwise EOF and deterministic release can never converge.
+        escalate_close(handle, session, broker);
+        return true;
+    }
+    if session.graceful_close_timeout.is_zero() {
+        escalate_close(handle, session, broker);
+        return true;
+    }
+    session.close_deadline = Some(Instant::now() + session.graceful_close_timeout);
+    if broker
+        .graceful_signal_async(session.broker_session, handle)
+        .is_err()
+    {
+        escalate_close(handle, session, broker);
+    }
+    true
+}
+
+fn record_cleanup_result(session: &mut Session, succeeded: bool) -> bool {
+    !succeeded && session.exit_status.is_none()
+}
+
+fn escalate_close(handle: u64, session: &mut Session, broker: &BrokerClient) {
+    if session.close_escalated {
+        session.close_deadline = None;
+        return;
+    }
+    session.close_deadline = None;
+    match broker.force_close_async(session.broker_session, handle) {
+        Ok(()) => session.close_escalated = true,
+        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+            // The bounded broker mailbox is shared by all sessions. Retrying
+            // on the next reactor turn preserves fairness without losing the
+            // close request.
+            session.close_deadline = Some(Instant::now());
+        }
+        Err(_) => {
+            session.close_escalated = true;
+            // Broker release is the authoritative cleanup result. A failed
+            // intermediate request is recoverable when the child exits
+            // naturally and infrastructure loss is reported separately.
+        }
+    }
+}
+
+fn escalate_due_closes(sessions: &mut GenerationRegistry<Session>, broker: &BrokerClient) {
+    let now = Instant::now();
+    for handle in sessions.handles() {
+        if let Some(session) = sessions.get_mut(handle) {
+            if session
+                .close_deadline
+                .is_some_and(|deadline| deadline <= now)
+            {
+                escalate_close(handle, session, broker);
+            }
+        }
+    }
+}
+
+fn request_release(handle: u64, session: &mut Session, broker: &BrokerClient) -> bool {
+    match session.release {
+        ReleaseState::Complete => true,
+        ReleaseState::Pending => false,
+        ReleaseState::Needed => match broker.release_async(session.broker_session, handle) {
+            Ok(()) => {
+                session.release = ReleaseState::Pending;
+                false
+            }
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => false,
+            Err(_) => {
+                session.record_release_result(false);
+                true
+            }
+        },
+    }
+}
+
+fn reap_closed(
+    notices: &EventSender<Notice>,
+    sessions: &mut GenerationRegistry<Session>,
+    counters: &mut RuntimeCounters,
+    broker: &BrokerClient,
+    admissions: &Arc<Mutex<HashMap<u64, Arc<InputAdmission>>>>,
+) {
+    for handle in sessions.handles() {
+        let complete = sessions.get(handle).is_some_and(|session| {
+            !session.abandoned
+                && session.close_started
+                && session.exit_status.is_some()
+                && session.output_eof
+                && session.output.is_empty()
+                && session.output_outstanding == 0
+        });
+        if !complete {
+            continue;
+        }
+        if !sessions
+            .get_mut(handle)
+            .is_some_and(|session| request_release(handle, session, broker))
+        {
+            continue;
+        }
+        let result = sessions
+            .get(handle)
+            .and_then(Session::completed_close_result)
+            .unwrap_or_default();
+        if let Some(session) = sessions.get_mut(handle) {
+            if !session.close_notified {
+                session.close_notified = true;
+                for waiter in session.close_waiters.drain(..) {
+                    let _ = waiter.send(result);
+                }
+                send_notice(notices, Notice::Closed { handle, result }, counters);
+            }
+        }
+        if sessions.remove(handle).is_some() {
+            if let Ok(mut values) = admissions.lock() {
+                values.remove(&handle);
+            }
+        }
+    }
 }
 
 fn reap_abandoned(
@@ -1422,9 +1888,12 @@ fn reap_abandoned(
                 session.abandoned = true;
                 session.activation_deadline = None;
                 session.admission.close();
-                session.admission.release(session.input_bytes);
+                session
+                    .admission
+                    .release(session.input_bytes, session.input_entries);
                 session.input.clear();
                 session.input_bytes = 0;
+                session.input_entries = 0;
                 session.output.clear();
                 session.output_bytes = 0;
                 session.output_outstanding = 0;
@@ -1441,10 +1910,13 @@ fn reap_abandoned(
                 && session.output_outstanding == 0
         });
         if removable {
-            let released = sessions
-                .get(handle)
-                .is_some_and(|session| broker.release_async(session.broker_session).is_ok());
-            if released && sessions.remove(handle).is_some() {
+            if !sessions
+                .get_mut(handle)
+                .is_some_and(|session| request_release(handle, session, broker))
+            {
+                continue;
+            }
+            if sessions.remove(handle).is_some() {
                 if let Ok(mut values) = admissions.lock() {
                     values.remove(&handle);
                 }
@@ -1532,6 +2004,18 @@ fn drain_wake(fd: RawFd) {
     }
 }
 
+fn wake_socket(fd: RawFd) {
+    let byte = [1_u8];
+    unsafe {
+        libc::send(
+            fd,
+            byte.as_ptr().cast(),
+            byte.len(),
+            libc::MSG_DONTWAIT | libc::MSG_NOSIGNAL,
+        );
+    }
+}
+
 fn session_size(session: &Session) -> Option<[u32; 4]> {
     let mut size = std::mem::MaybeUninit::<libc::winsize>::uninit();
     (unsafe {
@@ -1595,7 +2079,17 @@ unsafe extern "C" {
 }
 
 fn send_notice(notices: &EventSender<Notice>, notice: Notice, counters: &mut RuntimeCounters) {
-    if notices.send(notice.handle(), notice).is_ok() {
+    let handle = notice.handle();
+    let sent = if matches!(notice, Notice::ModeChanged { .. }) {
+        notices
+            .send_coalesced(handle, notice, |pending| {
+                matches!(pending, Notice::ModeChanged { .. })
+            })
+            .is_ok_and(|inserted| inserted)
+    } else {
+        notices.send(handle, notice).is_ok()
+    };
+    if sent {
         counters.notifications += 1;
     }
 }
@@ -1628,13 +2122,24 @@ fn submit(kqueue: RawFd, change: &libc::kevent) -> io::Result<()> {
     }
 }
 
+#[cfg(test)]
 fn admit_write(
     commands: &SyncSender<Command>,
     handle: u64,
-    bytes: Vec<u8>,
+    bytes: Bytes,
     admission: Arc<InputAdmission>,
 ) -> i64 {
     let length = bytes.len();
+    admit_write_with(commands, handle, length, admission, || bytes)
+}
+
+fn admit_write_with(
+    commands: &SyncSender<Command>,
+    handle: u64,
+    length: usize,
+    admission: Arc<InputAdmission>,
+    make_bytes: impl FnOnce() -> Bytes,
+) -> i64 {
     let mut state = match admission.state.lock() {
         Ok(state) => state,
         Err(_) => return WRITE_INFRASTRUCTURE_FAILURE,
@@ -1642,10 +2147,16 @@ fn admit_write(
     if !state.open {
         return -1;
     }
-    if length == 0 || state.bytes.saturating_add(length) > admission.capacity {
+    if length == 0
+        || state.bytes.saturating_add(length) > admission.capacity
+        || state.entries >= admission.entry_capacity()
+    {
         return 0;
     }
+    let bytes = make_bytes();
+    debug_assert_eq!(bytes.len(), length);
     state.bytes += length;
+    state.entries += 1;
     let command = Command::Write {
         handle,
         bytes,
@@ -1653,6 +2164,7 @@ fn admit_write(
     };
     if let Err(error) = commands.try_send(command) {
         state.bytes -= length;
+        state.entries -= 1;
         return match error {
             TrySendError::Full(_) => 0,
             TrySendError::Disconnected(_) => {
@@ -1667,14 +2179,17 @@ fn admit_write(
 #[cfg(test)]
 mod tests {
     use super::{
-        admit_write, fail_input, notify_input_failure, InputAdmission, Notice, QueuedOutput,
-        RuntimeCounters, Session, OUTPUT_BATCH, WRITE_INFRASTRUCTURE_FAILURE,
+        admit_write, admit_write_with, fail_input, notify_input_failure, record_cleanup_result,
+        send_notice, InputAdmission, Notice, QueuedOutput, RuntimeCounters, Session, OUTPUT_BATCH,
+        WRITE_INFRASTRUCTURE_FAILURE,
     };
     use crate::{broker_client::BrokerSession, event};
+    use bytes::Bytes;
     use std::collections::VecDeque;
     use std::fs::File;
     use std::sync::{mpsc, Arc};
     use std::thread;
+    use std::time::Duration;
 
     fn session(input_capacity: usize) -> Session {
         Session::from_broker(
@@ -1685,36 +2200,45 @@ mod tests {
             },
             Arc::new(InputAdmission::new(input_capacity)),
             1024,
+            Duration::from_millis(250),
         )
     }
 
     #[test]
     fn terminal_input_failure_rejects_future_writes() {
         let mut session = session(4);
-        assert!(session.enqueue_write(vec![1, 2, 3, 4]).is_ok());
+        assert!(session.enqueue_write(vec![1, 2, 3, 4].into()).is_ok());
         session.input_bytes = 4;
-        session.admission.state.lock().unwrap().bytes = 4;
+        {
+            let mut state = session.admission.state.lock().unwrap();
+            state.bytes = 4;
+            state.entries = 1;
+        }
         let (sender, receiver) = event::channel();
         let mut counters = RuntimeCounters::default();
 
         fail_input(7, &mut session, &sender, &mut counters);
 
         assert_eq!(receiver.try_recv(), Ok((7, Notice::InputFailed(7))));
-        assert!(session.enqueue_write(vec![1]).is_err());
+        assert!(session.enqueue_write(vec![1].into()).is_err());
     }
 
     #[test]
     fn admitted_write_rejected_during_failure_is_reported_once() {
         let mut session = session(4);
         session.active = true;
-        session.admission.state.lock().unwrap().bytes = 1;
+        {
+            let mut state = session.admission.state.lock().unwrap();
+            state.bytes = 1;
+            state.entries = 1;
+        }
         let (sender, receiver) = event::channel();
         let mut counters = RuntimeCounters::default();
 
         fail_input(7, &mut session, &sender, &mut counters);
         assert_eq!(receiver.try_recv(), Err(mpsc::TryRecvError::Empty));
-        assert!(session.enqueue_write(vec![1]).is_err());
-        session.admission.release(1);
+        assert!(session.enqueue_write(vec![1].into()).is_err());
+        session.admission.release(1, 1);
         notify_input_failure(7, &mut session, &sender, &mut counters);
         notify_input_failure(7, &mut session, &sender, &mut counters);
 
@@ -1728,12 +2252,13 @@ mod tests {
         let (sender, receiver) = mpsc::sync_channel(1);
         drop(receiver);
 
-        let result = admit_write(&sender, 7, vec![1], Arc::clone(&admission));
+        let result = admit_write(&sender, 7, vec![1].into(), Arc::clone(&admission));
 
         assert_eq!(result, WRITE_INFRASTRUCTURE_FAILURE);
         let state = admission.state.lock().unwrap();
         assert!(!state.open);
         assert_eq!(state.bytes, 0);
+        assert_eq!(state.entries, 0);
     }
 
     #[test]
@@ -1741,12 +2266,28 @@ mod tests {
         let admission = Arc::new(InputAdmission::new(4));
         let (sender, _receiver) = mpsc::sync_channel(0);
 
-        let result = admit_write(&sender, 7, vec![1], Arc::clone(&admission));
+        let result = admit_write(&sender, 7, vec![1].into(), Arc::clone(&admission));
 
         assert_eq!(result, 0);
         let state = admission.state.lock().unwrap();
         assert!(state.open);
         assert_eq!(state.bytes, 0);
+        assert_eq!(state.entries, 0);
+    }
+
+    #[test]
+    fn rejected_admission_does_not_construct_input_storage() {
+        let admission = Arc::new(InputAdmission::new(4));
+        let (sender, _receiver) = mpsc::sync_channel(1);
+        let mut constructed = false;
+
+        let result = admit_write_with(&sender, 7, 5, admission, || {
+            constructed = true;
+            Bytes::from_static(b"large")
+        });
+
+        assert_eq!(result, 0);
+        assert!(!constructed);
     }
 
     #[test]
@@ -1760,7 +2301,7 @@ mod tests {
         .join();
         let (sender, _receiver) = mpsc::sync_channel(1);
 
-        let result = admit_write(&sender, 7, vec![1], admission);
+        let result = admit_write(&sender, 7, vec![1].into(), admission);
 
         assert_eq!(result, WRITE_INFRASTRUCTURE_FAILURE);
     }
@@ -1780,7 +2321,10 @@ mod tests {
                 .collect();
             expected.extend_from_slice(&bytes);
             session.output_bytes += bytes.len();
-            session.output.push_back(QueuedOutput { bytes, offset: 0 });
+            session.output.push_back(QueuedOutput {
+                bytes: bytes.into(),
+                offset: 0,
+            });
         }
 
         let mut actual = Vec::new();
@@ -1790,7 +2334,7 @@ mod tests {
             state ^= state >> 7;
             state ^= state << 17;
             let maximum = 1 + state as usize % 193;
-            let bytes = session.pull(maximum);
+            let bytes = session.pull_output(maximum);
             outstanding.push(bytes.len());
             actual.extend_from_slice(&bytes);
             assert!(session.output_total() <= expected.len());
@@ -1811,13 +2355,47 @@ mod tests {
         let bytes = vec![0x5a; OUTPUT_BATCH];
         let pointer = bytes.as_ptr();
         session.output_bytes = bytes.len();
-        session.output.push_back(QueuedOutput { bytes, offset: 0 });
+        session.output.push_back(QueuedOutput {
+            bytes: bytes.into(),
+            offset: 0,
+        });
 
-        let pulled = session.pull(OUTPUT_BATCH);
+        let pulled = session.pull_output(OUTPUT_BATCH);
 
         assert_eq!(pulled.as_ptr(), pointer);
         assert_eq!(session.output_bytes, 0);
         assert_eq!(session.output_outstanding, OUTPUT_BATCH);
+    }
+
+    #[test]
+    fn natural_exit_ignores_a_late_cleanup_failure() {
+        let mut session = session(4096);
+        session.exit_status = Some(0);
+
+        record_cleanup_result(&mut session, false);
+
+        assert!(!session.cleanup_failed);
+    }
+
+    #[test]
+    fn close_completion_waits_for_release_and_reports_release_failure() {
+        let mut session = session(4096);
+        session.close_started = true;
+        session.exit_status = Some(0);
+        session.output_eof = true;
+
+        assert_eq!(session.completed_close_result(), None);
+        session.release = super::ReleaseState::Pending;
+        assert_eq!(session.completed_close_result(), None);
+
+        session.record_release_result(false);
+        assert_eq!(
+            session.completed_close_result(),
+            Some(crate::CloseResult {
+                cleanup_failed: true,
+                ..crate::CloseResult::default()
+            })
+        );
     }
 
     #[test]
@@ -1833,13 +2411,18 @@ mod tests {
             if state & 3 == 0 && !session.input.is_empty() {
                 let queued = session.input.pop_front().unwrap();
                 session.input_bytes -= queued.bytes.len();
+                session.input_entries -= 1;
                 assert_eq!(queued.offset, 0);
                 assert_eq!(Some(&queued.bytes), expected.pop_front().as_ref());
                 continue;
             }
 
             let length = 1 + state as usize % 64;
-            let bytes: Vec<_> = (0..length).map(|index| (step + index) as u8).collect();
+            let bytes = Bytes::from(
+                (0..length)
+                    .map(|index| (step + index) as u8)
+                    .collect::<Vec<_>>(),
+            );
             let before = session.input_bytes;
             let result = if before + bytes.len() <= session.admission.capacity {
                 session.enqueue_write(bytes.clone())
@@ -1857,6 +2440,7 @@ mod tests {
                 }
             }
             assert!(session.input_bytes <= session.admission.capacity);
+            assert_eq!(session.input_entries, session.input.len());
         }
 
         for queued in &session.input {
@@ -1865,6 +2449,73 @@ mod tests {
         assert!(expected.is_empty());
 
         session.close_started = true;
-        assert!(session.enqueue_write(vec![1]).is_err());
+        assert!(session.enqueue_write(vec![1].into()).is_err());
+    }
+
+    #[test]
+    fn tiny_writes_have_a_bounded_admission_count() {
+        let admission = Arc::new(InputAdmission::new(64 * 1024 * 1024));
+        let limit = admission.entry_capacity();
+        let (sender, _receiver) = mpsc::sync_channel(limit + 1);
+
+        for sequence in 0..limit {
+            assert_eq!(
+                admit_write(
+                    &sender,
+                    7,
+                    Bytes::from(vec![(sequence & 0xff) as u8]),
+                    Arc::clone(&admission),
+                ),
+                1
+            );
+        }
+        assert_eq!(
+            admit_write(&sender, 7, Bytes::from_static(b"x"), Arc::clone(&admission)),
+            0
+        );
+
+        let state = admission.state.lock().unwrap();
+        assert_eq!(state.bytes, limit);
+        assert_eq!(state.entries, limit);
+        assert_eq!(limit, 4096);
+    }
+
+    #[test]
+    fn pending_mode_observations_coalesce_to_the_current_state() {
+        let (sender, receiver) = event::channel();
+        let mut counters = RuntimeCounters::default();
+        send_notice(
+            &sender,
+            Notice::ModeChanged {
+                handle: 7,
+                modes: [false, false, false],
+            },
+            &mut counters,
+        );
+        send_notice(&sender, Notice::OutputDone(7), &mut counters);
+        for sequence in 0..100_000 {
+            send_notice(
+                &sender,
+                Notice::ModeChanged {
+                    handle: 7,
+                    modes: [sequence & 1 != 0, true, false],
+                },
+                &mut counters,
+            );
+        }
+
+        assert_eq!(
+            receiver.try_recv(),
+            Ok((
+                7,
+                Notice::ModeChanged {
+                    handle: 7,
+                    modes: [true, true, false],
+                }
+            ))
+        );
+        assert_eq!(receiver.try_recv(), Ok((7, Notice::OutputDone(7))));
+        assert_eq!(receiver.try_recv(), Err(mpsc::TryRecvError::Empty));
+        assert_eq!(counters.notifications, 2);
     }
 }

@@ -113,7 +113,8 @@ final class CompileFromSource extends LibraryProvider {
       '--release',
       '--target-dir',
       targetDir.path,
-      if (testControls) ...['--features', 'test-controls'],
+      '--features',
+      if (testControls) 'test-controls' else 'dart-adapter',
       if (!isHost && cargoTarget != null) ...['--target', cargoTarget],
     ];
 
@@ -177,7 +178,7 @@ final class CompileFromSource extends LibraryProvider {
         ? Directory.fromUri(targetDir.uri.resolve('release/'))
         : Directory.fromUri(targetDir.uri.resolve('$cargoTarget/release/'));
     final built = File.fromUri(
-      releaseDir.uri.resolve(targetOS.dylibFileName('ptyx')),
+      releaseDir.uri.resolve(targetOS.dylibFileName('ptyx_c')),
     );
     if (!built.existsSync()) {
       throw StateError(

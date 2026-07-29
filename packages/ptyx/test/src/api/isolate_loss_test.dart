@@ -1,8 +1,4 @@
-@DefaultAsset('package:ptyx/ptyx.dart')
-library;
-
 import 'dart:async';
-import 'dart:ffi';
 import 'dart:io';
 import 'dart:isolate';
 import 'dart:typed_data';
@@ -10,11 +6,7 @@ import 'dart:typed_data';
 import 'package:ptyx/ptyx.dart';
 import 'package:test/test.dart';
 
-@Native<Void Function(Size)>(symbol: 'ptyi_test_delay_next_spawn')
-external void _delayNextNativeSpawn(int milliseconds);
-
-@Native<Bool Function()>(symbol: 'ptyi_test_spawn_delay_active')
-external bool _nativeSpawnDelayActive();
+import '../ffi/ptyx_test.g.dart';
 
 Future<void> _ownQuietSession(SendPort ready) async {
   final session = await PtySession.spawn(
@@ -100,7 +92,7 @@ Future<void> _collectDroppedSession(SendPort reports) async {
 
 Future<void> _loseDuringStagedSpawn((SendPort, String) message) async {
   final (ready, pidFile) = message;
-  _delayNextNativeSpawn(1000);
+  ptyd_test_delay_next_spawn(1000);
   ready.send(null);
   await PtySession.spawn(
     PtySpawnOptions(
@@ -215,7 +207,7 @@ void main() {
       expect(pidFile.existsSync(), isTrue);
       final pid = int.parse(pidFile.readAsStringSync());
       expect(
-        _nativeSpawnDelayActive(),
+        ptyd_test_spawn_delay_active() != 0,
         isTrue,
         reason: 'owner must be killed before staged spawn returns',
       );

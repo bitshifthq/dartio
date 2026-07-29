@@ -53,7 +53,11 @@ jobs:
         working-directory: packages/ptyx
         run: |
           dart run tool/ffigen.dart
-          git diff --exit-code -- include/ptyx.h lib/src/ffi/controller.dart
+          git diff --exit-code -- \
+            include/ptyx.h \
+            include/ptyx_dart.h \
+            lib/src/ffi/ptyx.g.dart \
+            test/src/ffi/ptyx_test.g.dart
       - run: dart analyze --fatal-infos --fatal-warnings packages/ptyx
       - name: publish dry run
         working-directory: packages/ptyx
@@ -182,7 +186,9 @@ jobs:
       - run: cargo fmt --manifest-path packages/ptyx/native/Cargo.toml -- --check
       - if: runner.os != 'Windows'
         run: cargo fmt --manifest-path packages/ptyx/native/broker/Cargo.toml -- --check
-      - run: cargo test --manifest-path packages/ptyx/native/Cargo.toml --all-features
+      - run: >-
+          cargo test --manifest-path packages/ptyx/native/Cargo.toml
+          -p ptyx-c -p ptyx-engine -p ptyx --all-features
       - run: cargo build --manifest-path packages/ptyx/native/Cargo.toml
       - name: run C ABI harness
         if: runner.os != 'Windows'
@@ -191,19 +197,29 @@ jobs:
             -std=c11 -Wall -Wextra -Werror \
             -Ipackages/ptyx/include \
             -Lpackages/ptyx/native/target/debug \
-            -lptyx \
+            -lptyx_c \
             -o "$RUNNER_TEMP/ptyx-abi-harness"
+          c++ packages/ptyx/native/tests/abi_harness.cc \
+            -std=c++17 -Wall -Wextra -Werror \
+            -Ipackages/ptyx/include \
+            -Lpackages/ptyx/native/target/debug \
+            -lptyx_c \
+            -o "$RUNNER_TEMP/ptyx-abi-harness-cxx"
           if [[ "$RUNNER_OS" == "macOS" ]]; then
             DYLD_LIBRARY_PATH="$GITHUB_WORKSPACE/packages/ptyx/native/target/debug" \
               "$RUNNER_TEMP/ptyx-abi-harness"
+            DYLD_LIBRARY_PATH="$GITHUB_WORKSPACE/packages/ptyx/native/target/debug" \
+              "$RUNNER_TEMP/ptyx-abi-harness-cxx"
           else
             LD_LIBRARY_PATH="$GITHUB_WORKSPACE/packages/ptyx/native/target/debug" \
               "$RUNNER_TEMP/ptyx-abi-harness"
+            LD_LIBRARY_PATH="$GITHUB_WORKSPACE/packages/ptyx/native/target/debug" \
+              "$RUNNER_TEMP/ptyx-abi-harness-cxx"
           fi
           if [[ "$RUNNER_OS" == "macOS" ]]; then
-            LIBRARY="$GITHUB_WORKSPACE/packages/ptyx/native/target/debug/libptyx.dylib"
+            LIBRARY="$GITHUB_WORKSPACE/packages/ptyx/native/target/debug/libptyx_c.dylib"
           else
-            LIBRARY="$GITHUB_WORKSPACE/packages/ptyx/native/target/debug/libptyx.so"
+            LIBRARY="$GITHUB_WORKSPACE/packages/ptyx/native/target/debug/libptyx_c.so"
           fi
           dart run packages/ptyx/tool/verify_abi.dart "$LIBRARY"
       - name: run C ABI harness
@@ -217,21 +233,42 @@ jobs:
             /Ipackages/ptyx/include ^
             packages/ptyx/native/tests/abi_harness.c ^
             /Fe:%RUNNER_TEMP%\ptyx-abi-harness.exe ^
-            /link /LIBPATH:packages/ptyx/native/target/debug ptyx.dll.lib
+            /link /LIBPATH:packages/ptyx/native/target/debug ptyx_c.dll.lib
+          cl /nologo /std:c++17 /EHsc /W4 /WX ^
+            /Ipackages/ptyx/include ^
+            packages/ptyx/native/tests/abi_harness.cc ^
+            /Fe:%RUNNER_TEMP%\ptyx-abi-harness-cxx.exe ^
+            /link /LIBPATH:packages/ptyx/native/target/debug ptyx_c.dll.lib
           set "PATH=%GITHUB_WORKSPACE%\packages\ptyx\native\target\debug;%PATH%"
           "%RUNNER_TEMP%\ptyx-abi-harness.exe"
-          dart run packages/ptyx/tool/verify_abi.dart "%GITHUB_WORKSPACE%\packages\ptyx\native\target\debug\ptyx.dll"
+          "%RUNNER_TEMP%\ptyx-abi-harness-cxx.exe"
+          dart run packages/ptyx/tool/verify_abi.dart "%GITHUB_WORKSPACE%\packages\ptyx\native\target\debug\ptyx_c.dll"
       - if: runner.os != 'Windows'
         run: cargo test --manifest-path packages/ptyx/native/broker/Cargo.toml
       - name: run Unix broker ownership harness
         if: runner.os != 'Windows'
         run: cargo run --manifest-path packages/ptyx/native/broker/Cargo.toml
-      - run: cargo clippy --manifest-path packages/ptyx/native/Cargo.toml --all-targets --all-features -- -D warnings
+      - run: >-
+          cargo clippy --manifest-path packages/ptyx/native/Cargo.toml
+          -p ptyx-c -p ptyx-engine -p ptyx
+          --all-targets --all-features -- -D warnings
       - if: runner.os != 'Windows'
         run: cargo clippy --manifest-path packages/ptyx/native/broker/Cargo.toml --all-targets -- -D warnings
-      - run: cargo doc --manifest-path packages/ptyx/native/Cargo.toml --no-deps
+      - run: >-
+          cargo doc --manifest-path packages/ptyx/native/Cargo.toml
+          -p ptyx-c -p ptyx-engine -p ptyx --all-features --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
       - if: runner.os != 'Windows'
         run: cargo doc --manifest-path packages/ptyx/native/broker/Cargo.toml --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
+      - name: validate C ABI documentation
+        if: matrix.os == 'linux-x64'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes doxygen
+          doxygen packages/ptyx/Doxyfile
 
   clippy:
     name: clippy
@@ -269,7 +306,10 @@ jobs:
             "$GITHUB_WORKSPACE/packages/ptyx/native/broker/target/release/ptyx-broker" \
             >> "$GITHUB_ENV"
       - run: cargo clippy --manifest-path packages/ptyx/native/broker/Cargo.toml --all-targets --all-features -- -D warnings
-      - run: cargo clippy --manifest-path packages/ptyx/native/Cargo.toml --all-targets -- -D warnings
+      - run: >-
+          cargo clippy --manifest-path packages/ptyx/native/Cargo.toml
+          -p ptyx-c -p ptyx-engine -p ptyx
+          --all-targets --all-features -- -D warnings
 
   checks:
     name: checks

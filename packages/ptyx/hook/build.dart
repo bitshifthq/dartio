@@ -43,18 +43,23 @@ void _addBuildDependencies(BuildInput input, BuildOutputBuilder output) {
   final packageRoot = Directory.fromUri(input.packageRoot);
   final dependencyFiles = [
     packageRoot.uri.resolve('include/ptyx.h'),
+    packageRoot.uri.resolve('include/ptyx_dart.h'),
     packageRoot.uri.resolve('native/Cargo.toml'),
     packageRoot.uri.resolve('native/Cargo.lock'),
     packageRoot.uri.resolve('native/build.rs'),
+    packageRoot.uri.resolve('native/engine/Cargo.toml'),
     packageRoot.uri.resolve('native/broker/Cargo.toml'),
-    packageRoot.uri.resolve('native/broker/Cargo.lock'),
   ];
 
   for (final uri in dependencyFiles) {
     if (File.fromUri(uri).existsSync()) output.dependencies.add(uri);
   }
 
-  for (final relativePath in ['native/src/', 'native/broker/src/']) {
+  for (final relativePath in [
+    'native/src/',
+    'native/engine/src/',
+    'native/broker/src/',
+  ]) {
     final sourceDir = Directory.fromUri(packageRoot.uri.resolve(relativePath));
     if (!sourceDir.existsSync()) continue;
     for (final entity in sourceDir.listSync(recursive: true)) {

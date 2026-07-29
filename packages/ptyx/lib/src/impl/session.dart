@@ -1,103 +1,59 @@
 import 'dart:async';
 import 'dart:collection';
 import 'dart:convert';
-import 'dart:ffi';
 import 'dart:io' show Directory, Platform, ProcessSignal;
-import 'dart:isolate';
 import 'dart:typed_data';
 
-import 'package:ffi/ffi.dart';
 import 'package:meta/meta.dart';
 
 import '../api/api.dart';
-import '../ffi/controller.dart';
-
-final _sessionFinalizer = NativeFinalizer(
-  Native.addressOf<NativeFinalizerFunction>(controllerFinalize),
-);
-final _sessionRegistryFinalizer = Finalizer<_SessionRegistryToken>((token) {
-  controllerAbandon(token.handle);
-  token.runtime._removeSession(token.handle);
-});
-const _terminalDrainTimeout = Duration(seconds: 15);
-const _supervisorRemove = 3;
-const _supervisorOwnerExit = 4;
-const _supervisorIdle = 5;
-const _supervisorArm = 6;
-const _supervisorSpawn = 7;
-const _supervisorStartupTimeout = Duration(seconds: 30);
-
-int? _lastNativeCode() {
-  final code = controllerLastErrorCode();
-  return code == 0 ? null : code;
-}
-
-final class _SessionRegistryToken {
-  const _SessionRegistryToken(this.runtime, this.handle);
-
-  final _ControllerRuntime runtime;
-  final int handle;
-}
-
-Future<void> _superviseOwner(SendPort ready) async {
-  final commands = ReceivePort();
-  final startupDeadline = Timer(_supervisorStartupTimeout, commands.close);
-  ready.send(commands.sendPort);
-  final handles = <int>{};
-  var ownerExited = false;
-  var idle = false;
-  await for (final message in commands) {
-    switch (message) {
-      case [_supervisorRemove, final int handle]:
-        handles.remove(handle);
-      case [_supervisorOwnerExit]:
-        ownerExited = true;
-      case [_supervisorIdle]:
-        idle = true;
-      case [_supervisorArm, final SendPort acknowledgement]:
-        startupDeadline.cancel();
-        acknowledgement.send(null);
-      case [
-        _supervisorSpawn,
-        final PtySpawnOptions options,
-        final String workingDirectory,
-        final SendPort reply,
-      ]:
-        try {
-          final result = _spawnNative(options, workingDirectory);
-          if (result.handle != 0) {
-            handles.add(result.handle);
-          }
-          reply.send([result.handle, result.nativeCode]);
-        } on Object catch (error, stackTrace) {
-          reply.send([error, stackTrace.toString()]);
-        }
-    }
-    if (ownerExited) {
-      for (final handle in handles) {
-        controllerAbandon(handle);
-      }
-      commands.close();
-    } else if (idle && handles.isEmpty) {
-      commands.close();
-    }
-  }
-  startupDeadline.cancel();
-}
+import '../bindings/controller.dart';
+import '../ffi/ptyx.g.dart'
+    show
+        PTYX_CAPABILITY_CONPTY,
+        PTYX_CAPABILITY_PROCESS_GROUPS,
+        PTYX_CAPABILITY_SIGNALS,
+        PTYX_CAPABILITY_TERMINAL_MODES,
+        PTYX_CAPABILITY_TERMINAL_NAME,
+        PTYX_ERROR_CLOSED,
+        PTYX_ERROR_DOMAIN_INPUT,
+        PTYX_ERROR_DOMAIN_OUTPUT,
+        PTYX_ERROR_DOMAIN_RUNTIME,
+        PTYX_ERROR_INFRASTRUCTURE_LOST,
+        PTYX_ERROR_INVALID_ARGUMENT,
+        PTYX_ERROR_QUEUE_FULL,
+        PTYX_ERROR_STALE_HANDLE,
+        PTYX_ERROR_UNSUPPORTED,
+        PTYX_ERROR_WRONG_STATE,
+        PTYX_EVENT_CLOSE_INPUT_FAILED,
+        PTYX_OPERATION_CLOSE,
+        PTYX_OPERATION_METADATA,
+        PTYX_OPERATION_OUTPUT,
+        PTYX_OPERATION_RESIZE,
+        PTYX_OPERATION_SPAWN,
+        PTYX_OPERATION_TERMINATE,
+        PTYX_OPERATION_WRITE,
+        PTYX_STATUS_BACKPRESSURE,
+        PTYX_STATUS_CLOSED,
+        PTYX_STATUS_INVALID_ARGUMENT,
+        PTYX_STATUS_STALE_HANDLE,
+        PTYX_STATUS_UNSUPPORTED,
+        PTYX_STATUS_WRONG_STATE;
 
 @internal
-final class NativeSession implements PtySession, Finalizable {
+final class NativeSession implements PtySession, NativeEventTarget {
   NativeSession._(
-    this._runtime,
+    this._controller,
     this._handle,
     this._inputCapacity,
-    this._gracefulCloseTimeout,
     this._outputController,
     this._modeController,
   ) {
-    // These completion channels are optional to observe. Retain their error
-    // for callers without reporting it as an unhandled zone error first.
     _exit.future.ignore();
+    _paused = true;
+    _outputCancelled = false;
+    _outputEnded = false;
+    _controller.attachFinalizer(this, _handle);
   }
 
   static Future<NativeSession> spawn(PtySpawnOptions options) async {
@@ -114,153 +70,102 @@ final class NativeSession implements PtySession, Finalizable {
     );
     final workingDirectory =
         snapshot.workingDirectory ?? Directory.current.path;
-    _validateSpawnOptions(snapshot, workingDirectory);
-    final runtime = _ControllerRuntime.instance;
-    final supervisor = await runtime._beginSpawn();
-    var handle = 0;
-    var retained = false;
+    final effectiveEnvironment = _effectiveEnvironment(snapshot);
+    final environment = List<String>.unmodifiable([
+      for (final entry in effectiveEnvironment.entries)
+        '${entry.key}=${entry.value}',
+    ]);
+    _validateSpawnOptions(
+      snapshot,
+      workingDirectory,
+      effectiveEnvironment,
+      environment,
+    );
+    final controller = NativeController.instance;
+    await controller.ensureOwnerGuardian();
+
+    final completion = Completer<NativeSession>();
     try {
-      final reply = ReceivePort();
-      late final ({int handle, int? nativeCode}) spawnResult;
-      try {
-        supervisor.send([
-          _supervisorSpawn,
-          snapshot,
-          workingDirectory,
-          reply.sendPort,
-        ]);
-        final response = await reply.first;
-        if (response case [final int handle, final int? nativeCode]) {
-          spawnResult = (handle: handle, nativeCode: nativeCode);
-        } else if (response case [
-          final Object error,
-          final String stackTrace,
-        ]) {
-          Error.throwWithStackTrace(error, StackTrace.fromString(stackTrace));
-        } else {
-          throw const PtyInfrastructureException(
-            'native spawn supervisor returned an invalid response',
-            operation: 'spawn',
+      controller.startSpawn(
+        NativeSpawnRequest(
+          executable: snapshot.executable,
+          arguments: snapshot.arguments,
+          environment: environment,
+          inheritEnvironment:
+              snapshot.environmentMode == PtyEnvironmentMode.inherit,
+          workingDirectory: workingDirectory,
+          rows: snapshot.initialSize.rows,
+          columns: snapshot.initialSize.columns,
+          pixelWidth: snapshot.initialSize.pixelWidth,
+          pixelHeight: snapshot.initialSize.pixelHeight,
+          inputCapacity: snapshot.maxBufferedInput,
+          outputCapacity: snapshot.maxBufferedOutput,
+          gracefulCloseTimeout: snapshot.gracefulCloseTimeout,
+        ),
+        onReady: (handle) {
+          late final NativeSession session;
+          // The returned session owns and closes this controller.
+          // ignore: close_sinks
+          final output = StreamController<Uint8List>(
+            sync: true,
+            onListen: () => session._resumeOutput(),
+            onPause: () => session._pauseOutput(),
+            onResume: () => session._resumeOutput(),
+            onCancel: () => session._cancelOutput(),
           );
-        }
-      } finally {
-        reply.close();
-      }
-      handle = spawnResult.handle;
-      if (handle == 0) {
-        if (_isUnsupportedNativeCode(spawnResult.nativeCode)) {
-          throw PtyUnsupportedException(
-            'native PTY support is unavailable on this operating-system build',
-            operation: 'spawn',
-            nativeCode: spawnResult.nativeCode,
+          // The returned session owns and closes this controller.
+          // ignore: close_sinks
+          final modes = StreamController<PtyTermMode>.broadcast(
+            sync: true,
+            onListen: () => session._startModeObservation(),
+            onCancel: () => session._stopModeObservation(),
           );
-        }
-        throw PtySpawnException(
-          'native process spawn failed',
-          nativeCode: spawnResult.nativeCode,
-        );
-      }
-
-      late final NativeSession session;
-      // The returned session owns and closes this controller.
-      // ignore: close_sinks
-      final output = StreamController<Uint8List>(
-        sync: true,
-        onListen: () => session._setPaused(false),
-        onPause: () => session._setPaused(true),
-        onResume: () => session._setPaused(false),
-        onCancel: () => session._cancelOutput(),
+          session = NativeSession._(
+            controller,
+            handle,
+            snapshot.maxBufferedInput,
+            output,
+            modes,
+          );
+          completion.complete(session);
+          return session;
+        },
+        onFailure: (failure) {
+          completion.completeError(_exception(failure, operation: 'spawn'));
+        },
       );
-      // The returned session owns and closes this controller.
-      // ignore: close_sinks
-      final modes = StreamController<PtyTermMode>.broadcast(
-        sync: true,
-        onListen: () => session._startModeObservation(),
-        onCancel: () => session._stopModeObservation(),
-      );
-      session = NativeSession._(
-        runtime,
-        handle,
-        snapshot.maxBufferedInput,
-        snapshot.gracefulCloseTimeout,
-        output,
-        modes,
-      );
-      runtime._addSession(session);
-      _sessionFinalizer.attach(
-        session,
-        Pointer<Void>.fromAddress(handle),
-        detach: session,
-      );
-      _sessionRegistryFinalizer.attach(
-        session,
-        _SessionRegistryToken(runtime, handle),
-        detach: session,
-      );
-      if (!controllerActivate(
-        handle,
-        runtime.notificationPort,
-        runtime.notificationPort,
-      )) {
-        runtime._removeSession(handle);
-        controllerClose(handle);
-        throw const PtyInfrastructureException(
-          'native session activation failed',
-          operation: 'spawn',
-        );
-      }
-      retained = true;
-      return session;
-    } finally {
-      if (handle != 0 && !retained) {
-        runtime._forgetSupervisedHandle(handle);
-        controllerAbandon(handle);
-      }
-      runtime._finishSpawn();
+    } on NativeFailure catch (failure) {
+      throw _exception(failure, operation: 'spawn');
     }
+    return completion.future;
   }
 
-  static bool _isUnsupportedNativeCode(int? nativeCode) {
-    if (Platform.isWindows) {
-      return nativeCode == 50;
-    }
-    if (Platform.isMacOS) {
-      return nativeCode == 45;
-    }
-    return nativeCode == 95;
-  }
-
-  final _ControllerRuntime _runtime;
+  final NativeController _controller;
   final int _handle;
+  final int _inputCapacity;
   final StreamController<Uint8List> _outputController;
   final StreamController<PtyTermMode> _modeController;
+  final Queue<({Uint8List bytes, int token})> _pendingOutput = Queue();
   final _exit = Completer<int>();
-  final _outputDone = Completer<void>();
-  final int _inputCapacity;
-  final Duration _gracefulCloseTimeout;
   Completer<void>? _close;
-  var _pendingCredit = 0;
-  final Queue<Uint8List> _pendingOutput = Queue();
-  var _paused = true;
-  var _outputCancelled = false;
-  var _infrastructureLost = false;
-  var _terminalOutputScheduled = false;
-  Object? _terminalFailure;
   PtyInputException? _inputFailure;
-  var _creditScheduled = false;
-  Timer? _modeTimer;
+  Object? _terminalFailure;
+  Object? _outputTerminalError;
+  StackTrace? _outputTerminalStack;
+  late bool _paused;
+  late bool _outputCancelled;
+  late bool _outputEnded;
   PtyTermMode? _lastMode;
-  var _unchangedModeSamples = 0;
 
   @override
   PtyCapabilities get capabilities {
-    final bits = controllerCapabilities();
+    final bits = _controller.capabilityBits;
     return PtyCapabilities(
-      signals: bits & 1 != 0,
-      processGroups: bits & 2 != 0,
-      terminalModes: bits & 4 != 0,
-      conPty: bits & 8 != 0,
-      terminalName: bits & 16 != 0,
+      signals: bits & PTYX_CAPABILITY_SIGNALS != 0,
+      processGroups: bits & PTYX_CAPABILITY_PROCESS_GROUPS != 0,
+      terminalModes: bits & PTYX_CAPABILITY_TERMINAL_MODES != 0,
+      conPty: bits & PTYX_CAPABILITY_CONPTY != 0,
+      terminalName: bits & PTYX_CAPABILITY_TERMINAL_NAME != 0,
     );
   }
 
@@ -281,7 +186,8 @@ final class NativeSession implements PtySession, Finalizable {
     if (!capabilities.terminalModes) {
       return null;
     }
-    return _readMode();
+    final modes = _snapshot('mode').modes;
+    return modes == null ? null : _mode(modes);
   }
 
   @override
@@ -293,36 +199,19 @@ final class NativeSession implements PtySession, Finalizable {
   @override
   int? get pid {
     _checkOpen('pid');
-    final value = controllerPid(_handle);
-    if (value < 0) {
-      throw PtyMetadataException(
-        'native child process identifier was unavailable',
-        operation: 'pid',
-        nativeCode: _lastNativeCode(),
-      );
-    }
-    return value;
+    return _snapshot('pid').pid;
   }
 
   @override
   PtySize get size {
     _checkOpen('size');
-    return using((arena) {
-      final values = arena<Uint32>(4);
-      if (!controllerSize(_handle, values)) {
-        throw PtyMetadataException(
-          'native terminal size query failed',
-          operation: 'size',
-          nativeCode: _lastNativeCode(),
-        );
-      }
-      return PtySize(
-        rows: values[0],
-        columns: values[1],
-        pixelWidth: values[2],
-        pixelHeight: values[3],
-      );
-    });
+    final snapshot = _snapshot('size');
+    return PtySize(
+      rows: snapshot.rows,
+      columns: snapshot.columns,
+      pixelWidth: snapshot.pixelWidth,
+      pixelHeight: snapshot.pixelHeight,
+    );
   }
 
   @override
@@ -331,81 +220,20 @@ final class NativeSession implements PtySession, Finalizable {
     if (!capabilities.terminalName) {
       return null;
     }
-    final length = controllerTtyName(_handle, nullptr, 0);
-    if (length < 0) {
-      throw PtyMetadataException(
-        'native terminal name query failed',
-        operation: 'ttyName',
-        nativeCode: _lastNativeCode(),
-      );
-    }
-    return using((arena) {
-      final bytes = arena<Uint8>(length);
-      final written = controllerTtyName(_handle, bytes, length);
-      if (written != length) {
-        throw PtyMetadataException(
-          'native terminal name changed during read',
-          operation: 'ttyName',
-          nativeCode: _lastNativeCode(),
-        );
-      }
-      return utf8.decode(bytes.asTypedList(length));
-    });
-  }
-
-  bool get _isTerminal => _infrastructureLost || (_close?.isCompleted ?? false);
-
-  void _checkOpen([String operation = 'state']) {
-    if (_close != null) {
-      throw PtyClosedException('session closed', operation: operation);
-    }
+    final bytes = _snapshot('ttyName').terminalName;
+    return bytes == null ? null : utf8.decode(bytes);
   }
 
   @override
   void write(Uint8List data) {
     const operation = 'write';
-    _validateWrite(data, operation);
-    final result = using((arena) {
-      final pointer = arena<Uint8>(data.length);
-      pointer.asTypedList(data.length).setAll(0, data);
-      return controllerWrite(_handle, pointer, data.length);
-    });
-    if (result == -2) {
-      final failure = PtyInfrastructureException(
-        'native session runtime is unavailable',
-        operation: operation,
-        nativeCode: controllerLastErrorCode(),
-      );
-      _infrastructureLost = true;
-      _fail(failure);
-      throw failure;
-    }
-    if (result < 0) {
-      final nativeCode = controllerLastErrorCode();
-      final failure = PtyInputException(
-        'session can no longer accept input',
-        operation: operation,
-        nativeCode: nativeCode == 0 ? null : nativeCode,
-      );
-      _inputFailure ??= failure;
-      throw _inputError(operation, _inputFailure!);
-    }
-    if (result == 0) {
-      throw PtyBackpressureException(
-        'bounded native input storage is full',
-        context: '${data.length} bytes rejected',
-      );
-    }
-  }
-
-  void _validateWrite(Uint8List data, String operation) {
     _checkOpen(operation);
     final inputFailure = _inputFailure;
     if (inputFailure != null) {
       throw _inputError(operation, inputFailure);
     }
     if (data.isEmpty) {
-      throw PtyInvalidArgumentException(
+      throw const PtyInvalidArgumentException(
         'input data must not be empty',
         operation: operation,
       );
@@ -417,6 +245,19 @@ final class NativeSession implements PtySession, Finalizable {
         context: '${data.length} bytes exceeds $_inputCapacity bytes',
       );
     }
+    try {
+      _controller.write(_handle, data);
+    } on NativeFailure catch (failure) {
+      final error = _exception(failure, operation: operation);
+      if (error is PtyInputException) {
+        _inputFailure ??= error;
+        throw _inputError(operation, _inputFailure!);
+      }
+      if (error is PtyInfrastructureException) {
+        nativeInfrastructureFailed(failure);
+      }
+      throw error;
+    }
   }
 
   @override
@@ -424,32 +265,27 @@ final class NativeSession implements PtySession, Finalizable {
     if (_close != null || _exit.isCompleted) {
       return false;
     }
-    final result = controllerSignal(_handle, signal.signalNumber);
-    if (result < 0) {
-      throw PtySignalException(
-        'native signal delivery failed',
-        operation: 'kill',
-        nativeCode: _lastNativeCode(),
-      );
+    try {
+      return _controller.terminate(_handle, signal.signalNumber);
+    } on NativeFailure catch (failure) {
+      throw _operationFailure(failure, operation: 'kill');
     }
-    return result == 1;
   }
 
   @override
   void resize(PtySize size) {
     _checkOpen('resize');
     _validateSize(size, operation: 'resize');
-    if (!controllerResize(
-      _handle,
-      size.rows,
-      size.columns,
-      size.pixelWidth,
-      size.pixelHeight,
-    )) {
-      throw PtyResizeException(
-        'native terminal resize failed',
-        nativeCode: _lastNativeCode(),
+    try {
+      _controller.resize(
+        _handle,
+        rows: size.rows,
+        columns: size.columns,
+        pixelWidth: size.pixelWidth,
+        pixelHeight: size.pixelHeight,
       );
+    } on NativeFailure catch (failure) {
+      throw _operationFailure(failure, operation: 'resize');
     }
   }
 
@@ -461,25 +297,182 @@ final class NativeSession implements PtySession, Finalizable {
     }
     final completion = Completer<void>();
     _close = completion;
-    unawaited(_closeNative(completion));
+    final terminalFailure = _terminalFailure;
+    if (terminalFailure != null) {
+      completion.completeError(terminalFailure);
+      return completion.future;
+    }
+    try {
+      _cancelOutput();
+      _controller.closeSession(_handle);
+    } on Object catch (error, stackTrace) {
+      if (completion.isCompleted) {
+        return completion.future;
+      }
+      final publicError = error is NativeFailure
+          ? _exception(error, operation: 'close')
+          : error;
+      if (error is NativeFailure && publicError is PtyInfrastructureException) {
+        nativeInfrastructureFailed(error);
+        return completion.future;
+      }
+      _failReleasedSession(publicError, stackTrace);
+    }
     return completion.future;
   }
 
-  void _setPaused(bool paused) {
-    if (_outputCancelled || _isTerminal) {
+  @override
+  void nativeOutput(Uint8List bytes, int token) {
+    if (_outputCancelled || _outputController.isClosed) {
+      _acknowledge(token);
       return;
     }
-    _paused = paused;
-    if (!paused) {
-      _queueCredit(_pendingCredit);
-      _pendingCredit = 0;
+    if (_paused || !_outputController.hasListener) {
+      _pendingOutput.addLast((bytes: bytes, token: token));
+      return;
     }
-    controllerPause(_handle, paused);
-    if (!paused) {
-      while (!_paused && _pendingOutput.isNotEmpty) {
-        _deliverOutput(_pendingOutput.removeFirst());
-      }
+    _outputController.add(bytes);
+    _acknowledge(token);
+  }
+
+  @override
+  void nativeInputFailed(NativeFailure failure) {
+    _inputFailure ??= _exception(failure) as PtyInputException;
+  }
+
+  @override
+  void nativeOutputFailed(NativeFailure failure) {
+    _endOutput(_exception(failure));
+  }
+
+  @override
+  void nativeInfrastructureFailed(NativeFailure failure) {
+    final error = _exception(failure);
+    if (_terminalFailure != null) {
+      return;
     }
+    _terminalFailure = error;
+    if (!_exit.isCompleted) {
+      _exit.completeError(error);
+    }
+    _endOutput(error, force: true);
+    if (!_modeController.isClosed) {
+      _modeController.addError(error);
+      unawaited(_modeController.close());
+    }
+    final close = _close;
+    if (close != null && !close.isCompleted) {
+      close.completeError(error);
+    }
+    _controller.detachFinalizer(this);
+    _controller.releaseSession(_handle);
+  }
+
+  @override
+  void nativeOutputDone() {
+    _endOutput(_inputFailure);
+  }
+
+  @override
+  void nativeExit(int status) {
+    if (!_exit.isCompleted) {
+      _exit.complete(status);
+    }
+  }
+
+  @override
+  void nativeCloseComplete(int flags, NativeFailure? failure) {
+    _controller.detachFinalizer(this);
+    while (_pendingOutput.isNotEmpty) {
+      _acknowledge(_pendingOutput.removeFirst().token);
+    }
+    _endOutput(null, force: true);
+    if (!_modeController.isClosed) {
+      unawaited(_modeController.close());
+    }
+    if (!_exit.isCompleted) {
+      _exit.completeError(
+        const PtyExitException(
+          'session closed before the child status was observed',
+        ),
+      );
+    }
+
+    final close = _close ??= Completer<void>();
+    if (close.isCompleted) {
+      return;
+    }
+    final terminalFailure = _terminalFailure;
+    if (terminalFailure != null) {
+      close.completeError(terminalFailure);
+      return;
+    }
+    if (failure != null) {
+      final error = flags & PTYX_EVENT_CLOSE_INPUT_FAILED != 0
+          ? _inputException(failure, operation: 'close')
+          : _exception(failure, operation: 'close');
+      close.completeError(error);
+      return;
+    }
+    close.complete();
+  }
+
+  @override
+  void nativeModeChanged(int modes) {
+    final mode = _mode(modes);
+    if (mode != _lastMode && !_modeController.isClosed) {
+      _lastMode = mode;
+      _modeController.add(mode);
+    }
+  }
+
+  void _checkOpen(String operation) {
+    if (_close != null) {
+      throw PtyClosedException('session closed', operation: operation);
+    }
+  }
+
+  void _failReleasedSession(Object error, StackTrace stackTrace) {
+    _terminalFailure ??= error;
+    if (!_exit.isCompleted) {
+      _exit.completeError(error, stackTrace);
+    }
+    _endOutput(error, force: true, stackTrace: stackTrace);
+    if (!_modeController.isClosed) {
+      _modeController.addError(error, stackTrace);
+      unawaited(_modeController.close());
+    }
+    final close = _close;
+    if (close != null && !close.isCompleted) {
+      close.completeError(error, stackTrace);
+    }
+    _controller.detachFinalizer(this);
+    _controller.releaseSession(_handle);
+  }
+
+  NativeSnapshot _snapshot(String operation) {
+    try {
+      return _controller.snapshot(_handle);
+    } on NativeFailure catch (failure) {
+      throw _operationFailure(failure, operation: operation);
+    }
+  }
+
+  void _pauseOutput() {
+    _paused = true;
+  }
+
+  void _resumeOutput() {
+    if (_outputCancelled) {
+      return;
+    }
+    _paused = false;
+    while (!_paused && _pendingOutput.isNotEmpty) {
+      final event = _pendingOutput.removeFirst();
+      _outputController.add(event.bytes);
+      _acknowledge(event.token);
+    }
+    _completeOutputIfReady();
   }
 
   void _cancelOutput() {
@@ -488,563 +481,243 @@ final class NativeSession implements PtySession, Finalizable {
     }
     _outputCancelled = true;
     _paused = false;
-    _queueCredit(_pendingCredit);
-    _pendingCredit = 0;
-    while (_pendingOutput.isNotEmpty) {
-      _queueCredit(_pendingOutput.removeFirst().length);
-    }
-    controllerPause(_handle, false);
-  }
-
-  void _queueCredit(int bytes) {
-    if (bytes == 0) {
-      return;
-    }
-    _runtime._credit[_handle] = (_runtime._credit[_handle] ?? 0) + bytes;
-    if (_creditScheduled) {
-      return;
-    }
-    _creditScheduled = true;
-    scheduleMicrotask(_drainCredit);
-  }
-
-  void _drainCredit() {
-    final bytes = _runtime._credit[_handle] ?? 0;
-    if (bytes == 0 || _isTerminal) {
-      if (_isTerminal) {
-        _runtime._credit.remove(_handle);
-      }
-      _creditScheduled = false;
-      return;
-    }
-    if (controllerCredit(_handle, bytes)) {
-      _runtime._credit.remove(_handle);
-      _creditScheduled = false;
-      return;
-    }
-    Timer.run(_drainCredit);
-  }
-
-  void _onOutput(Uint8List bytes) {
-    if (_outputCancelled || _outputController.isClosed) {
-      _queueCredit(bytes.length);
-      return;
-    }
-    if (_paused) {
-      _pendingOutput.addLast(bytes);
-      return;
-    }
-    _deliverOutput(bytes);
-  }
-
-  void _deliverOutput(Uint8List bytes) {
-    _pendingCredit = bytes.length;
-    _outputController.add(bytes);
-    if (!_paused) {
-      _queueCredit(_pendingCredit);
-      _pendingCredit = 0;
-    }
-  }
-
-  void _completeExit() {
-    if (_exit.isCompleted) {
-      return;
-    }
-    final status = using((arena) {
-      final pointer = arena<Int64>();
-      return controllerExitStatus(_handle, pointer) ? pointer.value : null;
-    });
-    if (status != null) {
-      _exit.complete(status);
-    } else {
-      _exit.completeError(
-        const PtyExitException('native child status was unavailable'),
-      );
-    }
-  }
-
-  void _completeInputFailure() {
-    _inputFailure ??= const PtyInputException(
-      'accepted input was not fully written',
-    );
-  }
-
-  PtyInputException _inputError(String operation, PtyInputException failure) =>
-      PtyInputException(
-        failure.message,
-        operation: operation,
-        nativeCode: failure.nativeCode,
-        context: failure.context,
-      );
-
-  void _completeOutput() {
-    if (!_outputDone.isCompleted) {
-      _outputDone.complete();
-    }
-    if (!_outputController.isClosed) {
-      final inputFailure = _inputFailure;
-      if (inputFailure != null) {
-        _outputController.addError(inputFailure);
-      }
-      unawaited(_outputController.close());
-    }
-  }
-
-  void _completeOutputFailure() {
-    if (!_outputDone.isCompleted) {
-      _outputDone.complete();
-    }
-    if (!_outputController.isClosed) {
-      _outputController.addError(
-        const PtyOutputException('native terminal output read failed'),
-      );
-      unawaited(_outputController.close());
-    }
-  }
-
-  void _fail(Object error) {
-    _terminalFailure ??= error;
-    final terminalFailure = _terminalFailure!;
-    // A terminal infrastructure notice means native ownership has already
-    // moved to forced cleanup. Keeping either finalizer attached would invoke
-    // a stale native callback while the isolate itself is shutting down.
-    _sessionFinalizer.detach(this);
-    _sessionRegistryFinalizer.detach(this);
-    if (!_exit.isCompleted) {
-      _exit.completeError(error);
-    }
-    if (!_outputDone.isCompleted) {
-      _outputDone.complete();
-    }
-    if (!_outputController.isClosed && !_terminalOutputScheduled) {
-      _terminalOutputScheduled = true;
-      scheduleMicrotask(() {
-        if (!_outputController.isClosed) {
-          _outputController.addError(terminalFailure);
-          unawaited(_outputController.close());
-        }
-      });
-    }
-    _runtime._removeSession(_handle);
-  }
-
-  Future<void> _closeNative(Completer<void> completion) async {
-    _cancelOutput();
     Object? failure;
     StackTrace? failureStack;
-    void recordFailure(Object error, [StackTrace? stackTrace]) {
-      failure ??= error;
-      failureStack ??= stackTrace ?? StackTrace.current;
-    }
-
-    final terminalFailure = _terminalFailure;
-    if (terminalFailure != null) {
-      recordFailure(terminalFailure);
-    }
-    final inputFailure = _inputFailure;
-    if (inputFailure != null) {
-      recordFailure(inputFailure);
-    }
-    if (!_infrastructureLost && !_exit.isCompleted) {
-      controllerSignal(_handle, ProcessSignal.sigterm.signalNumber);
-      // Graceful delivery is advisory. The timed forced-close path below
-      // remains authoritative and reports any cleanup failure.
-    }
-    var nativeCloseRequested = false;
-    try {
-      await _exit.future.timeout(_gracefulCloseTimeout);
-    } on TimeoutException {
-      nativeCloseRequested = true;
-      if (!controllerClose(_handle)) {
-        recordFailure(
-          const PtyCloseException('forced native cleanup request failed'),
-        );
-      }
-    } on Object catch (error, stackTrace) {
-      recordFailure(error, stackTrace);
-      nativeCloseRequested = true;
-      if (!controllerClose(_handle)) {
-        recordFailure(
-          const PtyCloseException('forced native cleanup request failed'),
-        );
+    if (!_outputEnded) {
+      try {
+        _controller.cancelOutput(_handle);
+      } on NativeFailure catch (error, stackTrace) {
+        failure = _operationFailure(error, operation: 'output.cancel');
+        failureStack = stackTrace;
       }
     }
-    if (!nativeCloseRequested && !_infrastructureLost) {
-      if (!controllerClose(_handle)) {
-        recordFailure(const PtyCloseException('native cleanup request failed'));
-      }
+    while (_pendingOutput.isNotEmpty) {
+      _acknowledge(_pendingOutput.removeFirst().token);
     }
-    try {
-      await Future.wait<Object?>([
-        _exit.future,
-        _outputDone.future,
-      ]).timeout(_terminalDrainTimeout);
-    } on TimeoutException catch (_, stackTrace) {
-      recordFailure(
-        const PtyCloseException(
-          'native resources did not reach a terminal state',
-        ),
-        stackTrace,
-      );
-      controllerClose(_handle);
-    } on Object catch (error, stackTrace) {
-      recordFailure(error, stackTrace);
-      controllerClose(_handle);
-    }
-    final delayedInputFailure = _inputFailure;
-    if (delayedInputFailure != null) {
-      if (_terminalFailure == null) {
-        failure = delayedInputFailure;
-        failureStack = StackTrace.current;
-      } else {
-        recordFailure(delayedInputFailure);
-      }
-    }
-
-    var destroyed = controllerDestroy(_handle);
-    for (var retry = 0; !destroyed && retry < 100; retry++) {
-      await Future<void>.delayed(const Duration(milliseconds: 2));
-      destroyed = controllerDestroy(_handle);
-    }
-    if (!destroyed) {
-      recordFailure(
-        const PtyCloseException(
-          'native resources did not reach a terminal state',
-        ),
-      );
-    }
-
-    try {
-      _runtime._removeSession(_handle);
-      _stopModeObservation();
-      await _modeController.close();
-    } on Object catch (error, stackTrace) {
-      recordFailure(error, stackTrace);
-    }
-    if (destroyed) {
-      _sessionFinalizer.detach(this);
-      _sessionRegistryFinalizer.detach(this);
-    }
-    if (failure case final Object error) {
-      completion.completeError(error, failureStack);
-    } else {
-      completion.complete();
+    _completeOutputIfReady();
+    if (failure != null) {
+      Error.throwWithStackTrace(failure, failureStack!);
     }
   }
 
-  PtyTermMode? _readMode() {
-    final flags = controllerMode(_handle);
-    if (flags < 0) {
-      throw PtyModeException(
-        'native terminal-mode query failed',
-        nativeCode: _lastNativeCode(),
-      );
+  void _acknowledge(int token) {
+    if (token == 0) {
+      return;
     }
-    return PtyTermMode(
-      canonical: flags & 1 != 0,
-      echo: flags & 2 != 0,
-      signals: flags & 4 != 0,
-    );
+    try {
+      _controller.acknowledge(token);
+    } on NativeFailure catch (failure) {
+      nativeInfrastructureFailed(failure);
+    }
+  }
+
+  void _endOutput(Object? error, {bool force = false, StackTrace? stackTrace}) {
+    if (!_outputEnded) {
+      _outputEnded = true;
+      _outputTerminalError = error;
+      _outputTerminalStack = stackTrace;
+    }
+    if (force) {
+      while (_pendingOutput.isNotEmpty) {
+        _acknowledge(_pendingOutput.removeFirst().token);
+      }
+    }
+    _completeOutputIfReady();
+  }
+
+  void _completeOutputIfReady() {
+    if (!_outputEnded ||
+        _pendingOutput.isNotEmpty ||
+        _outputController.isClosed) {
+      return;
+    }
+    final error = _outputTerminalError;
+    if (error != null && !_outputCancelled) {
+      _outputController.addError(error, _outputTerminalStack);
+    }
+    unawaited(_outputController.close());
   }
 
   void _startModeObservation() {
-    if (!capabilities.terminalModes || _modeTimer != null || _close != null) {
+    if (!capabilities.terminalModes || _close != null) {
       return;
     }
-    scheduleMicrotask(_observeMode);
+    try {
+      _controller.observeMode(_handle, enabled: true);
+    } on NativeFailure catch (failure, stackTrace) {
+      final error = _operationFailure(failure, operation: 'modeChanges.listen');
+      if (!_modeController.isClosed) {
+        _modeController.addError(error, stackTrace);
+      }
+    }
   }
 
   void _stopModeObservation() {
-    _modeTimer?.cancel();
-    _modeTimer = null;
-    _unchangedModeSamples = 0;
+    if (!capabilities.terminalModes || _close != null) {
+      return;
+    }
+    try {
+      _controller.observeMode(_handle, enabled: false);
+    } on NativeFailure catch (failure, stackTrace) {
+      final error = _operationFailure(failure, operation: 'modeChanges.cancel');
+      if (!_modeController.isClosed) {
+        _modeController.addError(error, stackTrace);
+      }
+    }
   }
 
-  void _observeMode() {
-    if (!_modeController.hasListener || _close != null) {
-      _stopModeObservation();
-      return;
+  static PtyTermMode _mode(int bits) => PtyTermMode(
+    canonical: bits & 1 != 0,
+    echo: bits & 2 != 0,
+    signals: bits & 4 != 0,
+  );
+
+  PtyException _operationFailure(
+    NativeFailure failure, {
+    required String operation,
+  }) {
+    final error = _exception(failure, operation: operation);
+    if (error is PtyInfrastructureException) {
+      nativeInfrastructureFailed(failure);
     }
-    PtyTermMode? current;
-    try {
-      current = _readMode();
-    } on Object catch (error, stackTrace) {
-      _modeController.addError(error, stackTrace);
-      _stopModeObservation();
-      return;
-    }
-    if (current != null && current != _lastMode) {
-      _lastMode = current;
-      _unchangedModeSamples = 0;
-      _modeController.add(current);
-    } else {
-      _unchangedModeSamples++;
-    }
-    final milliseconds = switch (_unchangedModeSamples) {
-      <= 10 => 10,
-      <= 20 => 25,
-      <= 40 => 50,
-      <= 80 => 100,
-      _ => 250,
-    };
-    _modeTimer = Timer(Duration(milliseconds: milliseconds), _observeMode);
+    return error;
   }
 }
 
-final class _ControllerRuntime {
-  _ControllerRuntime._() {
-    final abi = controllerAbiVersion();
-    if (abi != controllerAbiVersionExpected) {
-      throw PtyInfrastructureException(
-        'native ABI mismatch: expected $controllerAbiVersionExpected, got $abi',
-      );
-    }
-    if (!controllerInit(NativeApi.initializeApiDLData)) {
-      throw const PtyInfrastructureException(
-        'native controller initialization failed',
-      );
-    }
-    // Output and terminal notices must share one port. Native sends them in
-    // order, but Dart does not preserve ordering across separate ports; an EOF
-    // notice could otherwise overtake the final output chunk.
-    _notifications = RawReceivePort(_onNotification)..keepIsolateAlive = false;
+PtyException _exception(NativeFailure failure, {String? operation}) {
+  final publicOperation = operation ?? _operationName(failure.operation);
+  final nativeCode = failure.nativeCode == 0 ? null : failure.nativeCode;
+  if (publicOperation == 'mode' || publicOperation.startsWith('modeChanges.')) {
+    return PtyModeException(
+      failure.message,
+      operation: publicOperation,
+      nativeCode: nativeCode,
+    );
   }
-
-  static final instance = _ControllerRuntime._();
-
-  late final RawReceivePort _notifications;
-  final Map<int, WeakReference<NativeSession>> _sessions = {};
-  final Map<int, int> _credit = {};
-  SendPort? _supervisor;
-  Future<SendPort>? _supervisorStart;
-  var _pendingSpawns = 0;
-  var _idleReleaseScheduled = false;
-
-  int get notificationPort => _notifications.sendPort.nativePort;
-
-  Future<SendPort> _beginSpawn() async {
-    _pendingSpawns++;
-    try {
-      return await _ensureSupervisor();
-    } on Object {
-      _pendingSpawns--;
-      rethrow;
-    }
+  if (failure.status == PTYX_STATUS_BACKPRESSURE ||
+      failure.kind == PTYX_ERROR_QUEUE_FULL) {
+    return PtyBackpressureException(
+      failure.message,
+      operation: publicOperation,
+      nativeCode: nativeCode,
+    );
   }
-
-  Future<SendPort> _ensureSupervisor() async {
-    final supervisor = _supervisor;
-    if (supervisor != null) {
-      return supervisor;
-    }
-    final existing = _supervisorStart;
-    if (existing != null) {
-      return existing;
-    }
-    final starting = _startSupervisor();
-    _supervisorStart = starting;
-    try {
-      return await starting;
-    } on Object {
-      if (identical(_supervisorStart, starting)) {
-        _supervisorStart = null;
-      }
-      rethrow;
-    }
+  if (failure.status == PTYX_STATUS_INVALID_ARGUMENT ||
+      failure.kind == PTYX_ERROR_INVALID_ARGUMENT) {
+    return PtyInvalidArgumentException(
+      failure.message,
+      operation: publicOperation,
+      nativeCode: nativeCode,
+    );
   }
-
-  Future<SendPort> _startSupervisor() async {
-    final ready = ReceivePort();
-    final armed = ReceivePort();
-    SendPort? supervisor;
-    var exitListenerInstalled = false;
-    try {
-      await Isolate.spawn(_superviseOwner, ready.sendPort);
-      supervisor =
-          await ready.first.timeout(_supervisorStartupTimeout) as SendPort;
-      Isolate.current.addOnExitListener(
-        supervisor,
-        response: const [_supervisorOwnerExit],
-      );
-      exitListenerInstalled = true;
-      supervisor.send([_supervisorArm, armed.sendPort]);
-      await armed.first.timeout(_supervisorStartupTimeout);
-      _supervisor = supervisor;
-      return supervisor;
-    } on Object {
-      final failedSupervisor = supervisor;
-      if (failedSupervisor != null) {
-        failedSupervisor.send(const [_supervisorIdle]);
-        if (exitListenerInstalled) {
-          Isolate.current.removeOnExitListener(failedSupervisor);
-        }
-      }
-      rethrow;
-    } finally {
-      armed.close();
-      ready.close();
-    }
+  if (failure.status == PTYX_STATUS_UNSUPPORTED ||
+      failure.kind == PTYX_ERROR_UNSUPPORTED) {
+    return PtyUnsupportedException(
+      failure.message,
+      operation: publicOperation,
+      nativeCode: nativeCode,
+    );
   }
-
-  void _finishSpawn() {
-    _pendingSpawns--;
-    _stopSupervisorIfIdle();
+  if (failure.domain == PTYX_ERROR_DOMAIN_RUNTIME ||
+      failure.kind == PTYX_ERROR_INFRASTRUCTURE_LOST) {
+    return PtyInfrastructureException(
+      failure.message,
+      operation: publicOperation,
+      nativeCode: nativeCode,
+    );
   }
-
-  void _forgetSupervisedHandle(int handle) {
-    _supervisor?.send([_supervisorRemove, handle]);
+  if (failure.domain == PTYX_ERROR_DOMAIN_INPUT ||
+      failure.operation == PTYX_OPERATION_WRITE) {
+    return _inputException(failure, operation: publicOperation);
   }
-
-  void _stopSupervisorIfIdle() {
-    final supervisor = _supervisor;
-    if (supervisor == null || _pendingSpawns != 0 || _sessions.isNotEmpty) {
-      return;
-    }
-    supervisor.send(const [_supervisorIdle]);
-    Isolate.current.removeOnExitListener(supervisor);
-    _supervisor = null;
-    _supervisorStart = null;
+  if (failure.domain == PTYX_ERROR_DOMAIN_OUTPUT ||
+      failure.operation == PTYX_OPERATION_OUTPUT) {
+    return PtyOutputException(
+      failure.message,
+      operation: publicOperation,
+      nativeCode: nativeCode,
+    );
   }
-
-  void _addSession(NativeSession session) {
-    _sessions[session._handle] = WeakReference(session);
-    _notifications.keepIsolateAlive = true;
+  if (failure.status == PTYX_STATUS_CLOSED ||
+      failure.status == PTYX_STATUS_STALE_HANDLE ||
+      failure.status == PTYX_STATUS_WRONG_STATE ||
+      failure.kind == PTYX_ERROR_CLOSED ||
+      failure.kind == PTYX_ERROR_STALE_HANDLE ||
+      failure.kind == PTYX_ERROR_WRONG_STATE) {
+    return PtyClosedException(
+      failure.message,
+      operation: publicOperation,
+      nativeCode: nativeCode,
+    );
   }
-
-  void _removeSession(int handle) {
-    if (_sessions.remove(handle) == null) {
-      return;
-    }
-    _credit.remove(handle);
-    if (_sessions.isEmpty) {
-      _scheduleIdleRelease();
-    }
-    _forgetSupervisedHandle(handle);
-  }
-
-  void _scheduleIdleRelease() {
-    if (_idleReleaseScheduled) return;
-    _idleReleaseScheduled = true;
-    Timer.run(() {
-      _idleReleaseScheduled = false;
-      if (_sessions.isEmpty && _pendingSpawns == 0) {
-        _notifications.keepIsolateAlive = false;
-        _stopSupervisorIfIdle();
-      }
-    });
-  }
-
-  void _onNotification(Object? message) {
-    if (message case [final int handle, final Uint8List bytes]) {
-      _session(handle)?._onOutput(bytes);
-      return;
-    }
-    _onEvent(message);
-  }
-
-  void _onEvent(Object? message) {
-    if (message is! int) {
-      return;
-    }
-    final kind = message & 7;
-    final payload = message >> 3;
-    switch (kind) {
-      case 0:
-        _session(payload)?._completeInputFailure();
-      case 1 || 2 || 5:
-        return;
-      case 3:
-        _session(payload)?._completeExit();
-      case 4:
-        _session(payload)?._completeOutput();
-      case 6:
-        _session(payload)?._completeOutputFailure();
-      case 7:
-        final session = _session(payload);
-        if (session != null) {
-          session._infrastructureLost = true;
-          session._fail(
-            const PtyInfrastructureException(
-              'native PTY infrastructure terminated',
-            ),
-          );
-        }
-    }
-  }
-
-  NativeSession? _session(int handle) {
-    final session = _sessions[handle]?.target;
-    if (session == null) {
-      _removeSession(handle);
-    }
-    return session;
-  }
+  return switch (failure.operation) {
+    PTYX_OPERATION_SPAWN => PtySpawnException(
+      failure.message,
+      operation: publicOperation,
+      nativeCode: nativeCode,
+    ),
+    PTYX_OPERATION_TERMINATE => PtySignalException(
+      failure.message,
+      operation: publicOperation,
+      nativeCode: nativeCode,
+    ),
+    PTYX_OPERATION_RESIZE => PtyResizeException(
+      failure.message,
+      operation: publicOperation,
+      nativeCode: nativeCode,
+    ),
+    PTYX_OPERATION_METADATA => PtyMetadataException(
+      failure.message,
+      operation: publicOperation,
+      nativeCode: nativeCode,
+    ),
+    PTYX_OPERATION_CLOSE => PtyCloseException(
+      failure.message,
+      operation: publicOperation,
+      nativeCode: nativeCode,
+    ),
+    _ => PtyException(
+      failure.message,
+      operation: publicOperation,
+      nativeCode: nativeCode,
+    ),
+  };
 }
 
-({int handle, int? nativeCode}) _spawnNative(
+PtyInputException _inputException(
+  NativeFailure failure, {
+  required String operation,
+}) => PtyInputException(
+  failure.message,
+  operation: operation,
+  nativeCode: failure.nativeCode == 0 ? null : failure.nativeCode,
+);
+
+PtyInputException _inputError(String operation, PtyInputException failure) =>
+    PtyInputException(
+      failure.message,
+      operation: operation,
+      nativeCode: failure.nativeCode,
+      context: failure.context,
+    );
+
+String _operationName(int operation) => switch (operation) {
+  PTYX_OPERATION_SPAWN => 'spawn',
+  PTYX_OPERATION_WRITE => 'write',
+  PTYX_OPERATION_OUTPUT => 'output',
+  PTYX_OPERATION_RESIZE => 'resize',
+  PTYX_OPERATION_TERMINATE => 'kill',
+  PTYX_OPERATION_METADATA => 'metadata',
+  PTYX_OPERATION_CLOSE => 'close',
+  _ => 'controller',
+};
+
+void _validateSpawnOptions(
   PtySpawnOptions options,
   String workingDirectory,
+  Map<String, String> effectiveEnvironment,
+  List<String> environment,
 ) {
-  return using((arena) {
-    Pointer<Char> nativeString(String value) {
-      if (value.contains('\u0000')) {
-        throw ArgumentError.value(value, 'value', 'must not contain NUL');
-      }
-      final bytes = utf8.encode(value);
-      final result = arena<Char>(bytes.length + 1);
-      result.cast<Uint8>().asTypedList(bytes.length + 1)
-        ..setRange(0, bytes.length, bytes)
-        ..[bytes.length] = 0;
-      return result;
-    }
-
-    Pointer<Pointer<Char>> nativeStrings(List<String> values) {
-      if (values.isEmpty) {
-        return nullptr;
-      }
-      final result = arena<Pointer<Char>>(values.length);
-      for (var index = 0; index < values.length; index++) {
-        result[index] = nativeString(values[index]);
-      }
-      return result;
-    }
-
-    final executable = nativeString(options.executable);
-    final arguments = nativeStrings(options.arguments);
-    final inheritEnvironment =
-        options.environmentMode == PtyEnvironmentMode.inherit;
-    final environment = _effectiveEnvironment(options);
-    for (final key in environment.keys) {
-      if (key.isEmpty || key.contains('=') || key.contains('\u0000')) {
-        throw ArgumentError.value(key, 'environment key', 'is invalid');
-      }
-    }
-    final environmentValues = environment.entries
-        .map((entry) => '${entry.key}=${entry.value}')
-        .toList(growable: false);
-    final nativeEnvironment = nativeStrings(environmentValues);
-    final cwd = nativeString(workingDirectory);
-    final handle = controllerSpawn(
-      executable,
-      arguments,
-      options.arguments.length,
-      nativeEnvironment,
-      environmentValues.length,
-      inheritEnvironment,
-      cwd,
-      options.initialSize.rows,
-      options.initialSize.columns,
-      options.initialSize.pixelWidth,
-      options.initialSize.pixelHeight,
-      options.maxBufferedInput,
-      options.maxBufferedOutput,
-    );
-    final nativeCode = handle == 0 ? controllerLastErrorCode() : 0;
-    return (handle: handle, nativeCode: nativeCode == 0 ? null : nativeCode);
-  });
-}
-
-void _validateSpawnOptions(PtySpawnOptions options, String workingDirectory) {
   _validateSize(options.initialSize, operation: 'spawn');
   if (options.arguments.length > 256) {
     throw PtyInvalidArgumentException(
@@ -1096,15 +769,14 @@ void _validateSpawnOptions(PtySpawnOptions options, String workingDirectory) {
       operation: 'spawn',
     );
   }
-  final environment = _effectiveEnvironment(options);
-  if (environment.length > 4096) {
+  if (effectiveEnvironment.length > 4096) {
     throw PtyInvalidArgumentException(
       'process spawn accepts at most 4096 environment entries',
       operation: 'spawn',
-      context: '${environment.length} entries',
+      context: '${effectiveEnvironment.length} entries',
     );
   }
-  for (final entry in environment.entries) {
+  for (final entry in effectiveEnvironment.entries) {
     if (entry.key.isEmpty ||
         entry.key.contains('=') ||
         entry.key.contains('\u0000') ||
@@ -1121,8 +793,8 @@ void _validateSpawnOptions(PtySpawnOptions options, String workingDirectory) {
   for (final argument in options.arguments) {
     encodedPayloadBytes += utf8.encode(argument).length;
   }
-  for (final entry in environment.entries) {
-    encodedPayloadBytes += utf8.encode('${entry.key}=${entry.value}').length;
+  for (final entry in environment) {
+    encodedPayloadBytes += utf8.encode(entry).length;
   }
   encodedPayloadBytes += utf8.encode(workingDirectory).length;
   if (encodedPayloadBytes > 64 * 1024) {
@@ -1135,11 +807,10 @@ void _validateSpawnOptions(PtySpawnOptions options, String workingDirectory) {
 }
 
 void _validateSize(PtySize size, {required String operation}) {
-  final maximumCells = Platform.isWindows ? 32767 : 65535;
   if (size.rows <= 0 ||
-      size.rows > maximumCells ||
+      size.rows > 32767 ||
       size.columns <= 0 ||
-      size.columns > maximumCells ||
+      size.columns > 32767 ||
       size.pixelWidth < 0 ||
       size.pixelWidth > 65535 ||
       size.pixelHeight < 0 ||

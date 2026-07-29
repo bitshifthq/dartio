@@ -1,13 +1,17 @@
 mod handles;
 mod spawn;
 
+use bytes::Bytes;
 use std::collections::{HashMap, VecDeque};
+use std::ffi::c_void;
 use std::io;
+use std::ops::{Deref, DerefMut};
 use std::pin::Pin;
 use std::ptr::null_mut;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -18,16 +22,24 @@ use windows_sys::Win32::Foundation::{
 use windows_sys::Win32::Storage::FileSystem::{ReadFile, WriteFile};
 use windows_sys::Win32::System::Console::ResizePseudoConsole;
 use windows_sys::Win32::System::JobObjects::TerminateJobObject;
-use windows_sys::Win32::System::Threading::{GetExitCodeProcess, WaitForSingleObject, INFINITE};
+use windows_sys::Win32::System::Threading::{
+    GetExitCodeProcess, RegisterWaitForSingleObject, UnregisterWaitEx, WaitForSingleObject,
+    INFINITE, WT_EXECUTEONLYONCE,
+};
 use windows_sys::Win32::System::IO::{
     CancelIoEx, CreateIoCompletionPort, GetQueuedCompletionStatus, PostQueuedCompletionStatus,
 };
 
 use self::handles::{IoOperation, OwnedHandle, OwnedPseudoConsole};
-pub(crate) use self::spawn::BrokerSpawn;
+use crate::control::{Control, ControlQueue, WakeGate};
 use crate::event::{self, Receiver as EventReceiver, Sender as EventSender};
 use crate::oneshot::{self, Sender as ReplySender};
-use crate::{GenerationRegistry, Notice, WRITE_INFRASTRUCTURE_FAILURE};
+use crate::session::{InputAdmission, QueuedOutput, SessionCore};
+use crate::spawn::BrokerSpawn;
+use crate::{
+    CloseResult, Completion, Failure, GenerationRegistry, Notice, SessionSnapshot,
+    WRITE_INFRASTRUCTURE_FAILURE,
+};
 
 const BYTE_QUANTUM: usize = 64 * 1024;
 const INTERACTIVE_BATCH: usize = 256;
@@ -36,11 +48,13 @@ const OUTPUT_DELAY: Duration = Duration::from_millis(1);
 const COMMAND_QUANTUM: usize = 64;
 const COMMAND_CAPACITY: usize = 1024;
 const NOTICE_CAPACITY: usize = 4096;
-const SESSION_NOTICE_RESERVATIONS: usize = 4;
+const SESSION_NOTICE_RESERVATIONS: usize = 5;
 const CLOSE_ADMISSION_CAPACITY: usize = 128;
 const QUARANTINED_IO_CAPACITY: usize = CLOSE_ADMISSION_CAPACITY * 2;
 const ACTIVATION_TIMEOUT: Duration = Duration::from_secs(5);
 const CLOSE_KEY_TAG: usize = 1_usize << (usize::BITS - 2);
+const NOTICE_AVAILABLE_KEY: usize = 1_usize << (usize::BITS - 1);
+const PROCESS_EXIT_KEY_TAG: usize = 1_usize << (usize::BITS - 3);
 static QUARANTINED_IO_OPERATIONS: AtomicUsize = AtomicUsize::new(0);
 static QUARANTINED_PSEUDOCONSOLES: AtomicUsize = AtomicUsize::new(0);
 
@@ -56,89 +70,27 @@ pub(crate) struct RuntimeCounters {
     pub(crate) notifications: u64,
 }
 
-struct QueuedInput {
-    bytes: Vec<u8>,
-}
-
-struct QueuedOutput {
-    bytes: Vec<u8>,
-    offset: usize,
-}
-
-struct InputAdmission {
-    capacity: usize,
-    state: Mutex<InputAdmissionState>,
-}
-
-struct InputAdmissionState {
-    bytes: usize,
-    open: bool,
-}
-
-impl InputAdmission {
-    fn new(capacity: usize) -> Self {
-        Self {
-            capacity,
-            state: Mutex::new(InputAdmissionState {
-                bytes: 0,
-                open: true,
-            }),
-        }
-    }
-
-    fn release(&self, bytes: usize) {
-        if let Ok(mut state) = self.state.lock() {
-            debug_assert!(bytes <= state.bytes);
-            state.bytes = state.bytes.saturating_sub(bytes);
-        }
-    }
-
-    fn close(&self) {
-        if let Ok(mut state) = self.state.lock() {
-            state.open = false;
-        }
-    }
-}
-
 struct Session {
+    core: SessionCore,
     input_pipe: OwnedHandle,
     output_pipe: OwnedHandle,
     pseudoconsole: Option<OwnedPseudoConsole>,
+    process_wait: Option<ProcessWait>,
     process: OwnedHandle,
     job: OwnedHandle,
     close_permit: Option<ClosePermit>,
     notice_reservations: Vec<NoticeReservation>,
     pid: u32,
     size: [u32; 4],
-    admission: Arc<InputAdmission>,
-    input_bytes: usize,
-    input: VecDeque<QueuedInput>,
     write: Option<Pin<Box<IoOperation>>>,
-    input_failed: bool,
-    input_failure_pending: bool,
-    input_failure_notified: bool,
-    output_capacity: usize,
-    output_bytes: usize,
-    output: VecDeque<QueuedOutput>,
-    output_outstanding: usize,
-    output_deadline: Option<Instant>,
     output_notified: bool,
-    output_done_notified: bool,
-    output_failed: bool,
+    output_notification_blocked: bool,
     output_failed_notified: bool,
     read: Option<Pin<Box<IoOperation>>>,
-    paused: bool,
-    output_eof: bool,
-    exit_status: Option<i64>,
     exit_notified: bool,
-    close_started: bool,
     pseudoconsole_close_started: bool,
     pseudoconsole_close_done: bool,
-    cleanup_failed: bool,
     broker_lost_notified: bool,
-    active: bool,
-    activation_deadline: Option<Instant>,
-    abandoned: bool,
 }
 
 impl Session {
@@ -148,111 +100,46 @@ impl Session {
         notice_reservations: Vec<NoticeReservation>,
         admission: Arc<InputAdmission>,
         output_capacity: usize,
+        _graceful_close_timeout: Duration,
     ) -> Self {
+        let mut core = SessionCore::new(admission, output_capacity);
+        core.activation_deadline = Some(Instant::now() + ACTIVATION_TIMEOUT);
         Self {
+            core,
             input_pipe: spawned.input,
             output_pipe: spawned.output,
             pseudoconsole: Some(spawned.pseudoconsole),
+            process_wait: None,
             process: spawned.process,
             job: spawned.job,
             close_permit: Some(close_permit),
             notice_reservations,
             pid: spawned.pid,
             size: spawned.size,
-            admission,
-            input_bytes: 0,
-            input: VecDeque::new(),
             write: None,
-            input_failed: false,
-            input_failure_pending: false,
-            input_failure_notified: false,
-            output_capacity,
-            output_bytes: 0,
-            output: VecDeque::new(),
-            output_outstanding: 0,
-            output_deadline: None,
             output_notified: false,
-            output_done_notified: false,
-            output_failed: false,
+            output_notification_blocked: false,
             output_failed_notified: false,
             read: None,
-            paused: true,
-            output_eof: false,
-            exit_status: None,
             exit_notified: false,
-            close_started: false,
             pseudoconsole_close_started: false,
             pseudoconsole_close_done: false,
-            cleanup_failed: false,
             broker_lost_notified: false,
-            active: false,
-            activation_deadline: Some(Instant::now() + ACTIVATION_TIMEOUT),
-            abandoned: false,
         }
     }
 
-    fn enqueue_write(&mut self, bytes: Vec<u8>) -> Result<(), Vec<u8>> {
-        if self.close_started || self.input_failed || bytes.is_empty() {
-            return Err(bytes);
-        }
-        self.input_bytes += bytes.len();
-        self.input.push_back(QueuedInput { bytes });
-        Ok(())
-    }
-
-    fn pull(&mut self, maximum: usize) -> Vec<u8> {
-        let amount = maximum.min(self.output_bytes);
-        if self
-            .output
-            .front()
-            .is_some_and(|front| front.offset == 0 && front.bytes.len() == amount)
-        {
-            let bytes = self
-                .output
-                .pop_front()
-                .expect("output byte count is exact")
-                .bytes;
-            self.output_bytes -= bytes.len();
-            self.output_outstanding += bytes.len();
-            if self.output.is_empty() {
-                self.output_deadline = None;
-            }
-            self.output_notified = false;
-            return bytes;
-        }
-        let mut bytes = Vec::with_capacity(amount);
-        while bytes.len() < amount {
-            let front = self.output.front_mut().expect("output byte count is exact");
-            let available = front.bytes.len() - front.offset;
-            let take = available.min(amount - bytes.len());
-            bytes.extend_from_slice(&front.bytes[front.offset..front.offset + take]);
-            front.offset += take;
-            if front.offset == front.bytes.len() {
-                self.output.pop_front();
-            }
-        }
-        self.output_bytes -= bytes.len();
-        self.output_outstanding += bytes.len();
-        if self.output.is_empty() {
-            self.output_deadline = None;
-        }
+    fn pull(&mut self, maximum: usize) -> Bytes {
+        let bytes = self.core.pull_output(maximum);
         self.output_notified = false;
         bytes
     }
 
     fn credit(&mut self, bytes: usize) -> bool {
-        if bytes > self.output_outstanding {
-            return false;
-        }
-        self.output_outstanding -= bytes;
-        if bytes != 0 {
+        let credited = self.core.credit(bytes);
+        if credited && bytes != 0 {
             self.output_notified = false;
         }
-        true
-    }
-
-    fn output_total(&self) -> usize {
-        self.output_bytes + self.output_outstanding
+        credited
     }
 
     fn terminal(&self) -> bool {
@@ -263,6 +150,20 @@ impl Session {
             && self.read.is_none()
             && self.write.is_none()
             && self.pseudoconsole_close_done
+    }
+}
+
+impl Deref for Session {
+    type Target = SessionCore;
+
+    fn deref(&self) -> &Self::Target {
+        &self.core
+    }
+}
+
+impl DerefMut for Session {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.core
     }
 }
 
@@ -313,16 +214,11 @@ enum Command {
     },
     Write {
         handle: u64,
-        bytes: Vec<u8>,
+        bytes: Bytes,
         admission: Arc<InputAdmission>,
     },
-    CreditAsync {
+    CancelOutput {
         handle: u64,
-        bytes: usize,
-    },
-    Pause {
-        handle: u64,
-        paused: bool,
         reply: ReplySender<bool>,
     },
     ExitStatus {
@@ -336,6 +232,10 @@ enum Command {
     Size {
         handle: u64,
         reply: ReplySender<Option<[u32; 4]>>,
+    },
+    Snapshot {
+        handle: u64,
+        reply: ReplySender<Option<SessionSnapshot>>,
     },
     Resize {
         handle: u64,
@@ -357,18 +257,16 @@ enum Command {
         handle: u64,
         reply: ReplySender<bool>,
     },
-    Destroy {
+    CloseStart {
         handle: u64,
+        completion: ReplySender<CloseResult>,
         reply: ReplySender<bool>,
-    },
-    Abandon {
-        handle: u64,
     },
     Shutdown,
 }
 
 #[derive(Clone)]
-struct IocpSender(Arc<OwnedHandle>);
+struct IocpSender(Arc<OwnedHandle>, Arc<WakeGate>);
 
 unsafe impl Send for IocpSender {}
 unsafe impl Sync for IocpSender {}
@@ -379,12 +277,93 @@ impl IocpSender {
     }
 
     fn post_command(&self) -> io::Result<()> {
-        if unsafe { PostQueuedCompletionStatus(self.raw(), 0, 0, null_mut()) } == 0 {
+        if self.1.request() {
+            if let Err(error) = self.post_key(0) {
+                self.1.clear();
+                return Err(error);
+            }
+        }
+        Ok(())
+    }
+
+    fn post_notice_available(&self) -> io::Result<()> {
+        self.post_key(NOTICE_AVAILABLE_KEY)
+    }
+
+    fn post_key(&self, key: usize) -> io::Result<()> {
+        if unsafe { PostQueuedCompletionStatus(self.raw(), 0, key, null_mut()) } == 0 {
             Err(io::Error::last_os_error())
         } else {
             Ok(())
         }
     }
+
+    fn clear_command(&self) {
+        self.1.clear();
+    }
+}
+
+struct ProcessWaitContext {
+    iocp: IocpSender,
+    handle: u64,
+}
+
+struct ProcessWait {
+    wait: HANDLE,
+    context: Option<Box<ProcessWaitContext>>,
+}
+
+// Registered wait handles and their heap-stable callback contexts may be
+// transferred between Windows threads. Drop synchronously unregisters before
+// releasing the context.
+unsafe impl Send for ProcessWait {}
+
+impl ProcessWait {
+    fn register(process: HANDLE, handle: u64, iocp: &IocpSender) -> io::Result<Self> {
+        let mut context = Box::new(ProcessWaitContext {
+            iocp: iocp.clone(),
+            handle,
+        });
+        let mut wait = null_mut();
+        let registered = unsafe {
+            RegisterWaitForSingleObject(
+                &mut wait,
+                process,
+                Some(process_wait_callback),
+                (&mut *context as *mut ProcessWaitContext).cast(),
+                INFINITE,
+                WT_EXECUTEONLYONCE,
+            )
+        };
+        if registered == 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(Self {
+                wait,
+                context: Some(context),
+            })
+        }
+    }
+}
+
+impl Drop for ProcessWait {
+    fn drop(&mut self) {
+        if unsafe { UnregisterWaitEx(self.wait, INVALID_HANDLE_VALUE) } == 0 {
+            // A failed unregister cannot prove that the callback released its
+            // raw context pointer. Leak the small context instead of risking
+            // use-after-free during exceptional teardown.
+            if let Some(context) = self.context.take() {
+                std::mem::forget(context);
+            }
+        }
+    }
+}
+
+unsafe extern "system" fn process_wait_callback(context: *mut c_void, _timed_out: bool) {
+    let context = unsafe { &*(context.cast::<ProcessWaitContext>()) };
+    let _ = context
+        .iocp
+        .post_key(context.handle as usize | PROCESS_EXIT_KEY_TAG);
 }
 
 struct NoticeBudget {
@@ -473,20 +452,72 @@ impl NoticeEmitter {
         counters.notifications += 1;
         true
     }
+
+    fn emit_without_metrics(&self, reservation: NoticeReservation, notice: Notice) -> bool {
+        if self.sender.send(notice.handle(), notice).is_err() {
+            return false;
+        }
+        reservation.transfer();
+        true
+    }
 }
 
-pub(crate) struct NoticeReceiver {
+pub struct NoticeReceiver {
     receiver: EventReceiver<Notice>,
     budget: Arc<NoticeBudget>,
     iocp: IocpSender,
 }
 
+pub struct SessionNoticeReceiver {
+    receiver: crate::SessionReceiver<Notice>,
+    budget: Arc<NoticeBudget>,
+    iocp: IocpSender,
+}
+
 impl NoticeReceiver {
-    pub(crate) fn recv(&self) -> Option<(u64, Notice)> {
+    pub fn recv(&self) -> Option<(u64, Notice)> {
         let notice = self.receiver.recv()?;
         self.budget.release();
-        let _ = self.iocp.post_command();
+        let _ = self.iocp.post_notice_available();
         Some(notice)
+    }
+
+    pub fn session(&self, handle: u64) -> Option<SessionNoticeReceiver> {
+        Some(SessionNoticeReceiver {
+            receiver: self.receiver.session(handle)?,
+            budget: Arc::clone(&self.budget),
+            iocp: self.iocp.clone(),
+        })
+    }
+}
+
+impl SessionNoticeReceiver {
+    pub fn recv(&self) -> Option<Notice> {
+        let notice = self.receiver.recv()?;
+        self.budget.release();
+        let _ = self.iocp.post_notice_available();
+        Some(notice)
+    }
+
+    pub fn try_recv(&self) -> Result<Option<Notice>, crate::ReceiverClosed> {
+        let notice = self.receiver.try_recv()?;
+        if notice.is_some() {
+            self.budget.release();
+            let _ = self.iocp.post_notice_available();
+        }
+        Ok(notice)
+    }
+
+    pub fn poll_recv(&self, context: &mut Context<'_>) -> Poll<Option<Notice>> {
+        match self.receiver.poll_recv(context) {
+            Poll::Ready(Some(notice)) => {
+                self.budget.release();
+                let _ = self.iocp.post_notice_available();
+                Poll::Ready(Some(notice))
+            }
+            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Pending => Poll::Pending,
+        }
     }
 }
 
@@ -531,6 +562,109 @@ struct CloseTask {
     pseudoconsole: OwnedPseudoConsole,
     permit: ClosePermit,
     iocp: IocpSender,
+}
+
+struct SpawnTask {
+    config: BrokerSpawn,
+    input_capacity: usize,
+    output_capacity: usize,
+    target: SpawnTarget,
+}
+
+enum SpawnTarget {
+    Completion(ReplySender<io::Result<u64>>),
+    Notice {
+        request: u64,
+        reservation: NoticeReservation,
+    },
+}
+
+struct SpawnPool {
+    sender: Mutex<Option<SyncSender<SpawnTask>>>,
+    thread: Mutex<Option<JoinHandle<()>>>,
+}
+
+impl SpawnPool {
+    fn new(
+        commands: SyncSender<Command>,
+        iocp: IocpSender,
+        closer: CloserPool,
+        notices: NoticeEmitter,
+        controls: Arc<ControlQueue>,
+    ) -> io::Result<Self> {
+        let (sender, receiver) = mpsc::sync_channel::<SpawnTask>(64);
+        let thread = thread::Builder::new()
+            .name("ptyx-spawn".to_owned())
+            .spawn(move || {
+                while let Ok(task) = receiver.recv() {
+                    let result = stage_spawn(
+                        &commands,
+                        &iocp,
+                        &closer,
+                        &notices,
+                        task.config,
+                        task.input_capacity,
+                        task.output_capacity,
+                    );
+                    let staged = result.as_ref().ok().copied();
+                    let delivered = match task.target {
+                        SpawnTarget::Completion(reply) => reply.send(result),
+                        SpawnTarget::Notice {
+                            request,
+                            reservation,
+                        } => {
+                            let notice = match result {
+                                Ok(handle) => Notice::SpawnReady { request, handle },
+                                Err(error) => Notice::SpawnFailed {
+                                    request,
+                                    failure: Failure::from(&error),
+                                },
+                            };
+                            notices.emit_without_metrics(reservation, notice)
+                        }
+                    };
+                    if !delivered {
+                        if let Some(handle) = staged {
+                            controls.push(Control::Abandon { handle });
+                            let _ = iocp.post_command();
+                        }
+                    }
+                }
+            })?;
+        Ok(Self {
+            sender: Mutex::new(Some(sender)),
+            thread: Mutex::new(Some(thread)),
+        })
+    }
+
+    fn submit(&self, task: SpawnTask) -> io::Result<()> {
+        let sender = self
+            .sender
+            .lock()
+            .map_err(|_| io::Error::other("spawn queue lock poisoned"))?
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "runtime is shutting down"))?;
+        sender.try_send(task).map_err(|error| match error {
+            TrySendError::Full(_) => {
+                io::Error::new(io::ErrorKind::WouldBlock, "spawn queue is full")
+            }
+            TrySendError::Disconnected(_) => {
+                io::Error::new(io::ErrorKind::BrokenPipe, "spawn worker stopped")
+            }
+        })
+    }
+
+    fn shutdown(&self) -> bool {
+        if let Ok(mut sender) = self.sender.lock() {
+            sender.take();
+        }
+        self.thread
+            .lock()
+            .ok()
+            .and_then(|mut thread| thread.take())
+            .is_none_or(|thread| thread.join().is_ok())
+    }
 }
 
 #[derive(Clone)]
@@ -604,23 +738,24 @@ impl CloserPool {
     }
 }
 
-pub(crate) struct IntegratedRuntime {
+pub struct IntegratedRuntime {
     commands: SyncSender<Command>,
     admissions: Arc<Mutex<HashMap<u64, Arc<InputAdmission>>>>,
     notice_emitter: NoticeEmitter,
     notices: Mutex<Option<NoticeReceiver>>,
     iocp: IocpSender,
-    closer: CloserPool,
+    controls: Arc<ControlQueue>,
+    spawn_pool: SpawnPool,
     thread: Mutex<Option<JoinHandle<()>>>,
 }
 
 impl IntegratedRuntime {
-    pub(crate) fn try_new() -> io::Result<Self> {
+    pub fn try_new() -> io::Result<Self> {
         spawn::validate_windows_build()?;
         let iocp = Arc::new(OwnedHandle::new(unsafe {
             CreateIoCompletionPort(INVALID_HANDLE_VALUE, null_mut(), 0, 1)
         })?);
-        let iocp_sender = IocpSender(Arc::clone(&iocp));
+        let iocp_sender = IocpSender(Arc::clone(&iocp), Arc::new(WakeGate::new()));
         let (command_sender, command_receiver) = mpsc::sync_channel(COMMAND_CAPACITY);
         let (notice_sender, notice_receiver) = event::channel();
         let notice_budget = NoticeBudget::new(NOTICE_CAPACITY);
@@ -634,6 +769,14 @@ impl IntegratedRuntime {
             iocp: iocp_sender.clone(),
         };
         let closer = CloserPool::new();
+        let controls = Arc::new(ControlQueue::new());
+        let spawn_pool = SpawnPool::new(
+            command_sender.clone(),
+            iocp_sender.clone(),
+            closer.clone(),
+            notice_emitter.clone(),
+            Arc::clone(&controls),
+        )?;
         let admissions = Arc::new(Mutex::new(HashMap::new()));
         let thread = thread::Builder::new()
             .name("ptyx-windows-iocp".to_owned())
@@ -642,6 +785,7 @@ impl IntegratedRuntime {
                 let notice_emitter = notice_emitter.clone();
                 let closer = closer.clone();
                 let admissions = Arc::clone(&admissions);
+                let controls = Arc::clone(&controls);
                 move || {
                     reactor(
                         iocp,
@@ -650,6 +794,7 @@ impl IntegratedRuntime {
                         notice_emitter,
                         closer,
                         admissions,
+                        controls,
                     );
                 }
             })?;
@@ -659,61 +804,87 @@ impl IntegratedRuntime {
             notice_emitter,
             notices: Mutex::new(Some(notices)),
             iocp: iocp_sender,
-            closer,
+            controls,
+            spawn_pool,
             thread: Mutex::new(Some(thread)),
         })
     }
 
-    pub(crate) fn take_notifications(&self) -> Option<NoticeReceiver> {
+    pub fn take_notifications(&self) -> Option<NoticeReceiver> {
         self.notices.lock().ok()?.take()
     }
 
-    pub(crate) fn spawn_staged(
+    pub fn spawn_staged(
         &self,
         config: BrokerSpawn,
         input_capacity: usize,
         output_capacity: usize,
     ) -> io::Result<u64> {
-        if input_capacity == 0 || output_capacity == 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "capacities must be nonzero",
-            ));
-        }
-        let close_permit = self.closer.try_reserve().ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::WouldBlock,
-                "ConPTY close isolation capacity is exhausted",
-            )
+        self.spawn_start(config, input_capacity, output_capacity)?
+            .wait()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "spawn worker stopped"))?
+    }
+
+    pub fn spawn_start(
+        &self,
+        config: BrokerSpawn,
+        input_capacity: usize,
+        output_capacity: usize,
+    ) -> io::Result<Completion<io::Result<u64>>> {
+        validate_capacities(input_capacity, output_capacity)?;
+        config.validate()?;
+        let (reply, receiver) = oneshot::channel();
+        self.spawn_pool.submit(SpawnTask {
+            config,
+            input_capacity,
+            output_capacity,
+            target: SpawnTarget::Completion(reply),
         })?;
-        let notice_reservations = self.notice_emitter.reserve_session().ok_or_else(|| {
+        Ok(Completion::new(receiver))
+    }
+
+    pub fn spawn_start_notified(
+        &self,
+        request: u64,
+        config: BrokerSpawn,
+        input_capacity: usize,
+        output_capacity: usize,
+    ) -> io::Result<()> {
+        validate_capacities(input_capacity, output_capacity)?;
+        config.validate()?;
+        let reservation = self.notice_emitter.try_reserve().ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::WouldBlock,
                 "native notification capacity is exhausted",
             )
         })?;
-        let spawned = spawn::spawn(config)?;
-        let admission = Arc::new(InputAdmission::new(input_capacity));
-        let session = Session::from_spawned(
-            spawned,
-            close_permit,
-            notice_reservations,
-            admission,
+        self.spawn_pool.submit(SpawnTask {
+            config,
+            input_capacity,
             output_capacity,
-        );
-        self.request_result(|reply| Command::Add {
-            session: Box::new(session),
-            reply,
-        })?
+            target: SpawnTarget::Notice {
+                request,
+                reservation,
+            },
+        })
     }
 
-    pub(crate) fn activate(&self, handle: u64) -> bool {
+    pub fn activate(&self, handle: u64) -> bool {
         self.request_result(|reply| Command::Activate { handle, reply })
             .and_then(|result| result)
             .is_ok()
     }
 
-    pub(crate) fn write(&self, handle: u64, bytes: Vec<u8>) -> i64 {
+    pub fn write(&self, handle: u64, bytes: Bytes) -> i64 {
+        let length = bytes.len();
+        self.write_with(handle, length, || bytes)
+    }
+
+    pub fn write_copy(&self, handle: u64, bytes: &[u8]) -> i64 {
+        self.write_with(handle, bytes.len(), || Bytes::copy_from_slice(bytes))
+    }
+
+    fn write_with(&self, handle: u64, length: usize, make_bytes: impl FnOnce() -> Bytes) -> i64 {
         let admission = match self.admissions.lock() {
             Ok(admissions) => match admissions.get(&handle).cloned() {
                 Some(admission) => admission,
@@ -721,7 +892,6 @@ impl IntegratedRuntime {
             },
             Err(_) => return WRITE_INFRASTRUCTURE_FAILURE,
         };
-        let length = bytes.len();
         let mut state = match admission.state.lock() {
             Ok(state) => state,
             Err(_) => return WRITE_INFRASTRUCTURE_FAILURE,
@@ -729,10 +899,16 @@ impl IntegratedRuntime {
         if !state.open {
             return -1;
         }
-        if length == 0 || state.bytes.saturating_add(length) > admission.capacity {
+        if length == 0
+            || state.bytes.saturating_add(length) > admission.capacity
+            || state.entries >= admission.entry_capacity()
+        {
             return 0;
         }
+        let bytes = make_bytes();
+        debug_assert_eq!(bytes.len(), length);
         state.bytes += length;
+        state.entries += 1;
         let command = Command::Write {
             handle,
             bytes,
@@ -740,6 +916,7 @@ impl IntegratedRuntime {
         };
         if let Err(error) = self.commands.try_send(command) {
             state.bytes -= length;
+            state.entries -= 1;
             return match error {
                 TrySendError::Full(_) => 0,
                 TrySendError::Disconnected(_) => {
@@ -753,45 +930,42 @@ impl IntegratedRuntime {
         1
     }
 
-    pub(crate) fn credit_async(&self, handle: u64, bytes: usize) -> bool {
-        if self
-            .commands
-            .try_send(Command::CreditAsync { handle, bytes })
-            .is_err()
-        {
-            return false;
-        }
-        self.iocp.post_command().is_ok()
+    pub fn credit_async(&self, handle: u64, bytes: usize) -> bool {
+        self.controls.push(Control::Credit { handle, bytes });
+        let _ = self.iocp.post_command();
+        true
     }
 
-    pub(crate) fn pause(&self, handle: u64, paused: bool) -> bool {
-        self.request_result(|reply| Command::Pause {
-            handle,
-            paused,
-            reply,
-        })
-        .unwrap_or(false)
+    pub fn cancel_output(&self, handle: u64) -> bool {
+        self.request_result(|reply| Command::CancelOutput { handle, reply })
+            .unwrap_or(false)
     }
 
-    pub(crate) fn exit_status(&self, handle: u64) -> Option<i64> {
+    pub fn exit_status(&self, handle: u64) -> Option<i64> {
         self.request_result(|reply| Command::ExitStatus { handle, reply })
             .ok()
             .flatten()
     }
 
-    pub(crate) fn pid(&self, handle: u64) -> Option<i64> {
+    pub fn pid(&self, handle: u64) -> Option<i64> {
         self.request_result(|reply| Command::Pid { handle, reply })
             .ok()
             .flatten()
     }
 
-    pub(crate) fn size(&self, handle: u64) -> Option<[u32; 4]> {
+    pub fn size(&self, handle: u64) -> Option<[u32; 4]> {
         self.request_result(|reply| Command::Size { handle, reply })
             .ok()
             .flatten()
     }
 
-    pub(crate) fn resize(&self, handle: u64, size: [u32; 4]) -> bool {
+    pub fn snapshot(&self, handle: u64) -> Option<SessionSnapshot> {
+        self.request_result(|reply| Command::Snapshot { handle, reply })
+            .ok()
+            .flatten()
+    }
+
+    pub fn resize(&self, handle: u64, size: [u32; 4]) -> bool {
         self.request_result(|reply| Command::Resize {
             handle,
             size,
@@ -800,19 +974,23 @@ impl IntegratedRuntime {
         .unwrap_or(false)
     }
 
-    pub(crate) fn mode(&self, _handle: u64) -> Option<[bool; 3]> {
+    pub fn mode(&self, _handle: u64) -> Option<[bool; 3]> {
         self.request_result(|reply| Command::Mode { reply })
             .ok()
             .flatten()
     }
 
-    pub(crate) fn tty_name(&self, _handle: u64) -> Option<Vec<u8>> {
+    pub fn observe_mode(&self, _handle: u64, _observe: bool) -> bool {
+        false
+    }
+
+    pub fn tty_name(&self, _handle: u64) -> Option<Vec<u8>> {
         self.request_result(|reply| Command::TtyName { reply })
             .ok()
             .flatten()
     }
 
-    pub(crate) fn signal(&self, handle: u64, signal: i32) -> Option<bool> {
+    pub fn signal(&self, handle: u64, signal: i32) -> Option<bool> {
         self.request_result(|reply| Command::Signal {
             handle,
             signal,
@@ -822,7 +1000,7 @@ impl IntegratedRuntime {
         .flatten()
     }
 
-    pub(crate) fn close(&self, handle: u64) -> bool {
+    pub fn close(&self, handle: u64) -> bool {
         if let Some(admission) = self
             .admissions
             .lock()
@@ -835,19 +1013,7 @@ impl IntegratedRuntime {
             .unwrap_or(false)
     }
 
-    pub(crate) fn destroy(&self, handle: u64) -> bool {
-        let destroyed = self
-            .request_result(|reply| Command::Destroy { handle, reply })
-            .unwrap_or(false);
-        if destroyed {
-            if let Ok(mut admissions) = self.admissions.lock() {
-                admissions.remove(&handle);
-            }
-        }
-        destroyed
-    }
-
-    pub(crate) fn try_abandon(&self, handle: u64) -> bool {
+    pub fn close_start(&self, handle: u64) -> io::Result<Completion<CloseResult>> {
         if let Some(admission) = self
             .admissions
             .lock()
@@ -856,9 +1022,28 @@ impl IntegratedRuntime {
         {
             admission.close();
         }
-        if self.commands.try_send(Command::Abandon { handle }).is_err() {
-            return false;
+        let (completion, receiver) = oneshot::channel();
+        let accepted = self.request_result(|reply| Command::CloseStart {
+            handle,
+            completion,
+            reply,
+        })?;
+        if !accepted {
+            return Err(io::Error::new(io::ErrorKind::NotFound, "stale session"));
         }
+        Ok(Completion::new(receiver))
+    }
+
+    pub fn try_abandon(&self, handle: u64) -> bool {
+        if let Some(admission) = self
+            .admissions
+            .lock()
+            .ok()
+            .and_then(|admissions| admissions.get(&handle).cloned())
+        {
+            admission.close();
+        }
+        self.controls.push(Control::Abandon { handle });
         let _ = self.iocp.post_command();
         true
     }
@@ -882,15 +1067,77 @@ impl Drop for IntegratedRuntime {
 }
 
 impl IntegratedRuntime {
-    pub(crate) fn shutdown(&self) -> bool {
+    pub fn shutdown(&self) -> bool {
+        let spawn = self.spawn_pool.shutdown();
         let _ = self.commands.send(Command::Shutdown);
         let _ = self.iocp.post_command();
-        self.thread
-            .lock()
-            .ok()
-            .and_then(|mut value| value.take())
-            .is_none_or(|thread| thread.join().is_ok())
+        spawn
+            && self
+                .thread
+                .lock()
+                .ok()
+                .and_then(|mut value| value.take())
+                .is_none_or(|thread| thread.join().is_ok())
     }
+}
+
+fn validate_capacities(input_capacity: usize, output_capacity: usize) -> io::Result<()> {
+    if input_capacity == 0
+        || input_capacity > 64 * 1024 * 1024
+        || output_capacity == 0
+        || output_capacity > 64 * 1024 * 1024
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "capacities must be in 1..=67108864",
+        ));
+    }
+    Ok(())
+}
+
+fn stage_spawn(
+    commands: &SyncSender<Command>,
+    iocp: &IocpSender,
+    closer: &CloserPool,
+    notices: &NoticeEmitter,
+    config: BrokerSpawn,
+    input_capacity: usize,
+    output_capacity: usize,
+) -> io::Result<u64> {
+    let close_permit = closer.try_reserve().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::WouldBlock,
+            "ConPTY close isolation capacity is exhausted",
+        )
+    })?;
+    let notice_reservations = notices.reserve_session().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::WouldBlock,
+            "native notification capacity is exhausted",
+        )
+    })?;
+    let graceful_close_timeout = config.graceful_close_timeout;
+    let spawned = spawn::spawn(config)?;
+    let admission = Arc::new(InputAdmission::new(input_capacity));
+    let session = Session::from_spawned(
+        spawned,
+        close_permit,
+        notice_reservations,
+        admission,
+        output_capacity,
+        graceful_close_timeout,
+    );
+    let (reply, receiver) = oneshot::channel();
+    commands
+        .send(Command::Add {
+            session: Box::new(session),
+            reply,
+        })
+        .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "ptyx reactor stopped"))?;
+    iocp.post_command()?;
+    receiver
+        .recv()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "ptyx reactor stopped"))?
 }
 
 fn reactor(
@@ -900,9 +1147,11 @@ fn reactor(
     notices: NoticeEmitter,
     closer: CloserPool,
     admissions: Arc<Mutex<HashMap<u64, Arc<InputAdmission>>>>,
+    controls: Arc<ControlQueue>,
 ) {
     let mut sessions = GenerationRegistry::<Session>::new();
     let mut counters = RuntimeCounters::default();
+    let mut control_scratch = VecDeque::new();
     loop {
         refresh_due_outputs(
             iocp.raw(),
@@ -912,6 +1161,7 @@ fn reactor(
             &mut sessions,
             &mut counters,
         );
+        reap_closed(&notices, &mut sessions, &mut counters, &admissions);
         reap_abandoned(
             iocp.raw(),
             &iocp_sender,
@@ -920,14 +1170,6 @@ fn reactor(
             &mut sessions,
             &mut counters,
             &admissions,
-        );
-        poll_process_exits(
-            iocp.raw(),
-            &iocp_sender,
-            &closer,
-            &notices,
-            &mut sessions,
-            &mut counters,
         );
         let timeout = output_timeout(&sessions);
         let mut transferred = 0;
@@ -958,8 +1200,40 @@ fn reactor(
                 }
                 continue;
             }
+            if key == NOTICE_AVAILABLE_KEY {
+                for handle in sessions.handles() {
+                    if let Some(session) = sessions.get_mut(handle) {
+                        session.output_notification_blocked = false;
+                    }
+                }
+                continue;
+            }
+            if key & PROCESS_EXIT_KEY_TAG != 0 {
+                let handle = (key & !PROCESS_EXIT_KEY_TAG) as u64;
+                handle_process_exit(
+                    iocp.raw(),
+                    &iocp_sender,
+                    handle,
+                    &closer,
+                    &notices,
+                    &mut sessions,
+                    &mut counters,
+                );
+                continue;
+            }
             if key == 0 {
+                iocp_sender.clear_command();
                 counters.command_wakeups += 1;
+                process_controls(
+                    iocp.raw(),
+                    &iocp_sender,
+                    &controls,
+                    &mut control_scratch,
+                    &closer,
+                    &notices,
+                    &mut sessions,
+                    &mut counters,
+                );
                 if process_commands(
                     iocp.raw(),
                     &iocp_sender,
@@ -1013,7 +1287,7 @@ fn process_commands(
             Command::Add { session, reply } => {
                 let admission = Arc::clone(&session.admission);
                 let handle = sessions.insert(*session);
-                let result = associate_session(
+                let mut result = associate_session(
                     &iocp_sender.0,
                     handle,
                     sessions.get_mut(handle).expect("new session is present"),
@@ -1041,6 +1315,22 @@ fn process_commands(
                         sessions,
                         counters,
                     );
+                } else if let Some(session) = sessions.get_mut(handle) {
+                    match ProcessWait::register(session.process.raw(), handle, iocp_sender) {
+                        Ok(wait) => session.process_wait = Some(wait),
+                        Err(error) => {
+                            unsafe {
+                                TerminateJobObject(session.job.raw(), 1);
+                            }
+                            result = Err(error);
+                        }
+                    }
+                }
+                if result.is_err() && sessions.get(handle).is_some() {
+                    if let Some(session) = sessions.get_mut(handle) {
+                        force_pseudoconsole_close(iocp_sender, handle, session, closer);
+                    }
+                    sessions.remove(handle);
                 }
                 if result.is_ok() {
                     if let Ok(mut values) = admissions.lock() {
@@ -1061,13 +1351,21 @@ fn process_commands(
                             ));
                         }
                         session.active = true;
+                        session.paused = false;
                         session.activation_deadline = None;
                         if session.input_failure_pending {
                             notify_input_failure(handle, session, notices, counters);
                         }
-                        if session.exit_status.is_some() && !session.exit_notified {
-                            session.exit_notified = true;
-                            send_lifecycle_notice(session, notices, Notice::Exit(handle), counters);
+                        if !session.exit_notified {
+                            if let Some(status) = session.exit_status {
+                                session.exit_notified = true;
+                                send_lifecycle_notice(
+                                    session,
+                                    notices,
+                                    Notice::Exit { handle, status },
+                                    counters,
+                                );
+                            }
                         }
                         Ok(())
                     });
@@ -1089,12 +1387,12 @@ fn process_commands(
                 let accepted = if let Some(session) = sessions.get_mut(handle) {
                     let accepted = session.enqueue_write(bytes).is_ok();
                     if !accepted {
-                        admission.release(length);
+                        admission.release(length, 1);
                         notify_input_failure(handle, session, notices, counters);
                     }
                     accepted
                 } else {
-                    admission.release(length);
+                    admission.release(length, 1);
                     false
                 };
                 if accepted {
@@ -1103,25 +1401,14 @@ fn process_commands(
                     }
                 }
             }
-            Command::CreditAsync { handle, bytes } => {
-                if let Some(session) = sessions.get_mut(handle) {
-                    if session.credit(bytes) {
-                        ensure_read(iocp, handle, session, notices, counters);
-                        refresh_output(handle, session, notices, counters);
-                    }
-                }
-            }
-            Command::Pause {
-                handle,
-                paused,
-                reply,
-            } => {
+            Command::CancelOutput { handle, reply } => {
                 let found = if let Some(session) = sessions.get_mut(handle) {
-                    session.paused = paused;
-                    if !paused {
-                        start_pseudoconsole_close(iocp_sender, handle, session, closer);
-                        ensure_read(iocp, handle, session, notices, counters);
-                    }
+                    session.discarding = true;
+                    session.paused = false;
+                    session.output.clear();
+                    session.output_bytes = 0;
+                    session.output_deadline = None;
+                    ensure_read(iocp, handle, session, notices, counters);
                     true
                 } else {
                     false
@@ -1136,6 +1423,15 @@ fn process_commands(
             }
             Command::Size { handle, reply } => {
                 let _ = reply.send(sessions.get(handle).map(|session| session.size));
+            }
+            Command::Snapshot { handle, reply } => {
+                let snapshot = sessions.get(handle).map(|session| SessionSnapshot {
+                    pid: i64::from(session.pid),
+                    size: session.size,
+                    mode: None,
+                    tty_name: None,
+                });
+                let _ = reply.send(snapshot);
             }
             Command::Resize {
                 handle,
@@ -1213,11 +1509,61 @@ fn process_commands(
                 });
                 let _ = reply.send(closed);
             }
-            Command::Destroy { handle, reply } => {
-                let removable = sessions.get(handle).is_some_and(Session::terminal);
-                let _ = reply.send(removable && sessions.remove(handle).is_some());
+            Command::CloseStart {
+                handle,
+                completion,
+                reply,
+            } => {
+                let accepted = sessions.get_mut(handle).is_some_and(|session| {
+                    session.close_waiters.push(completion);
+                    if !session.close_started {
+                        session.close_started = true;
+                        session.paused = false;
+                        session.output.clear();
+                        session.output_bytes = 0;
+                        session.output_outstanding = 0;
+                        fail_input(handle, session, notices, counters);
+                        unsafe {
+                            TerminateJobObject(session.job.raw(), 1);
+                        }
+                        cancel_write(session);
+                    }
+                    start_pseudoconsole_close(iocp_sender, handle, session, closer);
+                    ensure_read(iocp, handle, session, notices, counters);
+                    true
+                });
+                let _ = reply.send(accepted);
             }
-            Command::Abandon { handle } => {
+            Command::Shutdown => return true,
+        }
+    }
+    let _ = iocp_sender.post_command();
+    false
+}
+
+#[allow(clippy::too_many_arguments)]
+fn process_controls(
+    iocp: HANDLE,
+    iocp_sender: &IocpSender,
+    controls: &ControlQueue,
+    scratch: &mut VecDeque<Control>,
+    closer: &CloserPool,
+    notices: &NoticeEmitter,
+    sessions: &mut GenerationRegistry<Session>,
+    counters: &mut RuntimeCounters,
+) {
+    controls.swap_into(scratch);
+    for control in scratch.drain(..) {
+        match control {
+            Control::Credit { handle, bytes } => {
+                if let Some(session) = sessions.get_mut(handle) {
+                    if session.credit(bytes) {
+                        ensure_read(iocp, handle, session, notices, counters);
+                        refresh_output(handle, session, notices, counters);
+                    }
+                }
+            }
+            Control::Abandon { handle } => {
                 if let Some(session) = sessions.get_mut(handle) {
                     abandon_session(
                         iocp,
@@ -1230,11 +1576,8 @@ fn process_commands(
                     );
                 }
             }
-            Command::Shutdown => return true,
         }
     }
-    let _ = iocp_sender.post_command();
-    false
 }
 
 fn associate_session(iocp: &Arc<OwnedHandle>, handle: u64, session: &Session) -> io::Result<()> {
@@ -1246,38 +1589,6 @@ fn associate_session(iocp: &Arc<OwnedHandle>, handle: u64, session: &Session) ->
         }
     }
     Ok(())
-}
-
-#[allow(clippy::too_many_arguments)]
-fn poll_process_exits(
-    iocp: HANDLE,
-    iocp_sender: &IocpSender,
-    closer: &CloserPool,
-    notices: &NoticeEmitter,
-    sessions: &mut GenerationRegistry<Session>,
-    counters: &mut RuntimeCounters,
-) {
-    let exited: Vec<_> = sessions
-        .handles()
-        .into_iter()
-        .filter(|handle| {
-            sessions.get(*handle).is_some_and(|session| {
-                session.exit_status.is_none()
-                    && unsafe { WaitForSingleObject(session.process.raw(), 0) } == WAIT_OBJECT_0
-            })
-        })
-        .collect();
-    for handle in exited {
-        handle_process_exit(
-            iocp,
-            iocp_sender,
-            handle,
-            closer,
-            notices,
-            sessions,
-            counters,
-        );
-    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1306,9 +1617,11 @@ fn handle_process_exit(
             notify_broker_lost(handle, session, notices, counters);
         }
     }
-    if session.exit_status.is_some() && session.active && !session.exit_notified {
-        session.exit_notified = true;
-        send_lifecycle_notice(session, notices, Notice::Exit(handle), counters);
+    if session.active && !session.exit_notified {
+        if let Some(status) = session.exit_status {
+            session.exit_notified = true;
+            send_lifecycle_notice(session, notices, Notice::Exit { handle, status }, counters);
+        }
     }
     start_pseudoconsole_close(iocp_sender, handle, session, closer);
     ensure_read(iocp, handle, session, notices, counters);
@@ -1359,15 +1672,17 @@ fn handle_io_completion(
         } else {
             let amount = transferred as usize;
             counters.read_bytes += amount as u64;
-            if session.close_started {
+            if session.close_started || session.discarding {
                 session.output_notified = false;
             } else {
                 if session.output_bytes == 0 {
                     session.output_deadline = Some(Instant::now() + OUTPUT_DELAY);
                 }
                 session.output_bytes += amount;
+                let mut buffer = operation.into_read_buffer();
+                buffer.truncate(amount);
                 session.output.push_back(QueuedOutput {
-                    bytes: operation.buffer[..amount].to_vec(),
+                    bytes: Bytes::from(buffer),
                     offset: 0,
                 });
             }
@@ -1391,7 +1706,11 @@ fn handle_io_completion(
             operation.as_mut().get_mut().offset += amount;
             if !session.input_failed {
                 session.input_bytes = session.input_bytes.saturating_sub(amount);
-                session.admission.release(amount);
+                let complete = operation.remaining_len() == 0;
+                session.admission.release(amount, usize::from(complete));
+                if complete {
+                    session.input_entries -= 1;
+                }
             }
             if !session.input_failed && operation.remaining_len() != 0 {
                 operation.reset_overlapped();
@@ -1417,19 +1736,23 @@ fn ensure_read(
 ) {
     if !session.active
         || session.read.is_some()
-        || session.paused
+        || (session.paused && !session.discarding)
         || session.output_eof
-        || session.output_total() >= session.output_capacity
+        || (!session.discarding && session.output_total() >= session.output_capacity)
     {
         return;
     }
-    let capacity = (session.output_capacity - session.output_total()).min(BYTE_QUANTUM);
+    let capacity = if session.discarding {
+        BYTE_QUANTUM
+    } else {
+        (session.output_capacity - session.output_total()).min(BYTE_QUANTUM)
+    };
     let mut operation = IoOperation::read(capacity);
     counters.read_syscalls += 1;
     let submitted = unsafe {
         ReadFile(
             session.output_pipe.raw(),
-            operation.buffer.as_mut_ptr(),
+            operation.read_buffer_mut().as_mut_ptr(),
             capacity as u32,
             null_mut(),
             operation.overlapped_mut(),
@@ -1564,9 +1887,12 @@ fn fail_input(
     let accepted_pending = session.input_bytes != 0;
     session.input_failed = true;
     session.admission.close();
-    session.admission.release(session.input_bytes);
+    session
+        .admission
+        .release(session.input_bytes, session.input_entries);
     session.input.clear();
     session.input_bytes = 0;
+    session.input_entries = 0;
     if accepted_pending {
         notify_input_failure(handle, session, notices, counters);
     }
@@ -1626,14 +1952,17 @@ fn refresh_output(
         || session
             .output_deadline
             .is_some_and(|deadline| deadline <= Instant::now());
-    if ready && !session.output.is_empty() && !session.output_notified {
+    if ready && !session.discarding && !session.output.is_empty() && !session.output_notified {
         if let Some(reservation) = notices.try_reserve() {
             let bytes = session.pull(OUTPUT_BATCH);
             if notices.emit(reservation, Notice::Output { handle, bytes }, counters) {
                 session.output_notified = true;
+                session.output_notification_blocked = false;
             } else {
                 session.cleanup_failed = true;
             }
+        } else {
+            session.output_notification_blocked = true;
         }
     }
     match output_terminal_notice(
@@ -1704,6 +2033,48 @@ fn abandon_session(
     ensure_read(iocp, handle, session, notices, counters);
 }
 
+fn reap_closed(
+    notices: &NoticeEmitter,
+    sessions: &mut GenerationRegistry<Session>,
+    counters: &mut RuntimeCounters,
+    admissions: &Arc<Mutex<HashMap<u64, Arc<InputAdmission>>>>,
+) {
+    for handle in sessions.handles() {
+        let complete = sessions.get(handle).is_some_and(|session| {
+            !session.abandoned && session.close_started && session.terminal()
+        });
+        if !complete {
+            continue;
+        }
+        let result = sessions
+            .get(handle)
+            .map_or_else(CloseResult::default, |session| CloseResult {
+                input_failed: session.input_failure_pending,
+                output_failed: session.output_failed,
+                cleanup_failed: session.cleanup_failed,
+            });
+        if let Some(session) = sessions.get_mut(handle) {
+            if !session.close_notified {
+                session.close_notified = true;
+                for waiter in session.close_waiters.drain(..) {
+                    let _ = waiter.send(result);
+                }
+                send_lifecycle_notice(
+                    session,
+                    notices,
+                    Notice::Closed { handle, result },
+                    counters,
+                );
+            }
+        }
+        if sessions.remove(handle).is_some() {
+            if let Ok(mut values) = admissions.lock() {
+                values.remove(&handle);
+            }
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn reap_abandoned(
     iocp: HANDLE,
@@ -1745,18 +2116,21 @@ fn reap_abandoned(
 }
 
 fn output_timeout(sessions: &GenerationRegistry<Session>) -> u32 {
-    const PROCESS_POLL_INTERVAL_MS: u32 = 10;
     let output_deadline = sessions
-        .handles()
-        .into_iter()
-        .filter_map(|handle| sessions.get(handle))
-        .filter(|session| !session.output_notified && !session.output.is_empty())
-        .filter_map(|session| session.output_deadline)
+        .iter()
+        .map(|(_, session)| session)
+        .filter_map(|session| {
+            output_notification_deadline(
+                session.output_notification_blocked,
+                session.output_notified,
+                session.output.is_empty(),
+                session.output_deadline,
+            )
+        })
         .min();
     let activation_deadline = sessions
-        .handles()
-        .into_iter()
-        .filter_map(|handle| sessions.get(handle))
+        .iter()
+        .map(|(_, session)| session)
         .filter(|session| !session.active && !session.abandoned)
         .filter_map(|session| session.activation_deadline)
         .min();
@@ -1765,22 +2139,28 @@ fn output_timeout(sessions: &GenerationRegistry<Session>) -> u32 {
         (left, right) => left.or(right),
     };
     let Some(deadline) = deadline else {
-        return if sessions.handles().is_empty() {
-            INFINITE
-        } else {
-            PROCESS_POLL_INTERVAL_MS
-        };
+        return INFINITE;
     };
     let now = Instant::now();
     if deadline <= now {
         return 0;
     }
-    (deadline
+    deadline
         .duration_since(now)
         .as_millis()
         .max(1)
-        .min(u128::from(u32::MAX - 1)) as u32)
-        .min(PROCESS_POLL_INTERVAL_MS)
+        .min(u128::from(u32::MAX - 1)) as u32
+}
+
+fn output_notification_deadline(
+    blocked: bool,
+    notified: bool,
+    output_empty: bool,
+    deadline: Option<Instant>,
+) -> Option<Instant> {
+    (!blocked && !notified && !output_empty)
+        .then_some(deadline)
+        .flatten()
 }
 
 fn send_lifecycle_notice(
@@ -1833,7 +2213,10 @@ fn shutdown_all(
 
 #[cfg(test)]
 mod tests {
-    use super::{output_terminal_notice, CloseAdmission, NoticeBudget, OutputTerminalNotice};
+    use super::{
+        output_notification_deadline, output_terminal_notice, CloseAdmission, NoticeBudget,
+        OutputTerminalNotice,
+    };
 
     #[test]
     fn notice_budget_rejects_reservations_beyond_its_limit() {
@@ -1857,6 +2240,14 @@ mod tests {
         let replacement = budget.try_reserve();
 
         assert!(replacement.is_some());
+    }
+
+    #[test]
+    fn notice_blocked_output_has_no_due_deadline() {
+        assert_eq!(
+            output_notification_deadline(true, false, false, Some(std::time::Instant::now())),
+            None
+        );
     }
 
     #[test]

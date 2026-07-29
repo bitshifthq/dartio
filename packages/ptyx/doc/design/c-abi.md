@@ -35,8 +35,7 @@ The exported-symbol allowlist is tested for each produced library.
 
 The ABI uses:
 
-- opaque incomplete structs for runtime ownership;
-- `uint64_t` generation-tagged session identities;
+- `uint64_t` generation-tagged runtime and session identities;
 - fixed-width integer status, kind, flag, length, and code fields;
 - caller-sized structures with fixed alignment;
 - explicit calling and symbol visibility macros.

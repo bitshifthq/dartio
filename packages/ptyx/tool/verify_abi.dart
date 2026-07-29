@@ -2,28 +2,25 @@ import 'dart:convert';
 import 'dart:ffi';
 import 'dart:io';
 
-const _expectedAbi = 7;
+const _expectedAbi = 1;
 const _symbols = [
-  'ptyi_abi_version',
-  'ptyi_capabilities',
-  'ptyi_last_error_code',
-  'ptyi_init',
-  'ptyi_finalize',
-  'ptyi_abandon',
-  'ptyi_spawn',
-  'ptyi_activate',
-  'ptyi_write',
-  'ptyi_credit_async',
-  'ptyi_pause',
-  'ptyi_exit_status',
-  'ptyi_pid',
-  'ptyi_size',
-  'ptyi_resize',
-  'ptyi_signal',
-  'ptyi_mode',
-  'ptyi_tty_name',
-  'ptyi_close',
-  'ptyi_destroy',
+  'ptyx_abi_version',
+  'ptyx_error_format',
+  'ptyx_event_release',
+  'ptyx_runtime_capabilities',
+  'ptyx_runtime_create',
+  'ptyx_runtime_next_event',
+  'ptyx_runtime_release',
+  'ptyx_runtime_shutdown',
+  'ptyx_session_cancel_output',
+  'ptyx_session_close',
+  'ptyx_session_observe_mode',
+  'ptyx_session_release',
+  'ptyx_session_resize',
+  'ptyx_session_snapshot',
+  'ptyx_session_spawn_start',
+  'ptyx_session_terminate',
+  'ptyx_session_write',
 ];
 
 void main(List<String> arguments) {
@@ -35,7 +32,7 @@ void main(List<String> arguments) {
   final file = File(arguments.single).absolute;
   final library = DynamicLibrary.open(file.path);
   final abi = library.lookupFunction<Uint32 Function(), int Function()>(
-    'ptyi_abi_version',
+    'ptyx_abi_version',
   )();
   if (abi != _expectedAbi) {
     throw StateError('ABI mismatch: expected $_expectedAbi, found $abi');
@@ -52,15 +49,8 @@ void main(List<String> arguments) {
       'found ${exported.toList()..sort()}',
     );
   }
-  final capabilities = library
-      .lookupFunction<Uint32 Function(), int Function()>('ptyi_capabilities')();
   stdout.writeln(
-    jsonEncode({
-      'abi': abi,
-      'capabilities': capabilities,
-      'symbols': _symbols.length,
-      'library': file.path,
-    }),
+    jsonEncode({'abi': abi, 'symbols': _symbols.length, 'library': file.path}),
   );
 }
 
@@ -86,7 +76,7 @@ Set<String> _exportedPtySymbols(File library) {
         continue;
       }
       return RegExp(
-        r'(?:^|[^a-zA-Z0-9_])_?(ptyi_[a-z0-9_]+)\b',
+        r'(?:^|[^a-zA-Z0-9_])_?(ptyx_[a-z0-9_]+)\b',
         multiLine: true,
       ).allMatches(result.stdout as String).map((match) => match[1]!).toSet();
     } on ProcessException catch (error) {

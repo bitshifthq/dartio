@@ -2,7 +2,13 @@
 name = "ptyx-broker"
 version = "0.0.1"
 edition = "2021"
-publish = false
+rust-version = "1.87"
+description = "Companion Unix process broker for the ptyx pseudo-terminal crate"
+license = "MIT"
+repository = "https://github.com/bitshifthq/dartio"
+readme = "README.md"
+keywords = ["pty", "terminal", "process", "unix"]
+categories = ["os"]
 
 [dependencies]
 libc = "0.2"

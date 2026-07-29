@@ -4,14 +4,15 @@
 
 `ptyx` has three supported consumption layers:
 
-1. The `ptyx` Rust crate is the authoritative PTY implementation.
-2. The `ptyx` C ABI is a stable, language-neutral adapter over the Rust crate.
+1. The `ptyx` Rust crate is the idiomatic reusable Rust API.
+2. The `ptyx` C ABI is a stable, language-neutral API over the same Rust core.
 3. The Dart package is an idiomatic wrapper over the C ABI.
 
-The core uses direct Rust platform backends with a shared lifecycle, queue,
-error, and event model. Unix process creation and reaping remain isolated in a
-persistent helper process. Windows uses direct ConPTY, IOCP, and Job Object
-ownership.
+The private `ptyx-engine` crate is the single authoritative implementation
+beneath the public Rust and C APIs. It uses direct Rust platform backends with
+a shared lifecycle, queue, error, and event model. Unix process creation and
+reaping remain isolated in a persistent helper process. Windows uses direct
+ConPTY, IOCP, and Job Object ownership.
 
 The core does not depend on Dart, Dart headers, Dart ports, FFI layouts, or
 isolate lifecycle. The C ABI does not depend on Dart. A separate private Dart
@@ -21,27 +22,21 @@ an isolate.
 ## Dependency and ownership layers
 
 ```text
-Rust application
-      |
-      v
-ptyx Rust crate
-      |
-      +-------------------+
-      |                   |
-Unix PTY and broker   Windows ConPTY
-      ^
-      |
-language-neutral C ABI <--- other language bindings
-      ^
-      |
-Dart transport shim
-      ^
-      |
-idiomatic Dart package
+Rust application       Other languages       Dart package
+      |                       |                    |
+      v                       v                    v
+public ptyx crate      language-neutral C ABI <- private Dart shim
+      |                       |
+      +-----------+-----------+
+                  v
+         private ptyx-engine
+              /       \
+   Unix PTY + broker   Windows ConPTY
 ```
 
-Dependency arrows point toward the authoritative implementation. Neither the
-Rust crate nor the C ABI references a higher layer.
+Dependency arrows point toward the authoritative implementation. The public
+Rust crate and C ABI are sibling adapters and neither references a higher
+layer.
 
 ## Rust API
 
@@ -53,10 +48,7 @@ pub struct RuntimeBuilder;
 pub struct Session;
 pub struct Events;
 pub struct Spawn;
-pub struct Spawned {
-    pub session: Session,
-    pub events: Events,
-}
+pub struct Spawned;
 pub struct Close;
 pub struct OutputChunk;
 
@@ -67,10 +59,10 @@ impl Runtime {
 
 impl Session {
     pub fn write(&self, data: bytes::Bytes) -> Result<(), WriteError>;
-    pub fn resize(&self, size: Size) -> Result<(), ResizeError>;
-    pub fn terminate(&self, signal: Signal) -> Result<bool, TerminateError>;
+    pub fn resize(&self, size: Size) -> Result<(), ControlError>;
+    pub fn terminate(&self) -> Result<bool, ControlError>;
     pub fn snapshot(&self) -> Result<SessionSnapshot, MetadataError>;
-    pub fn close(&self) -> Close;
+    pub fn close(&self) -> Result<Close, CloseError>;
 }
 
 impl Events {
@@ -132,7 +124,7 @@ the same queue authority through one fair blocking operation:
 
 ```c
 ptyx_status_t ptyx_runtime_next_event(
-    ptyx_runtime_t *runtime,
+    ptyx_runtime_t runtime,
     ptyx_event_t *event,
     ptyx_error_t *error);
 ```
@@ -159,10 +151,9 @@ The C ABI exposes only:
 - asynchronous close and nonblocking release;
 - event release and error formatting.
 
-It uses opaque runtime pointers and fixed-width generation-tagged session
-handles. Public constants use fixed-width integer typedefs rather than C enum
-layout. Extensible structures begin with `struct_size`; reserved fields must
-be zero.
+It uses fixed-width generation-tagged runtime and session handles. Public
+constants use fixed-width integer typedefs rather than C enum layout.
+Extensible structures begin with `struct_size`; reserved fields must be zero.
 
 Every call documents:
 
@@ -215,7 +206,6 @@ Dart retains only state required by its public contract:
 - immediate closing and closed rejection;
 - typed Dart error translation;
 - immutable spawn option snapshots;
-- cached public metadata;
 - bounded outstanding output delivery tokens.
 
 A minimal owner guardian remains as an individual-isolate exit oracle. It
@@ -245,17 +235,18 @@ Native output credit remains held while bytes are queued in native memory,
 posted to Dart, or retained by a paused Dart subscription. Posting a Dart
 message does not return credit.
 
-The transport uses a fixed, byte-accounted, benchmark-selected window of
-outstanding output events per session. A single-flight window is not the
-default because retained measurements show that bounded multi-message
-pipelining materially improves sustained output. Pause, cancellation, stale
-route, port failure, close, and isolate loss release every token exactly once.
+The transport does not impose a runtime-global output window: one paused
+session must never stop control or output events for its peers. Instead,
+outstanding Dart messages retain the originating session's native output
+credit. Each session's configured output capacity is therefore the independent
+bound and backpressure authority. Pause, cancellation, stale route, port
+failure, close, and isolate loss release every token exactly once.
 
 The initial copy profile is:
 
 - Rust input: zero-copy ownership transfer for owned `Bytes` or `Vec`;
 - C input: one copy into core-owned storage;
-- Dart input: two copies through ordinary FFI;
+- Dart input: one copy in the leaf C call into core-owned storage;
 - Dart output: one Dart VM typed-data copy.
 
 A Dart-specific one-copy input path or external output data requires a

@@ -287,18 +287,18 @@ void main() {
     });
 
     test('uses platform cell bounds before native spawn', () async {
-      final maximum = Platform.isWindows ? 32767 : 65535;
+      const maximum = 32767;
       await expectLater(
         PtySession.spawn(
           missing(
-            initialSize: PtySize(rows: maximum, columns: maximum),
+            initialSize: const PtySize(rows: maximum, columns: maximum),
           ),
         ),
         throwsA(isA<PtySpawnException>()),
       );
       await expectLater(
         PtySession.spawn(
-          missing(initialSize: PtySize(rows: maximum + 1, columns: 80)),
+          missing(initialSize: const PtySize(rows: maximum + 1, columns: 80)),
         ),
         throwsA(isA<PtyInvalidArgumentException>()),
       );

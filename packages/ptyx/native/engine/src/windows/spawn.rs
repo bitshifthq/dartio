@@ -1,9 +1,12 @@
 use std::cmp::Ordering as CompareOrdering;
-use std::ffi::{c_void, CStr, CString};
+use std::ffi::{c_void, OsString};
 use std::io;
 use std::mem::{size_of, zeroed};
+use std::os::windows::ffi::OsStrExt;
 use std::ptr::{null, null_mut};
 use std::sync::atomic::{AtomicU64, Ordering};
+
+use crate::spawn::BrokerSpawn;
 
 use windows_sys::Win32::Foundation::{
     GetLastError, ERROR_IO_PENDING, ERROR_PIPE_CONNECTED, GENERIC_READ, GENERIC_WRITE,
@@ -41,18 +44,6 @@ use super::handles::{AttributeList, OwnedHandle, OwnedPseudoConsole, PipeSecurit
 const MINIMUM_WINDOWS_BUILD: u32 = 26_100;
 const FILE_FLAG_FIRST_PIPE_INSTANCE: u32 = 0x0008_0000;
 static PIPE_FALLBACK_SEQUENCE: AtomicU64 = AtomicU64::new(1);
-
-#[derive(Clone)]
-pub(crate) struct BrokerSpawn {
-    pub(crate) executable: CString,
-    pub(crate) arguments: Vec<CString>,
-    pub(crate) environment: Option<Vec<CString>>,
-    pub(crate) cwd: Option<CString>,
-    pub(crate) rows: u32,
-    pub(crate) columns: u32,
-    pub(crate) pixel_width: u32,
-    pub(crate) pixel_height: u32,
-}
 
 pub(crate) struct SpawnedSession {
     pub(crate) input: OwnedHandle,
@@ -92,8 +83,9 @@ pub(crate) fn validate_windows_build() -> io::Result<()> {
 }
 
 pub(crate) fn spawn(config: BrokerSpawn) -> io::Result<SpawnedSession> {
+    config.validate()?;
     let terminal_size = conpty_size(config.rows, config.columns)?;
-    let executable = decode_utf8(&config.executable, "executable")?;
+    let executable: Vec<u16> = config.executable.encode_wide().collect();
     if executable.is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -103,13 +95,12 @@ pub(crate) fn spawn(config: BrokerSpawn) -> io::Result<SpawnedSession> {
     let arguments = config
         .arguments
         .iter()
-        .map(|argument| decode_utf8(argument, "argument"))
-        .collect::<io::Result<Vec<_>>>()?;
+        .map(|argument| argument.encode_wide().collect::<Vec<_>>())
+        .collect::<Vec<_>>();
     let cwd = config
         .cwd
         .as_ref()
-        .map(|value| decode_utf8(value, "working directory"))
-        .transpose()?;
+        .map(|value| value.as_os_str().encode_wide().collect::<Vec<_>>());
 
     let mut input_pipe = NamedPipePair::new(PipeDirection::ControllerWrites)?;
     let mut output_pipe = NamedPipePair::new(PipeDirection::ControllerReads)?;
@@ -139,20 +130,19 @@ pub(crate) fn spawn(config: BrokerSpawn) -> io::Result<SpawnedSession> {
     attributes.set_pseudoconsole(pseudoconsole.raw())?;
     attributes.set_job(&mut job_attribute)?;
 
-    let application = nul_terminated(&executable)?;
+    let application = nul_terminated_wide(&executable, "executable")?;
     let application_pointer = if uses_search_path(&executable) {
         null()
     } else {
         application.as_ptr()
     };
-    let mut command_line = build_command_line(
-        std::iter::once(executable.as_str()).chain(arguments.iter().map(String::as_str)),
-    )?;
-    let environment = config
-        .environment
-        .map(build_environment_from_entries)
+    let mut command_line =
+        build_command_line_wide(std::iter::once(&executable).chain(arguments.iter()))?;
+    let environment = config.environment.map(build_environment_wide).transpose()?;
+    let cwd = cwd
+        .as_deref()
+        .map(|value| nul_terminated_wide(value, "working directory"))
         .transpose()?;
-    let cwd = cwd.as_deref().map(nul_terminated).transpose()?;
     let mut startup: STARTUPINFOEXW = unsafe { zeroed() };
     startup.StartupInfo.cb = size_of::<STARTUPINFOEXW>() as u32;
     // Prevent inherited runner or embedding-process standard handles from
@@ -204,8 +194,10 @@ pub(crate) fn spawn(config: BrokerSpawn) -> io::Result<SpawnedSession> {
     })
 }
 
-fn uses_search_path(executable: &str) -> bool {
-    !executable.contains(['\\', '/', ':'])
+fn uses_search_path(executable: &[u16]) -> bool {
+    !executable
+        .iter()
+        .any(|value| matches!(*value, 92 | 47 | 58))
 }
 
 fn conpty_size(rows: u32, columns: u32) -> io::Result<COORD> {
@@ -225,12 +217,22 @@ fn conpty_size(rows: u32, columns: u32) -> io::Result<COORD> {
     })
 }
 
+#[cfg(test)]
 pub(crate) fn build_command_line<'a>(
     arguments: impl IntoIterator<Item = &'a str>,
 ) -> io::Result<Vec<u16>> {
+    let arguments: Vec<Vec<u16>> = arguments
+        .into_iter()
+        .map(|argument| argument.encode_utf16().collect())
+        .collect();
+    build_command_line_wide(arguments.iter())
+}
+
+fn build_command_line_wide<'a>(
+    arguments: impl IntoIterator<Item = &'a Vec<u16>>,
+) -> io::Result<Vec<u16>> {
     let mut command = Vec::new();
     for argument in arguments {
-        let argument: Vec<u16> = argument.encode_utf16().collect();
         if argument.contains(&0) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -240,27 +242,13 @@ pub(crate) fn build_command_line<'a>(
         if !command.is_empty() {
             command.push(u16::from(b' '));
         }
-        append_quoted_argument(&mut command, &argument);
+        append_quoted_argument(&mut command, argument);
     }
     command.push(0);
     Ok(command)
 }
 
-pub(crate) fn build_environment_from_entries(entries: Vec<CString>) -> io::Result<Vec<u16>> {
-    let mut values = Vec::with_capacity(entries.len());
-    for entry in entries {
-        let entry = decode_utf8(&entry, "environment")?;
-        let Some((key, value)) = entry.split_once('=') else {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "environment entry has no separator",
-            ));
-        };
-        values.push((key.to_owned(), value.to_owned()));
-    }
-    build_environment_block(values)
-}
-
+#[cfg(test)]
 pub(crate) fn build_environment_block(environment: Vec<(String, String)>) -> io::Result<Vec<u16>> {
     let mut sorted = Vec::<(Vec<u16>, String, String)>::new();
     for (key, value) in environment {
@@ -302,6 +290,53 @@ pub(crate) fn build_environment_block(environment: Vec<(String, String)>) -> io:
         block.extend(key.encode_utf16());
         block.push(u16::from(b'='));
         block.extend(value.encode_utf16());
+        block.push(0);
+    }
+    block.push(0);
+    if block.len() == 1 {
+        block.push(0);
+    }
+    Ok(block)
+}
+
+fn build_environment_wide(environment: Vec<(OsString, OsString)>) -> io::Result<Vec<u16>> {
+    let mut sorted = Vec::<(Vec<u16>, Vec<u16>)>::new();
+    for (key, value) in environment {
+        let key: Vec<u16> = key.encode_wide().collect();
+        let value: Vec<u16> = value.encode_wide().collect();
+        if key.is_empty() || key.contains(&(b'=' as u16)) || key.contains(&0) || value.contains(&0)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid environment entry",
+            ));
+        }
+        if let Some(existing) = sorted
+            .iter_mut()
+            .find(|(candidate, _)| ordinal_compare(candidate, &key) == CompareOrdering::Equal)
+        {
+            *existing = (key, value);
+        } else {
+            sorted.push((key, value));
+        }
+    }
+    let system_root_key: Vec<u16> = "SystemRoot".encode_utf16().collect();
+    if !sorted
+        .iter()
+        .any(|(key, _)| ordinal_compare(key, &system_root_key) == CompareOrdering::Equal)
+    {
+        let system_root = std::env::var_os("SystemRoot")
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "SystemRoot is required"))?
+            .encode_wide()
+            .collect();
+        sorted.push((system_root_key, system_root));
+    }
+    sorted.sort_by(|left, right| ordinal_compare(&left.0, &right.0));
+    let mut block = Vec::new();
+    for (key, value) in sorted {
+        block.extend(key);
+        block.push(b'=' as u16);
+        block.extend(value);
         block.push(0);
     }
     block.push(0);
@@ -355,15 +390,6 @@ fn append_quoted_argument(command: &mut Vec<u16>, argument: &[u16]) {
     command.push(u16::from(b'"'));
 }
 
-fn decode_utf8(value: &CStr, label: &str) -> io::Result<String> {
-    value.to_str().map(str::to_owned).map_err(|_| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("{label} is not valid UTF-8"),
-        )
-    })
-}
-
 fn nul_terminated(value: &str) -> io::Result<Vec<u16>> {
     if value.contains('\0') {
         return Err(io::Error::new(
@@ -372,6 +398,18 @@ fn nul_terminated(value: &str) -> io::Result<Vec<u16>> {
         ));
     }
     Ok(value.encode_utf16().chain([0]).collect())
+}
+
+fn nul_terminated_wide(value: &[u16], label: &str) -> io::Result<Vec<u16>> {
+    if value.contains(&0) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{label} contains NUL"),
+        ));
+    }
+    let mut value = value.to_vec();
+    value.push(0);
+    Ok(value)
 }
 
 fn create_job() -> io::Result<OwnedHandle> {
@@ -519,7 +557,7 @@ unsafe extern "system" {
 
 #[cfg(test)]
 mod tests {
-    use std::ffi::CString;
+    use std::ffi::OsString;
     use std::io::{self, Read, Write};
     use std::mem::zeroed;
     use std::ptr::null;
@@ -605,18 +643,19 @@ mod tests {
             return;
         }
 
-        let executable = std::env::current_exe().expect("resolve native test executable");
-        let executable = CString::new(executable.to_string_lossy().as_bytes())
-            .expect("test executable path contains no NUL");
+        let executable = std::env::current_exe()
+            .expect("resolve native test executable")
+            .into_os_string();
         let arguments = [
-            CString::new("--exact").unwrap(),
-            CString::new(RESIZE_PROBE_TEST).unwrap(),
-            CString::new("--nocapture").unwrap(),
+            OsString::from("--exact"),
+            OsString::from(RESIZE_PROBE_TEST),
+            OsString::from("--nocapture"),
         ];
-        let mut environment = std::env::vars()
-            .map(|(key, value)| CString::new(format!("{key}={value}")).unwrap())
-            .collect::<Vec<_>>();
-        environment.push(CString::new(format!("{RESIZE_PROBE_ENVIRONMENT}=1")).unwrap());
+        let mut environment = std::env::vars_os().collect::<Vec<_>>();
+        environment.push((
+            OsString::from(RESIZE_PROBE_ENVIRONMENT),
+            OsString::from("1"),
+        ));
         let session = spawn(BrokerSpawn {
             executable,
             arguments: arguments.into(),
@@ -626,6 +665,7 @@ mod tests {
             columns: 70,
             pixel_width: 0,
             pixel_height: 0,
+            graceful_close_timeout: std::time::Duration::from_millis(250),
         })
         .expect("spawn ConPTY resize probe child");
 
@@ -825,11 +865,12 @@ mod tests {
 
     #[test]
     fn bare_executables_use_windows_search_path() {
-        assert!(uses_search_path("cmd.exe"));
-        assert!(uses_search_path("tool"));
-        assert!(!uses_search_path(r"C:\tools\tool.exe"));
-        assert!(!uses_search_path(r".\tool.exe"));
-        assert!(!uses_search_path(r"\\server\share\tool.exe"));
+        let wide = |value: &str| value.encode_utf16().collect::<Vec<_>>();
+        assert!(uses_search_path(&wide("cmd.exe")));
+        assert!(uses_search_path(&wide("tool")));
+        assert!(!uses_search_path(&wide(r"C:\tools\tool.exe")));
+        assert!(!uses_search_path(&wide(r".\tool.exe")));
+        assert!(!uses_search_path(&wide(r"\\server\share\tool.exe")));
     }
 
     #[test]

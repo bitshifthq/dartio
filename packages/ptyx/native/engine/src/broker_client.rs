@@ -7,6 +7,7 @@ use std::ffi::{CStr, CString};
 use std::io;
 use std::mem::{size_of, MaybeUninit};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::os::unix::ffi::OsStrExt;
 use std::ptr;
 use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
@@ -650,16 +651,7 @@ pub(crate) struct BrokerSession {
     pub(crate) master: OwnedFd,
 }
 
-pub(crate) struct BrokerSpawn {
-    pub(crate) executable: CString,
-    pub(crate) arguments: Vec<CString>,
-    pub(crate) environment: Option<Vec<CString>>,
-    pub(crate) cwd: Option<CString>,
-    pub(crate) rows: u32,
-    pub(crate) columns: u32,
-    pub(crate) pixel_width: u32,
-    pub(crate) pixel_height: u32,
-}
+use crate::spawn::BrokerSpawn;
 
 enum Request {
     Spawn {
@@ -669,8 +661,17 @@ enum Request {
     CloseDetached {
         session: u64,
     },
-    ReleaseDetached {
+    GracefulSignal {
         session: u64,
+        handle: u64,
+    },
+    ForceClose {
+        session: u64,
+        handle: u64,
+    },
+    Release {
+        session: u64,
+        handle: u64,
     },
     Abort {
         session: u64,
@@ -797,8 +798,16 @@ impl BrokerClient {
         self.send(Request::CloseDetached { session })
     }
 
-    pub(crate) fn release_async(&self, session: u64) -> io::Result<()> {
-        self.send(Request::ReleaseDetached { session })
+    pub(crate) fn graceful_signal_async(&self, session: u64, handle: u64) -> io::Result<()> {
+        self.send(Request::GracefulSignal { session, handle })
+    }
+
+    pub(crate) fn force_close_async(&self, session: u64, handle: u64) -> io::Result<()> {
+        self.send(Request::ForceClose { session, handle })
+    }
+
+    pub(crate) fn release_async(&self, session: u64, handle: u64) -> io::Result<()> {
+        self.send(Request::Release { session, handle })
     }
 
     pub(crate) fn abort(&self, session: u64) -> io::Result<()> {
@@ -885,14 +894,7 @@ impl Worker {
             })
             .is_ok()
         {
-            let byte = [1_u8];
-            unsafe {
-                libc::write(
-                    self.reactor_wake.as_raw_fd(),
-                    byte.as_ptr().cast(),
-                    byte.len(),
-                );
-            }
+            wake_reactor(self.reactor_wake.as_raw_fd());
         }
     }
 
@@ -922,6 +924,7 @@ impl Worker {
     }
 
     fn spawn(&mut self, config: BrokerSpawn) -> io::Result<BrokerSession> {
+        config.validate()?;
         let request = self.request_id();
         let mut payload = Vec::new();
         payload.extend_from_slice(&0_u32.to_ne_bytes());
@@ -943,22 +946,36 @@ impl Worker {
             payload.extend_from_slice(&value.to_ne_bytes());
         }
         payload.extend_from_slice(
-            &(config.cwd.as_ref().map_or(0, |cwd| cwd.as_bytes().len()) as u32).to_ne_bytes(),
+            &(config
+                .cwd
+                .as_ref()
+                .map_or(0, |cwd| cwd.as_os_str().as_bytes().len()) as u32)
+                .to_ne_bytes(),
         );
         for argument in std::iter::once(&config.executable).chain(config.arguments.iter()) {
-            let bytes = argument.as_bytes();
+            let bytes = argument.as_os_str().as_bytes();
             payload.extend_from_slice(&(bytes.len() as u32).to_ne_bytes());
             payload.extend_from_slice(bytes);
         }
         if let Some(environment) = &config.environment {
-            for entry in environment {
-                let bytes = entry.as_bytes();
-                payload.extend_from_slice(&(bytes.len() as u32).to_ne_bytes());
-                payload.extend_from_slice(bytes);
+            for (key, value) in environment {
+                let key = key.as_os_str().as_bytes();
+                let value = value.as_os_str().as_bytes();
+                let length = key.len().saturating_add(1).saturating_add(value.len());
+                let length = u32::try_from(length).map_err(|_| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "environment entry is too large",
+                    )
+                })?;
+                payload.extend_from_slice(&length.to_ne_bytes());
+                payload.extend_from_slice(key);
+                payload.push(b'=');
+                payload.extend_from_slice(value);
             }
         }
         if let Some(cwd) = &config.cwd {
-            payload.extend_from_slice(cwd.as_bytes());
+            payload.extend_from_slice(cwd.as_os_str().as_bytes());
         }
         let mut frame = Frame::new(SPAWN);
         frame.request = request;
@@ -1117,8 +1134,27 @@ fn run_worker(
                     Request::CloseDetached { session } => {
                         let _ = worker.close(session);
                     }
-                    Request::ReleaseDetached { session } => {
-                        let _ = worker.release(session);
+                    Request::GracefulSignal { session, handle } => {
+                        let result = worker.signal(session, libc::SIGTERM).ok();
+                        let _ = worker
+                            .reactor_commands
+                            .send(Command::GracefulSignalResult { handle, result });
+                        wake_reactor(worker.reactor_wake.as_raw_fd());
+                    }
+                    Request::ForceClose { session, handle } => {
+                        let succeeded = worker.close(session).is_ok();
+                        let _ = worker
+                            .reactor_commands
+                            .send(Command::ForceCloseResult { handle, succeeded });
+                        wake_reactor(worker.reactor_wake.as_raw_fd());
+                    }
+                    Request::Release { session, handle } => {
+                        let succeeded =
+                            worker.release(session).is_ok() || worker.abort(session).is_ok();
+                        let _ = worker
+                            .reactor_commands
+                            .send(Command::ReleaseResult { handle, succeeded });
+                        wake_reactor(worker.reactor_wake.as_raw_fd());
                     }
                     Request::Abort { session, reply } => {
                         let _ = reply.send(worker.abort(session));
@@ -1142,6 +1178,11 @@ fn run_worker(
             if processed == REQUEST_QUANTUM {
                 wake_worker(worker_wake.as_raw_fd());
             }
+            if processed != 0 {
+                // A lifecycle request rejected while this bounded queue was
+                // full is retried by the reactor after the worker makes room.
+                wake_reactor(worker.reactor_wake.as_raw_fd());
+            }
         }
     }
     unsafe {
@@ -1151,14 +1192,19 @@ fn run_worker(
         libc::waitpid(worker.broker_pid, ptr::null_mut(), 0);
     }
     if worker.reactor_commands.send(Command::BrokerLost).is_ok() {
-        let byte = [1_u8];
-        unsafe {
-            libc::write(
-                worker.reactor_wake.as_raw_fd(),
-                byte.as_ptr().cast(),
-                byte.len(),
-            );
-        }
+        wake_reactor(worker.reactor_wake.as_raw_fd());
+    }
+}
+
+fn wake_reactor(fd: RawFd) {
+    let byte = [1_u8];
+    unsafe {
+        libc::send(
+            fd,
+            byte.as_ptr().cast(),
+            byte.len(),
+            libc::MSG_DONTWAIT | libc::MSG_NOSIGNAL,
+        );
     }
 }
 

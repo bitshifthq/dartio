@@ -10,16 +10,16 @@ source revisions; unresolved comparisons remain explicit.
 | Arguments and environment | direct argv; inherit, overlay, replace, clear | `exec` / `CreateProcessW` | broadly available; exact semantics vary |
 | Working directory | supported | child setup | broadly available |
 | Raw byte I/O | bounded, lossless, ordered | PTY master / ConPTY pipes | broadly available |
-| Input backpressure | ordered async `write` | readiness / IOCP | comparison pending |
-| Flush | accepted sequence reaches PTY master | write completion | comparison pending |
-| Output backpressure | one credited Dart message; bounded queue | readiness disabled at bound | comparison pending |
+| Input backpressure | synchronous all-or-reject admission; ordered native delivery | readiness / IOCP | comparison pending |
+| Accepted input | delivery or a retained typed input failure | write completion | comparison pending |
+| Output backpressure | per-session credited Dart pipeline; bounded queue | readiness disabled at bound | comparison pending |
 | Resize | cells and portable pixel metadata | `TIOCSWINSZ` / ConPTY cells | broadly available |
 | Exit status | typed Unix signal; full Windows DWORD | broker `waitid` observation plus exact cleanup reap / process handle | semantics vary |
 | Signals | explicit Unix capability | process-group signal | Windows packages generally terminate jobs/processes |
 | Descendant cleanup | original Unix process group; Windows Job Object | broker / Job Object | implementation-dependent |
 | Terminal name | explicit Unix capability | slave PTY name | implementation-dependent |
 | Terminal modes | snapshot and distinct-change stream on Unix | termios polling | implementation-dependent |
-| Isolate loss | owner supervisor, native finalizer, and failed-post cleanup | controller abandonment | comparison pending |
+| Isolate loss | private adapter guardian, native finalizer, and failed-post cleanup | controller abandonment | comparison pending |
 | Errors | typed category, operation, optional OS code | errno / Win32 status | comparison pending |
 | Platforms | qualification tracked per OS and architecture | Linux, macOS, Windows | package-specific |
 

@@ -17,13 +17,13 @@ final class PtySize {
   /// Terminal rows.
   ///
   /// Must be greater than zero when passed to [PtySession.spawn] or
-  /// [PtySession.resize]. The maximum is 32767 on Windows and 65535 on Unix.
+  /// [PtySession.resize]. The portable maximum is 32767.
   final int rows;
 
   /// Terminal columns.
   ///
   /// Must be greater than zero when passed to [PtySession.spawn] or
-  /// [PtySession.resize]. The maximum is 32767 on Windows and 65535 on Unix.
+  /// [PtySession.resize]. The portable maximum is 32767.
   final int columns;
 
   /// Terminal width in pixels.
