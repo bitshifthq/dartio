@@ -117,6 +117,7 @@ PTYX_EXPORT ptyx_status_t PTYX_CALL ptyd_runtime_detach(ptyd_adapter_t *adapter,
  * diagnostic output because no Dart owner remains.
  *
  * @param[in] token Adapter handle encoded as a pointer-sized integer.
+ * @return Nothing.
  */
 PTYX_EXPORT void PTYX_CALL ptyd_runtime_finalize(void *token);
 

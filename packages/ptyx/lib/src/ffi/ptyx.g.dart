@@ -92,6 +92,7 @@ external int ptyd_runtime_detach(
 /// diagnostic output because no Dart owner remains.
 ///
 /// @param[in] token Adapter handle encoded as a pointer-sized integer.
+/// @return Nothing.
 @ffi.Native<ffi.Void Function(ffi.Pointer<ffi.Void>)>()
 external void ptyd_runtime_finalize(ffi.Pointer<ffi.Void> token);
 

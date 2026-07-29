@@ -273,9 +273,15 @@ jobs:
       - name: validate C ABI documentation
         if: matrix.os == 'linux-x64'
         run: |
-          sudo apt-get update
-          sudo apt-get install --yes doxygen
-          doxygen packages/ptyx/Doxyfile
+          curl --fail --location --silent --show-error \
+            --output "$RUNNER_TEMP/doxygen.tar.gz" \
+            https://www.doxygen.nl/files/doxygen-1.17.0.linux.bin.tar.gz
+          echo \
+            "75419ef4f446fc1c24ef12514b574e66e898ee6f527c6ae2ad84f91a905823c2  $RUNNER_TEMP/doxygen.tar.gz" \
+            | sha256sum --check
+          tar --extract --gzip --file "$RUNNER_TEMP/doxygen.tar.gz" \
+            --directory "$RUNNER_TEMP"
+          "$RUNNER_TEMP/doxygen-1.17.0/bin/doxygen" packages/ptyx/Doxyfile
 
   clippy:
     name: clippy
