@@ -306,7 +306,6 @@ fn collect_received_fds(message: &libc::msghdr, received_fds: &mut Vec<OwnedFd>)
     Ok(())
 }
 
-#[cfg(target_os = "linux")]
 fn wait_for_io(fd: RawFd, events: libc::c_short, deadline: Instant) -> io::Result<()> {
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
@@ -330,62 +329,6 @@ fn wait_for_io(fd: RawFd, events: libc::c_short, deadline: Instant) -> io::Resul
                     "protocol control socket failed",
                 ));
             }
-            return Ok(());
-        }
-        if ready == 0 {
-            continue;
-        }
-        let error = io::Error::last_os_error();
-        if error.kind() != io::ErrorKind::Interrupted {
-            return Err(error);
-        }
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn wait_for_io(fd: RawFd, events: libc::c_short, deadline: Instant) -> io::Result<()> {
-    loop {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            return Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "protocol frame deadline exceeded",
-            ));
-        }
-        let mut readable = MaybeUninit::<libc::fd_set>::zeroed();
-        let mut writable = MaybeUninit::<libc::fd_set>::zeroed();
-        unsafe {
-            libc::FD_ZERO(readable.as_mut_ptr());
-            libc::FD_ZERO(writable.as_mut_ptr());
-            if events & libc::POLLIN != 0 {
-                libc::FD_SET(fd, readable.as_mut_ptr());
-            }
-            if events & libc::POLLOUT != 0 {
-                libc::FD_SET(fd, writable.as_mut_ptr());
-            }
-        }
-        let mut timeout = libc::timeval {
-            tv_sec: remaining.as_secs().min(libc::time_t::MAX as u64) as libc::time_t,
-            tv_usec: remaining.subsec_micros() as libc::suseconds_t,
-        };
-        let ready = unsafe {
-            libc::select(
-                fd + 1,
-                if events & libc::POLLIN != 0 {
-                    readable.as_mut_ptr()
-                } else {
-                    ptr::null_mut()
-                },
-                if events & libc::POLLOUT != 0 {
-                    writable.as_mut_ptr()
-                } else {
-                    ptr::null_mut()
-                },
-                ptr::null_mut(),
-                &mut timeout,
-            )
-        };
-        if ready > 0 {
             return Ok(());
         }
         if ready == 0 {
