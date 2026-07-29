@@ -376,7 +376,7 @@ impl std::fmt::Debug for SessionControl {
 impl SessionControl {
     fn start_close(&self) -> Result<(), CloseError> {
         let mut state = self.close.state();
-        if state.completion.is_none() && state.result.is_none() {
+        if state.completion.is_none() && !state.completion_waiting && state.result.is_none() {
             state.completion = Some(
                 self.runtime
                     .native
@@ -394,6 +394,7 @@ impl SessionControl {
                 return result.result();
             }
             if let Some(completion) = state.completion.take() {
+                state.completion_waiting = true;
                 drop(state);
                 let result = completion
                     .wait()
@@ -430,6 +431,7 @@ impl SessionControl {
             }
             Poll::Ready(result) => {
                 state.completion = None;
+                state.completion_waiting = true;
                 let result = result
                     .map(CloseResult::from_engine)
                     .map(CachedClose::Complete)
@@ -446,6 +448,7 @@ impl SessionControl {
             if state.result.is_none() {
                 state.result = Some(result);
             }
+            state.completion_waiting = false;
             self.closed.store(true, Ordering::Release);
             (
                 state.result.expect("close result was stored"),
@@ -533,6 +536,7 @@ impl CloseShared {
 #[derive(Default)]
 struct CloseState {
     completion: Option<ptyx_engine::Completion<ptyx_engine::CloseResult>>,
+    completion_waiting: bool,
     result: Option<CachedClose>,
     wakers: Vec<Option<std::task::Waker>>,
 }
