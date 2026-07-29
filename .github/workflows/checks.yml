@@ -58,6 +58,14 @@ jobs:
             native/dart/include/ptyx_dart.h \
             lib/src/ffi/ptyx.g.dart \
             test/src/ffi/ptyx_test.g.dart
+      - name: verify generated native asset hashes
+        working-directory: packages/ptyx
+        run: |
+          VERSION="$(awk '/^version:/ { print $2 }' pubspec.yaml)"
+          dart run tool/generate_binary_hash.dart \
+            "ptyx-v$VERSION" \
+            lib/src/hook/asset_hashes.dart \
+            --check
       - run: dart analyze --fatal-infos --fatal-warnings packages/ptyx
       - name: publish dry run
         working-directory: packages/ptyx

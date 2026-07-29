@@ -54,3 +54,21 @@ dart run tool/ffigen.dart
 ```
 
 Do not hand-edit generated bindings.
+
+`lib/src/hook/asset_hashes.dart` is also generated. The generator accepts
+explicit native artifact paths so an unrelated file in a staging directory
+cannot enter the trusted release manifest:
+
+```console
+dart run tool/generate_binary_hash.dart \
+  ptyx-v0.0.1 \
+  lib/src/hook/asset_hashes.dart \
+  path/to/libptyx-aarch64-macos.dylib \
+  path/to/libptyx-x86_64-macos.dylib
+```
+
+Pass every qualified macOS, Linux, and Windows artifact published by the
+release. Passing no artifacts deliberately generates the source-first
+manifest. CI uses `--check` to reject drift from the source-first manifest;
+prebuilt release staging must supply the same explicit artifact list when it
+performs that check.
