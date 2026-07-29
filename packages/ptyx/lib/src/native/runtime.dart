@@ -116,7 +116,7 @@ final class _NativeRuntime implements Finalizable {
   final Pointer<ptyx_error_t> _writeError;
   final Map<int, _PendingSpawn> _pendingSpawns = {};
   final Map<int, WeakReference<_NativeSession>> _sessions = {};
-  var _terminalDeliveryTurns = 0;
+  final List<Object> _terminalDeliveryTargets = [];
   _NativeRuntime._(this._port, this._adapter, this.capabilityBits)
     : _writeError = calloc<ptyx_error_t>() {
     _writeError.ref.struct_size = sizeOf<ptyx_error_t>();
@@ -479,7 +479,7 @@ final class _NativeRuntime implements Finalizable {
           if (reference.target case final _NativeSession target) target,
       ];
       if (pending.isNotEmpty || sessions.isNotEmpty) {
-        _retainTerminalDeliveryTurn();
+        _retainTerminalDeliveryTurn((pending, sessions));
       }
       _pendingSpawns.clear();
       _sessions.clear();
@@ -507,7 +507,7 @@ final class _NativeRuntime implements Finalizable {
     if (kind == ptyx_event_kind.PTYX_EVENT_SPAWN_FAILED) {
       final pending = _pendingSpawns.remove(session);
       if (pending != null) {
-        _retainTerminalDeliveryTurn();
+        _retainTerminalDeliveryTurn(pending);
         pending.onFailure(
           failure ??
               _failureFromValues(
@@ -541,15 +541,19 @@ final class _NativeRuntime implements Finalizable {
       case ptyx_event_kind.PTYX_EVENT_INPUT_FAILED:
         target._nativeInputFailed(failure!);
       case ptyx_event_kind.PTYX_EVENT_OUTPUT_FAILED:
+        _retainTerminalDeliveryTurn(target);
         target._nativeOutputFailed(failure!);
       case ptyx_event_kind.PTYX_EVENT_INFRASTRUCTURE_FAILED:
+        _retainTerminalDeliveryTurn(target);
         target._nativeInfrastructureFailed(failure!);
       case ptyx_event_kind.PTYX_EVENT_OUTPUT_DONE:
+        _retainTerminalDeliveryTurn(target);
         target._nativeOutputDone();
       case ptyx_event_kind.PTYX_EVENT_EXIT:
+        _retainTerminalDeliveryTurn(target);
         target._nativeExit(value);
       case ptyx_event_kind.PTYX_EVENT_CLOSE_COMPLETE:
-        _retainTerminalDeliveryTurn();
+        _retainTerminalDeliveryTurn(target);
         _sessions.remove(session);
         target._nativeCloseComplete(flags, failure);
         _updateLiveness();
@@ -572,19 +576,19 @@ final class _NativeRuntime implements Finalizable {
     final active =
         _pendingSpawns.isNotEmpty ||
         _sessions.isNotEmpty ||
-        _terminalDeliveryTurns != 0;
+        _terminalDeliveryTargets.isNotEmpty;
     _port.keepIsolateAlive = active;
   }
 
-  void _retainTerminalDeliveryTurn() {
+  void _retainTerminalDeliveryTurn(Object target) {
     // A terminal native message can synchronously queue the final output and
     // complete several Dart futures. Keep the port alive through the resulting
     // microtasks and the following event turn so a CLI cannot exit before
     // those consumers observe them.
-    _terminalDeliveryTurns++;
+    _terminalDeliveryTargets.add(target);
     Timer.run(() {
       Timer.run(() {
-        _terminalDeliveryTurns--;
+        _terminalDeliveryTargets.remove(target);
         _updateLiveness();
       });
     });
