@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:isolate';
 import 'dart:typed_data';
 
 import 'package:ptyx/ptyx.dart';
@@ -53,13 +54,18 @@ Future<void> main() async {
   final exitCode = await session.exitCode;
   await outputDone.future;
   await output.cancel();
-  await session.close();
   if (exitCode != 0) {
     throw StateError('probe child exited with $exitCode');
   }
   if (received < 1024 * 1024) {
     throw StateError('probe received only $received output bytes');
   }
-  stdout.writeln('ptyx-standalone-alive');
-  await stdout.flush();
+  final completionLease = ReceivePort();
+  try {
+    await session.close();
+    stdout.writeln('ptyx-standalone-alive');
+    await stdout.flush();
+  } finally {
+    completionLease.close();
+  }
 }
