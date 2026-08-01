@@ -28,14 +28,18 @@ qualification.
 
 ## Windows floor
 
-The runtime floor is build 26100, where `ClosePseudoConsole` became
-nonblocking. Retained Windows Server 2022 evidence showed that its older
-ConPTY implementation retained one process handle per completed session even
-after the child, pipes, HPCON, and job were closed. Supporting that build
-would violate the package cleanup contract. `ptyx` still performs
-`ClosePseudoConsole` on a bounded process-wide closer pool and limits
-admission to 128 live or quarantined sessions. Windows client and Server SKUs
-require separate retained runtime qualification.
+The runtime support floor for release qualification is build 26100, where
+`ClosePseudoConsole` became nonblocking. Retained Windows Server 2022 evidence
+showed that its older ConPTY implementation retained one process handle per
+completed session even after the child, pipes, HPCON, and job were closed.
+Supporting that build would violate the package cleanup contract. The native
+implementation rejects older builds before spawning a session, so they are not
+runtime-compatible fallbacks. Applications must use Windows 26100 or newer
+when deterministic cleanup is required.
+
+`ptyx` still performs `ClosePseudoConsole` on a bounded process-wide closer
+pool and limits admission to 128 live or quarantined sessions. Windows client
+and Server SKUs require separate retained runtime qualification.
 
 ## Unix helper
 

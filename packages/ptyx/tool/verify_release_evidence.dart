@@ -13,6 +13,7 @@ const _targets = {
 };
 const _multiGigabyte = 2 * 1024 * 1024 * 1024;
 const _multiDaySeconds = 48 * 60 * 60;
+const _minimumWindowsBuild = 26100;
 const _productionSteadyRssBudget = 64 * 1024 * 1024;
 const _productionCleanupRssBudget = 32 * 1024 * 1024;
 const _evidenceKeys = {
@@ -279,6 +280,16 @@ List<String> _verifyResult(
         }.every((name) => checks[name] == true)) {
       failures.add('$key evidence must prove the required runtime checks');
     }
+    if (target.startsWith('windows-') &&
+        !_windowsBuildAtLeast(
+          artifact['platform_version'],
+          _minimumWindowsBuild,
+        )) {
+      failures.add(
+        '$key evidence must run on Windows build '
+        '$_minimumWindowsBuild or newer',
+      );
+    }
   } else if (key == 'performance') {
     final performance = manifest['performance'];
     final ratio = artifact['direct_output_ratio'];
@@ -357,6 +368,15 @@ List<String> _verifyResult(
     }
   }
   return failures;
+}
+
+bool _windowsBuildAtLeast(Object? platformVersion, int minimumBuild) {
+  if (platformVersion is! String) return false;
+  final match = RegExp(
+    r'\b10\.0\.(\d+)(?:\.\d+)?(?![\d.])\b',
+  ).firstMatch(platformVersion);
+  final build = int.tryParse(match?.group(1) ?? '');
+  return build != null && build >= minimumBuild;
 }
 
 bool _matchesFuzzCommand(List<Object?> command, String target) {

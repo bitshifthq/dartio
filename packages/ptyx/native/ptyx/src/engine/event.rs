@@ -61,6 +61,13 @@ pub enum Notice {
         handle: u64,
         failure: OperationError,
     },
+    #[cfg_attr(
+        all(not(target_os = "windows"), not(feature = "__private_adapter")),
+        expect(
+            dead_code,
+            reason = "Unix exit observation is owned by the broker and fails as infrastructure loss"
+        )
+    )]
     ExitFailed {
         handle: u64,
         failure: OperationError,

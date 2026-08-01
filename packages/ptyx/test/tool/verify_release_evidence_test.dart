@@ -13,6 +13,8 @@ const _fixtureDigest =
     '2222222222222222222222222222222222222222222222222222222222222222';
 const _scorecardDigest =
     '3333333333333333333333333333333333333333333333333333333333333333';
+const _oldWindowsVersion = 'Microsoft Windows [Version 10.0.19045.1]';
+const _malformedWindowsVersion = 'Microsoft Windows [Version 10.0.26100.foo]';
 
 Map<String, Object?> _acceptedManifest() => {
   'schema': 2,
@@ -93,6 +95,9 @@ Map<String, Object?> _resultEvidence(String key) {
       ..['target'] = target
       ..['platform'] = parts.first
       ..['architecture'] = parts.sublist(1).join('-')
+      ..['platform_version'] = parts.first == 'windows'
+          ? 'Microsoft Windows [Version 10.0.26100.1]'
+          : 'test platform'
       ..['checks'] = {
         for (final name in const [
           'spawn',
@@ -340,7 +345,17 @@ void main() {
                 },
             },
           }),
-          _ => jsonEncode(_resultEvidence(entry.key)),
+          _ => jsonEncode(switch (entry.key) {
+            'runtime-windows-x64' => {
+              ..._resultEvidence(entry.key),
+              'platform_version': _oldWindowsVersion,
+            },
+            'runtime-windows-arm64' => {
+              ..._resultEvidence(entry.key),
+              'platform_version': _malformedWindowsVersion,
+            },
+            _ => _resultEvidence(entry.key),
+          }),
         };
         final file = File('${directory.path}/${descriptor['path']}')
           ..writeAsStringSync(content);
@@ -354,6 +369,14 @@ void main() {
         allOf(
           contains('soak evidence must pass resource and RSS gates'),
           contains('fuzz evidence must prove both decoder targets'),
+          contains(
+            'runtime-windows-x64 evidence must run on Windows build '
+            '26100 or newer',
+          ),
+          contains(
+            'runtime-windows-arm64 evidence must run on Windows build '
+            '26100 or newer',
+          ),
         ),
       );
     });

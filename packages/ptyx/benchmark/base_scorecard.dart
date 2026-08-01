@@ -215,7 +215,33 @@ String _outputScript(int byteCount) => [
 ].join(' ');
 
 Future<void> _write(PtySession session, Uint8List bytes) async {
-  await Future<Object?>.sync(() => Function.apply(session.write, [bytes]));
+  final elapsed = Stopwatch()..start();
+  while (true) {
+    try {
+      final remaining = _timeout - elapsed.elapsed;
+      if (remaining.inMicroseconds <= 0) {
+        throw TimeoutException(
+          'PTY input write did not complete within $_timeout',
+          _timeout,
+        );
+      }
+      await Future<Object?>.sync(
+        () => Function.apply(session.write, [bytes]),
+      ).timeout(remaining);
+      return;
+    } on Object catch (error) {
+      if (error.runtimeType.toString() != 'PtyBackpressureException') {
+        rethrow;
+      }
+      if (elapsed.elapsed >= _timeout) {
+        throw TimeoutException(
+          'PTY input remained backpressured for $_timeout',
+          _timeout,
+        );
+      }
+      await Future<void>.delayed(Duration.zero);
+    }
+  }
 }
 
 Future<void> _expectReady(StreamIterator<int> iterator) async {

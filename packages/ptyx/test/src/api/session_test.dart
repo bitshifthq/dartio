@@ -606,7 +606,70 @@ void main() {
         }
         expect(utf8.decode(report), 'OK $byteCount');
         expect(await session.exitCode, 0);
+        await output.cancel();
+        await expectLater(session.close(), completes);
       }, timeout: const Timeout(Duration(minutes: 2)));
+
+      test(
+        'close succeeds after a pipeline consumes accepted input',
+        () async {
+          const byteCount = 8 * 1024 * 1024;
+          final command = shell(
+            'stty raw -echo; printf READY; '
+            'head -c $byteCount | wc -c',
+          );
+          final session = await PtySession.spawn(
+            PtySpawnOptions(
+              executable: command.executable,
+              arguments: command.arguments,
+              initialSize: defaultSize,
+            ),
+          );
+          final output = StreamIterator(
+            fixtureOutput(session).expand((chunk) => chunk),
+          );
+          addTearDown(output.cancel);
+          for (final expected in utf8.encode('READY')) {
+            expect(await output.moveNext().timeout(shortTimeout), isTrue);
+            expect(output.current, expected);
+          }
+          final chunk = Uint8List(64 * 1024)..fillRange(0, 64 * 1024, 120);
+          final writeElapsed = Stopwatch()..start();
+          var sent = 0;
+          while (sent < byteCount) {
+            final count = min(chunk.length, byteCount - sent);
+            try {
+              final data = count == chunk.length
+                  ? chunk
+                  : Uint8List.sublistView(chunk, 0, count);
+              session.write(data);
+              writeElapsed.reset();
+            } on PtyBackpressureException {
+              if (writeElapsed.elapsed >= shortTimeout) {
+                throw TimeoutException(
+                  'PTY input remained backpressured for $shortTimeout',
+                  shortTimeout,
+                );
+              }
+              await Future<void>.delayed(Duration.zero);
+              continue;
+            }
+            sent += count;
+          }
+          final report = <int>[];
+          while (await output.moveNext().timeout(shortTimeout)) {
+            if (output.current == 10) break;
+            if (output.current != 13) report.add(output.current);
+          }
+          expect(utf8.decode(report).trim(), '$byteCount');
+          expect(await session.exitCode, 0);
+          await output.cancel();
+
+          await expectLater(session.close(), completes);
+        },
+        testOn: 'posix',
+        timeout: const Timeout(Duration(minutes: 2)),
+      );
 
       test('throws PtyClosedException after close', () async {
         final session = await spawnScript(inputEcho);
