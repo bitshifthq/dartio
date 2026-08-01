@@ -177,6 +177,12 @@ budgets. The bundle must also include the production AOT fixture and its Dart
 source; the verifier hashes both files and binds those digests to the soak
 record. The soak records its sampling interval explicitly; this is a sampled
 steady-state bound, not an operating-system high-water RSS claim.
+Performance evidence must retain at least three clean raw production and
+direct-native runs of the same 128 MiB-or-larger workload, warmup and host
+toolchain metadata, artifact digests, exit and byte checks, and medians that
+the verifier recomputes. Sanitizer evidence must retain commands that actually
+enable the named Rust sanitizer; a successful generic test command is not
+qualification evidence.
 The manifest is intentionally absent while any requirement remains open; a
 diagnostic scorecard can never authorize a release merely by exiting
 successfully.
