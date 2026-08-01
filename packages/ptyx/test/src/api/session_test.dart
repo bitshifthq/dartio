@@ -413,6 +413,22 @@ void main() {
         expect(exitCode, 0);
       });
 
+      test('closes from a synchronous output callback', () async {
+        final session = await spawnCommand(finiteOutputCommand(64 * 1024));
+        final closeRequested = Completer<void>();
+        late final StreamSubscription<Uint8List> subscription;
+        subscription = fixtureOutput(session).listen((_) {
+          if (closeRequested.isCompleted) return;
+          unawaited(session.close());
+          closeRequested.complete();
+          unawaited(subscription.cancel());
+        });
+        addTearDown(subscription.cancel);
+
+        await closeRequested.future.timeout(shortTimeout);
+        await expectLater(session.close().timeout(shortTimeout), completes);
+      });
+
       test(
         'discards output when a subscription is canceled immediately',
         () async {

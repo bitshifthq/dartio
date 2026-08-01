@@ -6,96 +6,53 @@ final class _NativeSession implements Finalizable, PtySession {
   final _NativeRuntime _controller;
   final int _handle;
   final int _inputCapacity;
-  final StreamController<Uint8List> _outputController;
-  final StreamController<PtyTermMode> _modeController;
+  late final StreamController<Uint8List> _outputController;
+  late final StreamController<PtyTermMode> _modeController;
   final PtyCapabilities _capabilities;
   final _exit = Completer<int>();
   ({Uint8List bytes, int token})? _pendingOutput;
   Completer<void>? _close;
   PtyInputException? _inputFailure;
   Object? _terminalFailure;
-  Object? _outputTerminalError;
-  StackTrace? _outputTerminalStack;
+  ({Object? error, StackTrace? stackTrace})? _outputTermination;
   var _paused = true;
   var _outputCancelled = false;
-  var _outputEnded = false;
   PtyTermMode? _lastMode;
 
-  _NativeSession._(
-    _NativeRuntime controller,
-    this._handle,
-    this._inputCapacity,
-    this._outputController,
-    this._modeController,
-  ) : _controller = controller,
+  _NativeSession._(_NativeRuntime controller, this._handle, this._inputCapacity)
+    : _controller = controller,
       _capabilities = _capabilitiesFromBits(controller.capabilityBits) {
+    // Synchronous delivery preserves FIFO ordering and avoids an extra event
+    // turn for each native output chunk. Callbacks are therefore reentrant.
+    _outputController = StreamController<Uint8List>(
+      sync: true,
+      onListen: _resumeOutput,
+      onPause: _pauseOutput,
+      onResume: _resumeOutput,
+      onCancel: _cancelOutput,
+    );
+    _modeController = StreamController<PtyTermMode>.broadcast(
+      sync: true,
+      onListen: () => _observeModes(true, 'modeChanges.listen'),
+      onCancel: () => _observeModes(false, 'modeChanges.cancel'),
+    );
     _exit.future.ignore();
     _controller.attachFinalizer(this, _handle);
   }
 
   static Future<_NativeSession> spawn(PtySpawnOptions options) async {
-    final snapshot = PtySpawnOptions(
-      executable: options.executable,
-      arguments: List.unmodifiable(options.arguments),
-      environment: Map.unmodifiable(options.environment),
-      environmentMode: options.environmentMode,
-      workingDirectory: options.workingDirectory,
-      initialSize: options.initialSize,
-      maxBufferedInput: options.maxBufferedInput,
-      maxBufferedOutput: options.maxBufferedOutput,
-      gracefulCloseTimeout: options.gracefulCloseTimeout,
-    );
-    final workingDirectory =
-        snapshot.workingDirectory ?? Directory.current.path;
-    final effectiveEnvironment = _effectiveEnvironment(snapshot);
-    final environment = List<String>.unmodifiable([
-      for (final entry in effectiveEnvironment.entries)
-        '${entry.key}=${entry.value}',
-    ]);
+    final request = _snapshotSpawnRequest(options);
     final controller = await _NativeRuntime.instance;
 
     final completion = Completer<_NativeSession>();
     try {
       controller.startSpawn(
-        (
-          executable: snapshot.executable,
-          arguments: snapshot.arguments,
-          environment: environment,
-          inheritEnvironment:
-              snapshot.environmentMode == PtyEnvironmentMode.inherit,
-          workingDirectory: workingDirectory,
-          rows: snapshot.initialSize.rows,
-          columns: snapshot.initialSize.columns,
-          pixelWidth: snapshot.initialSize.pixelWidth,
-          pixelHeight: snapshot.initialSize.pixelHeight,
-          inputCapacity: snapshot.maxBufferedInput,
-          outputCapacity: snapshot.maxBufferedOutput,
-          gracefulCloseTimeout: snapshot.gracefulCloseTimeout,
-        ),
+        request,
         onReady: (handle) {
-          late final _NativeSession session;
-          // The returned session owns and closes this controller.
-          // ignore: close_sinks
-          final output = StreamController<Uint8List>(
-            sync: true,
-            onListen: () => session._resumeOutput(),
-            onPause: () => session._pauseOutput(),
-            onResume: () => session._resumeOutput(),
-            onCancel: () => session._cancelOutput(),
-          );
-          // The returned session owns and closes this controller.
-          // ignore: close_sinks
-          final modes = StreamController<PtyTermMode>.broadcast(
-            sync: true,
-            onListen: () => session._startModeObservation(),
-            onCancel: () => session._stopModeObservation(),
-          );
-          session = _NativeSession._(
+          final session = _NativeSession._(
             controller,
             handle,
-            snapshot.maxBufferedInput,
-            output,
-            modes,
+            request.inputCapacity,
           );
           completion.complete(session);
           return session;
@@ -119,9 +76,7 @@ final class _NativeSession implements Finalizable, PtySession {
   @override
   Future<PtyExitStatus> get exitStatus async {
     final code = await _exit.future;
-    return capabilities.conPty || code >= 0
-        ? PtyExited(code)
-        : PtySignaled(-code);
+    return code >= 0 ? PtyExited(code) : PtySignaled(-code);
   }
 
   @override
@@ -315,20 +270,7 @@ final class _NativeSession implements Finalizable, PtySession {
       return;
     }
     _terminalFailure = error;
-    if (!_exit.isCompleted) {
-      _exit.completeError(error);
-    }
-    _endOutput(error, force: true);
-    if (!_modeController.isClosed) {
-      _modeController.addError(error);
-      unawaited(_modeController.close());
-    }
-    final close = _close;
-    if (close != null && !close.isCompleted) {
-      close.completeError(error);
-    }
-    _controller.detachFinalizer(this);
-    _controller.releaseSession(_handle);
+    _failReleasedSession(error);
   }
 
   void _nativeOutputDone() {
@@ -400,7 +342,7 @@ final class _NativeSession implements Finalizable, PtySession {
     }
   }
 
-  void _failReleasedSession(Object error, StackTrace stackTrace) {
+  void _failReleasedSession(Object error, [StackTrace? stackTrace]) {
     _terminalFailure ??= error;
     if (!_exit.isCompleted) {
       _exit.completeError(error, stackTrace);
@@ -451,7 +393,7 @@ final class _NativeSession implements Finalizable, PtySession {
     _paused = false;
     Object? failure;
     StackTrace? failureStack;
-    if (!_outputEnded) {
+    if (_outputTermination == null) {
       try {
         _controller.cancelOutput(_handle);
       } on _NativeFailure catch (error, stackTrace) {
@@ -478,11 +420,7 @@ final class _NativeSession implements Finalizable, PtySession {
   }
 
   void _endOutput(Object? error, {bool force = false, StackTrace? stackTrace}) {
-    if (!_outputEnded) {
-      _outputEnded = true;
-      _outputTerminalError = error;
-      _outputTerminalStack = stackTrace;
-    }
+    _outputTermination ??= (error: error, stackTrace: stackTrace);
     if (force) {
       _discardPendingOutput();
     }
@@ -490,12 +428,15 @@ final class _NativeSession implements Finalizable, PtySession {
   }
 
   void _completeOutputIfReady() {
-    if (!_outputEnded || _pendingOutput != null || _outputController.isClosed) {
+    final termination = _outputTermination;
+    if (termination == null ||
+        _pendingOutput != null ||
+        _outputController.isClosed) {
       return;
     }
-    final error = _outputTerminalError;
+    final error = termination.error;
     if (error != null && !_outputCancelled) {
-      _outputController.addError(error, _outputTerminalStack);
+      _outputController.addError(error, termination.stackTrace);
     }
     unawaited(_outputController.close());
   }
@@ -513,28 +454,14 @@ final class _NativeSession implements Finalizable, PtySession {
     return event;
   }
 
-  void _startModeObservation() {
+  void _observeModes(bool enabled, String operation) {
     if (!capabilities.terminalModes || _close != null) {
       return;
     }
     try {
-      _controller.observeMode(_handle, enabled: true);
+      _controller.observeMode(_handle, enabled: enabled);
     } on _NativeFailure catch (failure, stackTrace) {
-      final error = _operationFailure(failure, operation: 'modeChanges.listen');
-      if (!_modeController.isClosed) {
-        _modeController.addError(error, stackTrace);
-      }
-    }
-  }
-
-  void _stopModeObservation() {
-    if (!capabilities.terminalModes || _close != null) {
-      return;
-    }
-    try {
-      _controller.observeMode(_handle, enabled: false);
-    } on _NativeFailure catch (failure, stackTrace) {
-      final error = _operationFailure(failure, operation: 'modeChanges.cancel');
+      final error = _operationFailure(failure, operation: operation);
       if (!_modeController.isClosed) {
         _modeController.addError(error, stackTrace);
       }
@@ -563,7 +490,6 @@ PtyCapabilities _capabilitiesFromBits(int bits) => PtyCapabilities(
   signals: bits & PTYX_CAPABILITY_SIGNALS != 0,
   processGroups: bits & PTYX_CAPABILITY_PROCESS_GROUPS != 0,
   terminalModes: bits & PTYX_CAPABILITY_TERMINAL_MODES != 0,
-  conPty: bits & PTYX_CAPABILITY_CONPTY != 0,
   terminalName: bits & PTYX_CAPABILITY_TERMINAL_NAME != 0,
 );
 
@@ -700,6 +626,27 @@ String _operationName(int operation) => switch (operation) {
   ptyx_operation.PTYX_OPERATION_CLOSE => 'close',
   _ => 'controller',
 };
+
+_NativeSpawnRequest _snapshotSpawnRequest(PtySpawnOptions options) {
+  final effectiveEnvironment = _effectiveEnvironment(options);
+  return (
+    executable: options.executable,
+    arguments: List.unmodifiable(options.arguments),
+    environment: List.unmodifiable([
+      for (final entry in effectiveEnvironment.entries)
+        '${entry.key}=${entry.value}',
+    ]),
+    inheritEnvironment: options.environmentMode == .inherit,
+    workingDirectory: options.workingDirectory ?? Directory.current.path,
+    rows: options.initialSize.rows,
+    columns: options.initialSize.columns,
+    pixelWidth: options.initialSize.pixelWidth,
+    pixelHeight: options.initialSize.pixelHeight,
+    inputCapacity: options.maxBufferedInput,
+    outputCapacity: options.maxBufferedOutput,
+    gracefulCloseTimeout: options.gracefulCloseTimeout,
+  );
+}
 
 Map<String, String> _effectiveEnvironment(PtySpawnOptions options) =>
     switch (options.environmentMode) {

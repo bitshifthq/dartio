@@ -141,9 +141,10 @@ window-change notification. A closed session, unavailable capability, and
 failed native resize remain distinct results.
 
 Capabilities state whether Unix signals, Unix process groups, terminal modes,
-ConPTY, and a terminal name are available. `pid` is a direct-child identifier
-when the platform returns one. A missing terminal name or mode is interpreted
-with its corresponding capability, so it is not ambiguous.
+and a terminal name are available. The backend choice is intentionally not
+part of the public capability object. `pid` is a direct-child identifier when
+the platform returns one. A missing terminal name or mode is interpreted with
+its corresponding capability, so it is not ambiguous.
 
 An on-demand mode query is a snapshot. Nullable fields mean that the platform
 did not report that field. Mode changes are a broadcast observation stream

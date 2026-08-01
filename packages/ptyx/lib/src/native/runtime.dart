@@ -441,23 +441,48 @@ final class _NativeRuntime implements Finalizable {
   }
 
   void _onMessage(Object? message) {
-    if (message is! List<Object?> || message.length != 11) {
-      return;
+    if (message case [
+      final int kind,
+      final int session,
+      final int token,
+      final int flags,
+      final int value,
+      final int errorDomain,
+      final int errorKind,
+      final int errorOperation,
+      final int errorNativeCode,
+      final int errorFlags,
+      final Object? data,
+    ]) {
+      _dispatchMessage(
+        kind: kind,
+        session: session,
+        token: token,
+        flags: flags,
+        value: value,
+        errorDomain: errorDomain,
+        errorKind: errorKind,
+        errorOperation: errorOperation,
+        errorNativeCode: errorNativeCode,
+        errorFlags: errorFlags,
+        data: data,
+      );
     }
-    if (message.take(10).any((value) => value is! int)) {
-      return;
-    }
-    final kind = message[0]! as int;
-    final session = message[1]! as int;
-    final token = message[2]! as int;
-    final flags = message[3]! as int;
-    final value = message[4]! as int;
-    final errorDomain = message[5]! as int;
-    final errorKind = message[6]! as int;
-    final errorOperation = message[7]! as int;
-    final errorNativeCode = message[8]! as int;
-    final errorFlags = message[9]! as int;
-    final data = message[10];
+  }
+
+  void _dispatchMessage({
+    required int kind,
+    required int session,
+    required int token,
+    required int flags,
+    required int value,
+    required int errorDomain,
+    required int errorKind,
+    required int errorOperation,
+    required int errorNativeCode,
+    required int errorFlags,
+    required Object? data,
+  }) {
     final failure = errorKind == ptyx_error_kind.PTYX_ERROR_NONE
         ? null
         : _failureFromValues(

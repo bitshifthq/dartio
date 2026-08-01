@@ -358,7 +358,6 @@ void main() {
     expect(session.capabilities.processGroups, !Platform.isWindows);
     expect(session.capabilities.signals, !Platform.isWindows);
     expect(session.capabilities.terminalModes, !Platform.isWindows);
-    expect(session.capabilities.conPty, Platform.isWindows);
   });
 
   test(

@@ -12,9 +12,6 @@ final class PtyCapabilities {
   /// Whether terminal-mode snapshots are available.
   final bool terminalModes;
 
-  /// Whether the backend uses Windows ConPTY.
-  final bool conPty;
-
   /// Whether [PtySession.ttyName] is available.
   final bool terminalName;
 
@@ -23,7 +20,6 @@ final class PtyCapabilities {
     required this.signals,
     required this.processGroups,
     required this.terminalModes,
-    required this.conPty,
     required this.terminalName,
   });
 }

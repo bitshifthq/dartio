@@ -19,6 +19,9 @@
 - Added environment modes, working directories, resize, signaling, metadata,
   mode observation, explicit native capabilities, and configurable graceful
   close.
+- Removed the backend-specific `PtyCapabilities.conPty` flag; public
+  capabilities now describe caller-observable behavior rather than the native
+  implementation choice.
 - Added stable typed operational errors with operation, category, optional
   native status, and safe context.
 - Added shared native reactors, a hardened Unix spawn/reaping broker, and

@@ -152,11 +152,7 @@ final class CompileFromSource extends LibraryProvider {
           : Directory.fromUri(
               brokerTargetDir.uri.resolve('$cargoTarget/release/'),
             );
-      final broker = File.fromUri(
-        brokerRelease.uri.resolve(
-          targetOS == .windows ? 'ptyx-broker.exe' : 'ptyx-broker',
-        ),
-      );
+      final broker = File.fromUri(brokerRelease.uri.resolve('ptyx-broker'));
       if (!broker.existsSync()) {
         throw StateError(
           'Cargo reported success but ${broker.path} was not found.',
