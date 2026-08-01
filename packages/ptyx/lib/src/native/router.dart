@@ -234,9 +234,14 @@ final class _NativeEventRouter {
   void _retainTerminalDeliveryTurn(Object target) {
     // A terminal native message can synchronously queue final output and
     // complete several Dart futures. Keep the port alive through the current
-    // microtasks and one following event turn.
+    // microtasks and the next event turn so work queued by those completions
+    // remains observable before the isolate becomes idle.
     _terminalDeliveryTargets.add(target);
-    Future<void>.delayed(.zero, () {
+    Timer.run(() => _releaseTerminalDeliveryTurn(target));
+  }
+
+  void _releaseTerminalDeliveryTurn(Object target) {
+    Timer.run(() {
       _terminalDeliveryTargets.remove(target);
       updateLiveness();
     });
