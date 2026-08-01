@@ -69,7 +69,7 @@ class PtyException implements Exception {
   const PtyException(
     this.message, {
     this.operation = 'unknown',
-    this.category = PtyErrorCategory.unknown,
+    this.category = .unknown,
     this.nativeCode,
     this.context,
   });
@@ -91,7 +91,7 @@ class PtyInvalidArgumentException extends PtyException {
     super.operation = 'validation',
     super.nativeCode,
     super.context,
-  }) : super(category: PtyErrorCategory.invalidArgument);
+  }) : super(category: .invalidArgument);
 
   @override
   String get _name => 'PtyInvalidArgumentException';
@@ -108,7 +108,7 @@ class PtyClosedException extends PtyException {
     super.operation = 'state',
     super.nativeCode,
     super.context,
-  }) : super(category: PtyErrorCategory.closed);
+  }) : super(category: .closed);
 
   @override
   String get _name => 'PtyClosedException';
@@ -124,7 +124,7 @@ class PtyUnsupportedException extends PtyException {
     super.operation = 'capability',
     super.nativeCode,
     super.context,
-  }) : super(category: PtyErrorCategory.unsupported);
+  }) : super(category: .unsupported);
 
   @override
   String get _name => 'PtyUnsupportedException';
@@ -140,7 +140,7 @@ class PtyInputException extends PtyException {
     super.operation = 'input',
     super.nativeCode,
     super.context,
-  }) : super(category: PtyErrorCategory.input);
+  }) : super(category: .input);
 
   @override
   String get _name => 'PtyInputException';
@@ -157,7 +157,7 @@ final class PtyBackpressureException extends PtyException {
     super.operation = 'write',
     super.nativeCode,
     super.context,
-  }) : super(category: PtyErrorCategory.backpressure);
+  }) : super(category: .backpressure);
 
   @override
   String get _name => 'PtyBackpressureException';
@@ -170,7 +170,7 @@ class PtyInfrastructureException extends PtyException {
     super.operation = 'controller',
     super.nativeCode,
     super.context,
-  }) : super(category: PtyErrorCategory.infrastructure);
+  }) : super(category: .infrastructure);
 
   @override
   String get _name => 'PtyInfrastructureException';
@@ -183,7 +183,7 @@ class PtySpawnException extends PtyException {
     super.operation = 'spawn',
     super.nativeCode,
     super.context,
-  }) : super(category: PtyErrorCategory.spawn);
+  }) : super(category: .spawn);
 
   @override
   String get _name => 'PtySpawnException';
@@ -196,7 +196,7 @@ class PtyOutputException extends PtyException {
     super.operation = 'output',
     super.nativeCode,
     super.context,
-  }) : super(category: PtyErrorCategory.output);
+  }) : super(category: .output);
 
   @override
   String get _name => 'PtyOutputException';
@@ -209,7 +209,7 @@ class PtyExitException extends PtyException {
     super.operation = 'exit',
     super.nativeCode,
     super.context,
-  }) : super(category: PtyErrorCategory.exit);
+  }) : super(category: .exit);
 
   @override
   String get _name => 'PtyExitException';
@@ -222,7 +222,7 @@ class PtySignalException extends PtyException {
     super.operation = 'signal',
     super.nativeCode,
     super.context,
-  }) : super(category: PtyErrorCategory.signal);
+  }) : super(category: .signal);
 
   @override
   String get _name => 'PtySignalException';
@@ -235,7 +235,7 @@ class PtyResizeException extends PtyException {
     super.operation = 'resize',
     super.nativeCode,
     super.context,
-  }) : super(category: PtyErrorCategory.resize);
+  }) : super(category: .resize);
 
   @override
   String get _name => 'PtyResizeException';
@@ -248,7 +248,7 @@ class PtyMetadataException extends PtyException {
     super.operation = 'metadata',
     super.nativeCode,
     super.context,
-  }) : super(category: PtyErrorCategory.metadata);
+  }) : super(category: .metadata);
 
   @override
   String get _name => 'PtyMetadataException';
@@ -261,7 +261,7 @@ class PtyModeException extends PtyException {
     super.operation = 'mode',
     super.nativeCode,
     super.context,
-  }) : super(category: PtyErrorCategory.mode);
+  }) : super(category: .mode);
 
   @override
   String get _name => 'PtyModeException';
@@ -274,7 +274,7 @@ class PtyCloseException extends PtyException {
     super.operation = 'close',
     super.nativeCode,
     super.context,
-  }) : super(category: PtyErrorCategory.cleanup);
+  }) : super(category: .cleanup);
 
   @override
   String get _name => 'PtyCloseException';
