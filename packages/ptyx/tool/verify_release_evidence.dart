@@ -483,7 +483,13 @@ bool _matchesSanitizerCommand(List<Object?> command, String name) {
     'thread_sanitizer' => 'thread',
     _ => null,
   };
+  final leakOptions =
+      name != 'leak_sanitizer' ||
+      command.any(
+        (argument) => argument is String && argument.contains('detect_leaks=1'),
+      );
   return sanitizer != null &&
+      leakOptions &&
       command.contains('cargo') &&
       command.contains('test') &&
       command.any(

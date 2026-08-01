@@ -164,6 +164,7 @@ Map<String, Object?> _resultEvidence(String key) {
             '+nightly-2026-07-20',
             'test',
             '-Zsanitizer=${name == 'thread_sanitizer' ? 'thread' : 'address'}',
+            if (name == 'leak_sanitizer') 'detect_leaks=1',
           ],
         },
     };
