@@ -119,6 +119,36 @@ Map<String, Object?> _resultEvidence(String key) {
       'direct_output_ratio': 0.90,
       'production_output_mib_s': 90.0,
       'direct_output_mib_s': 100.0,
+      'production_runs': [
+        for (var index = 0; index < 3; index++)
+          {
+            'bytes': 128 * 1024 * 1024,
+            'elapsed_us': 1_000_000,
+            'mib_per_second': 90.0,
+            'exit_code': 0,
+          },
+      ],
+      'direct_runs': [
+        for (var index = 0; index < 3; index++)
+          {
+            'bytes': 128 * 1024 * 1024,
+            'elapsed_us': 900_000,
+            'mib_per_second': 100.0,
+            'exit_code': 0,
+          },
+      ],
+      'repetitions': 3,
+      'warmups': 1,
+      'host': {
+        'platform': 'linux',
+        'architecture': 'x64',
+        'dart_version': '3.11.0',
+        'native_compiler': 'rustc 1.90.0',
+      },
+      'production_artifact_sha256':
+          'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      'direct_artifact_sha256':
+          'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
     });
   } else if (key == 'sanitizers') {
     result['results'] = {
@@ -129,7 +159,12 @@ Map<String, Object?> _resultEvidence(String key) {
       ])
         name: {
           'exit_code': 0,
-          'command': ['cargo', 'test', name],
+          'command': [
+            'cargo',
+            '+nightly-2026-07-20',
+            'test',
+            '-Zsanitizer=${name == 'thread_sanitizer' ? 'thread' : 'address'}',
+          ],
         },
     };
   } else if (key == 'fuzz') {
@@ -345,6 +380,10 @@ void main() {
                 },
             },
           }),
+          'performance' => jsonEncode({
+            ..._resultEvidence('performance'),
+            'production_runs': <Object?>[],
+          }),
           _ => jsonEncode(switch (entry.key) {
             'runtime-windows-x64' => {
               ..._resultEvidence(entry.key),
@@ -369,6 +408,10 @@ void main() {
         allOf(
           contains('soak evidence must pass resource and RSS gates'),
           contains('fuzz evidence must prove both decoder targets'),
+          contains(
+            'performance evidence must include reproducible raw runs, '
+            'provenance, and an independently recomputed gate',
+          ),
           contains(
             'runtime-windows-x64 evidence must run on Windows build '
             '26100 or newer',

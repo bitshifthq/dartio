@@ -1818,6 +1818,14 @@ pub unsafe extern "C" fn ptyx_session_release(session: *mut u64, error: *mut Err
             return STATUS_STALE_HANDLE;
         };
         let engine_handle = {
+            // Keep the registry lock order consistent with `populate_event`:
+            // session state first, then the runtime session map.  Reversing
+            // these locks lets a close event and a finalizer deadlock while
+            // they race to publish/release the same session.
+            let mut session_state = entry
+                .state
+                .lock()
+                .unwrap_or_else(|value| value.into_inner());
             let Ok(mut sessions) = entry.runtime.sessions.lock() else {
                 set_error(
                     error,
@@ -1830,10 +1838,6 @@ pub unsafe extern "C" fn ptyx_session_release(session: *mut u64, error: *mut Err
                 );
                 return STATUS_INTERNAL;
             };
-            let mut session_state = entry
-                .state
-                .lock()
-                .unwrap_or_else(|value| value.into_inner());
             let engine_handle = match *session_state {
                 SessionState::Active(value) => Some(value),
                 SessionState::Spawning

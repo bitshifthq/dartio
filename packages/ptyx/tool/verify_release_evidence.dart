@@ -14,6 +14,7 @@ const _targets = {
 const _multiGigabyte = 2 * 1024 * 1024 * 1024;
 const _multiDaySeconds = 48 * 60 * 60;
 const _minimumWindowsBuild = 26100;
+const _minimumBenchmarkBytes = 128 * 1024 * 1024;
 const _productionSteadyRssBudget = 64 * 1024 * 1024;
 const _productionCleanupRssBudget = 32 * 1024 * 1024;
 const _evidenceKeys = {
@@ -295,17 +296,59 @@ List<String> _verifyResult(
     final ratio = artifact['direct_output_ratio'];
     final production = artifact['production_output_mib_s'];
     final direct = artifact['direct_output_mib_s'];
-    final measuredRatio = production is num && direct is num && direct > 0
-        ? production / direct
+    final productionRuns = artifact['production_runs'];
+    final directRuns = artifact['direct_runs'];
+    final repetitions = artifact['repetitions'];
+    final warmups = artifact['warmups'];
+    final host = artifact['host'];
+    final productionDigest = artifact['production_artifact_sha256'];
+    final directDigest = artifact['direct_artifact_sha256'];
+    final measuredProduction = _medianThroughput(productionRuns);
+    final measuredDirect = _medianThroughput(directRuns);
+    final measuredRatio =
+        measuredProduction != null &&
+            measuredDirect != null &&
+            measuredDirect > 0
+        ? measuredProduction / measuredDirect
         : null;
+    final hasProvenance =
+        host is Map<String, Object?> &&
+        host['platform'] is String &&
+        (host['platform']! as String).isNotEmpty &&
+        host['architecture'] is String &&
+        (host['architecture']! as String).isNotEmpty &&
+        host['dart_version'] is String &&
+        (host['dart_version']! as String).isNotEmpty &&
+        host['native_compiler'] is String &&
+        (host['native_compiler']! as String).isNotEmpty &&
+        productionDigest is String &&
+        RegExp(r'^[a-f0-9]{64}$').hasMatch(productionDigest) &&
+        directDigest is String &&
+        RegExp(r'^[a-f0-9]{64}$').hasMatch(directDigest);
     if (performance is! Map<String, Object?> ||
         ratio != performance['direct_output_ratio'] ||
         ratio is! num ||
         ratio < 0.90 ||
+        repetitions is! int ||
+        repetitions < 3 ||
+        warmups is! int ||
+        warmups < 1 ||
+        !_validThroughputRuns(productionRuns, repetitions) ||
+        !_validThroughputRuns(directRuns, repetitions) ||
+        !hasProvenance ||
+        production is! num ||
+        direct is! num ||
+        measuredProduction == null ||
+        measuredDirect == null ||
+        (production - measuredProduction).abs() > 0.000001 ||
+        (direct - measuredDirect).abs() > 0.000001 ||
         measuredRatio == null ||
         measuredRatio < 0.90 ||
         (measuredRatio - ratio).abs() > 0.000001) {
-      failures.add('performance evidence must independently prove its gate');
+      failures.add(
+        'performance evidence must include reproducible raw runs, '
+        'provenance, and an independently recomputed gate',
+      );
     }
   } else if (key == 'sanitizers') {
     final results = artifact['results'];
@@ -319,7 +362,10 @@ List<String> _verifyResult(
           return result is Map<String, Object?> &&
               result['exit_code'] == 0 &&
               result['command'] is List<Object?> &&
-              (result['command']! as List<Object?>).isNotEmpty;
+              _matchesSanitizerCommand(
+                result['command']! as List<Object?>,
+                name,
+              );
         })) {
       failures.add('sanitizer evidence must prove ASan, LSan, and TSan');
     }
@@ -395,6 +441,55 @@ bool _matchesFuzzCommand(List<Object?> command, String target) {
     if (command[index] != expected[index]) return false;
   }
   return true;
+}
+
+bool _validThroughputRuns(Object? value, int repetitions) {
+  if (value is! List<Object?> || value.length != repetitions) return false;
+  final bytes = <int>{};
+  for (final run in value) {
+    if (run is! Map<String, Object?> ||
+        run['bytes'] is! int ||
+        (run['bytes']! as int) < _minimumBenchmarkBytes ||
+        run['elapsed_us'] is! int ||
+        (run['elapsed_us']! as int) <= 0 ||
+        run['mib_per_second'] is! num ||
+        (run['mib_per_second']! as num) <= 0 ||
+        run['exit_code'] != 0) {
+      return false;
+    }
+    bytes.add(run['bytes']! as int);
+  }
+  return bytes.length == 1;
+}
+
+double? _medianThroughput(Object? value) {
+  if (value is! List<Object?> || value.isEmpty) return null;
+  final runs = [
+    for (final run in value)
+      if (run is Map<String, Object?> && run['mib_per_second'] is num)
+        (run['mib_per_second']! as num).toDouble(),
+  ];
+  if (runs.length != value.length) return null;
+  runs.sort();
+  final middle = runs.length ~/ 2;
+  return runs.length.isOdd
+      ? runs[middle]
+      : (runs[middle - 1] + runs[middle]) / 2;
+}
+
+bool _matchesSanitizerCommand(List<Object?> command, String name) {
+  final sanitizer = switch (name) {
+    'address_sanitizer' || 'leak_sanitizer' => 'address',
+    'thread_sanitizer' => 'thread',
+    _ => null,
+  };
+  return sanitizer != null &&
+      command.contains('cargo') &&
+      command.contains('test') &&
+      command.any(
+        (argument) =>
+            argument is String && argument.contains('-Zsanitizer=$sanitizer'),
+      );
 }
 
 List<String> _verifySoak(File file, Map<String, Object?> manifest) {
