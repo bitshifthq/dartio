@@ -114,23 +114,27 @@ impl<T> GenerationRegistry<T> {
         });
         let slot = &mut self.slots[index];
         slot.value = Some(value);
-        ((slot.generation as u64) << 32) | (index as u64 + 1)
+        encode_handle(index, slot.generation)
     }
 
     pub(crate) fn get(&self, handle: u64) -> Option<&T> {
         let (index, generation) = decode_handle(handle)?;
         let slot = self.slots.get(index)?;
-        (slot.generation == generation)
-            .then_some(slot.value.as_ref())
-            .flatten()
+        if slot.generation == generation {
+            slot.value.as_ref()
+        } else {
+            None
+        }
     }
 
     pub(crate) fn get_mut(&mut self, handle: u64) -> Option<&mut T> {
         let (index, generation) = decode_handle(handle)?;
         let slot = self.slots.get_mut(index)?;
-        (slot.generation == generation)
-            .then_some(slot.value.as_mut())
-            .flatten()
+        if slot.generation == generation {
+            slot.value.as_mut()
+        } else {
+            None
+        }
     }
 
     pub(crate) fn handles(&self) -> Vec<u64> {
@@ -140,7 +144,7 @@ impl<T> GenerationRegistry<T> {
             .filter_map(|(index, slot)| {
                 slot.value
                     .as_ref()
-                    .map(|_| ((slot.generation as u64) << 32) | (index as u64 + 1))
+                    .map(|_| encode_handle(index, slot.generation))
             })
             .collect()
     }
@@ -149,7 +153,7 @@ impl<T> GenerationRegistry<T> {
         self.slots.iter().enumerate().filter_map(|(index, slot)| {
             slot.value
                 .as_ref()
-                .map(|value| (((slot.generation as u64) << 32) | (index as u64 + 1), value))
+                .map(|value| (encode_handle(index, slot.generation), value))
         })
     }
 
@@ -172,6 +176,11 @@ fn decode_handle(handle: u64) -> Option<(usize, u32)> {
     let index = (handle as u32).checked_sub(1)? as usize;
     let generation = (handle >> 32) as u32;
     (generation != 0).then_some((index, generation))
+}
+
+/// Handles use one-based slot indices so zero remains the invalid sentinel.
+fn encode_handle(index: usize, generation: u32) -> u64 {
+    ((generation as u64) << 32) | (index as u64 + 1)
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]

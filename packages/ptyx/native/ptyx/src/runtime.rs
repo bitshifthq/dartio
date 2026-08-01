@@ -92,6 +92,16 @@ impl Runtime {
     ///
     /// Validation and owned option conversion finish before this method
     /// returns. Waiting never retains references to caller-owned collections.
+    ///
+    /// ```no_run
+    /// # use ptyx::{Runtime, SpawnOptions};
+    /// # fn run() -> Result<(), Box<dyn std::error::Error>> {
+    /// let runtime = Runtime::new()?;
+    /// let spawn = runtime.spawn(SpawnOptions::new("sh"))?;
+    /// let (_session, _events) = spawn.wait()?.into_parts();
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn spawn(&self, options: SpawnOptions) -> Result<Spawn, SpawnError> {
         let parts = options.into_parts();
         validate_capacity("input", parts.input_capacity)?;

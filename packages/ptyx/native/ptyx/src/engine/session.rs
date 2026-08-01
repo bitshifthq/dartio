@@ -171,12 +171,7 @@ impl SessionCore {
                 .pop_front()
                 .expect("output byte count is exact")
                 .bytes;
-            self.output_bytes -= bytes.len();
-            self.output_outstanding += bytes.len();
-            if self.output.is_empty() {
-                self.output_deadline = None;
-            }
-            return bytes;
+            return self.lease_output(bytes);
         }
         let mut bytes = BytesMut::with_capacity(amount);
         while bytes.len() < amount {
@@ -189,12 +184,7 @@ impl SessionCore {
                 self.output.pop_front();
             }
         }
-        self.output_bytes -= bytes.len();
-        self.output_outstanding += bytes.len();
-        if self.output.is_empty() {
-            self.output_deadline = None;
-        }
-        bytes.freeze()
+        self.lease_output(bytes.freeze())
     }
 
     pub(crate) fn credit(&mut self, bytes: usize) -> bool {
@@ -258,6 +248,16 @@ impl SessionCore {
                 offset: 0,
             });
         }
+    }
+
+    #[inline]
+    fn lease_output(&mut self, bytes: Bytes) -> Bytes {
+        self.output_bytes -= bytes.len();
+        self.output_outstanding += bytes.len();
+        if self.output.is_empty() {
+            self.output_deadline = None;
+        }
+        bytes
     }
 }
 
