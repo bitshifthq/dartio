@@ -268,11 +268,15 @@ final class _NativeRuntime implements Finalizable {
         );
         options.ref.arguments = _views(arena, request.arguments);
         options.ref.environment = _views(arena, request.environment);
-        options.ref.size
-          ..rows = request.rows
-          ..columns = request.columns
-          ..pixel_width = request.pixelWidth
-          ..pixel_height = request.pixelHeight;
+        options.ref.size = ptyx_size
+            .$allocate(
+              arena,
+              rows: request.rows,
+              columns: request.columns,
+              pixel_width: request.pixelWidth,
+              pixel_height: request.pixelHeight,
+            )
+            .ref;
 
         final session = arena<ptyx_session_t>();
         final error = _newError(arena);
@@ -332,12 +336,13 @@ final class _NativeRuntime implements Finalizable {
     required int pixelHeight,
   }) {
     using((arena) {
-      final size = arena<ptyx_size_t>();
-      size.ref
-        ..rows = rows
-        ..columns = columns
-        ..pixel_width = pixelWidth
-        ..pixel_height = pixelHeight;
+      final size = ptyx_size.$allocate(
+        arena,
+        rows: rows,
+        columns: columns,
+        pixel_width: pixelWidth,
+        pixel_height: pixelHeight,
+      );
       final error = _newError(arena);
       final status = ptyx_session_resize(session, size, error);
       if (status != ptyx_status.PTYX_STATUS_OK) {

@@ -29,7 +29,6 @@ void main() {
 FfiGenerator _generator() => FfiGenerator(
   output: Output(
     dartFile: Uri.file(_output),
-    sort: true,
     preamble: '// ignore_for_file: type=lint',
     style: const NativeExternalBindings(assetId: 'package:ptyx/ptyx.dart'),
   ),
@@ -77,7 +76,6 @@ bool _includeType(Declaration declaration) =>
 FfiGenerator _testGenerator() => FfiGenerator(
   output: Output(
     dartFile: Uri.file(_testOutput),
-    sort: true,
     preamble: '// ignore_for_file: type=lint',
     style: const NativeExternalBindings(assetId: 'package:ptyx/ptyx.dart'),
   ),
