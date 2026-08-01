@@ -14,7 +14,5 @@ import '../ffi/ptyx.g.dart';
 
 part 'interface.dart';
 part 'runtime.dart';
-part 'owner.dart';
 part 'router.dart';
 part 'session.dart';
-part 'support.dart';
