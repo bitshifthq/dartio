@@ -359,20 +359,33 @@ final class _NativeRuntime implements Finalizable {
     }
   }
 
-  void releaseSession(int handle) {
+  _NativeFailure? releaseSession(int handle) {
     if (handle == PTYX_INVALID_SESSION) {
-      return;
+      return null;
     }
+    var status = ptyx_status.PTYX_STATUS_INTERNAL;
+    _NativeFailure? failure;
     try {
       using((arena) {
         final session = arena<ptyx_session_t>()..value = handle;
         final error = _newError(arena);
-        ptyd_session_release(_adapter, session, error);
+        status = ptyd_session_release(_adapter, session, error);
+        if (status != ptyx_status.PTYX_STATUS_OK &&
+            status != ptyx_status.PTYX_STATUS_STALE_HANDLE) {
+          failure = _failure(status, error);
+        }
       });
     } finally {
-      _router.remove(handle);
+      if (status == ptyx_status.PTYX_STATUS_OK ||
+          status == ptyx_status.PTYX_STATUS_STALE_HANDLE) {
+        _router.remove(handle);
+      }
       _updateLiveness();
     }
+    if (failure != null) {
+      ptyd_session_finalize(Pointer<Void>.fromAddress(handle));
+    }
+    return failure;
   }
 
   void _sessionCall(int Function(Pointer<ptyx_error_t> error) operation) {

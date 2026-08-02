@@ -289,7 +289,7 @@ final class _NativeSession implements Finalizable, PtySession {
     }
   }
 
-  void _nativeCloseComplete(int _, _NativeFailure? failure) {
+  void _nativeCloseComplete(_NativeFailure? failure) {
     _controller.detachFinalizer(this);
     _discardPendingOutput();
     _endOutput(null, force: true);

@@ -1,5 +1,8 @@
 # Lifecycle state model
 
+The binding ownership boundary is documented in
+[`binding-boundary.md`](binding-boundary.md).
+
 The Rust core owns the authoritative lifecycle. Rust callers observe it
 through typed values, C callers through generation-tagged handles and events,
 and Dart callers through futures, streams, and typed exceptions.

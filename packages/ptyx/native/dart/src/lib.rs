@@ -377,21 +377,18 @@ pub unsafe extern "C" fn ptyd_event_ack(adapter: u64, token: u64, error: *mut Er
                 OPERATION_OUTPUT,
             );
         };
-        {
-            let Ok(mut state) = pump.state.lock() else {
-                return STATUS_INTERNAL;
-            };
-            if !state.outstanding.remove(&token) {
-                return fail(
-                    error,
-                    STATUS_STALE_HANDLE,
-                    ERROR_DOMAIN_STATE,
-                    ERROR_STALE_HANDLE,
-                    OPERATION_OUTPUT,
-                );
-            }
+        let status = acknowledge_token(&pump, token, || release_event(token, error));
+        if status == STATUS_STALE_HANDLE {
+            fail(
+                error,
+                STATUS_STALE_HANDLE,
+                ERROR_DOMAIN_STATE,
+                ERROR_STALE_HANDLE,
+                OPERATION_OUTPUT,
+            )
+        } else {
+            status
         }
-        release_event(token, error)
     })
 }
 
@@ -500,8 +497,11 @@ fn pump_events(pump: &Arc<Pump>) {
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             if state.stopping {
                 drop(state);
-                unsafe {
-                    release_event(event.token, ptr::null_mut());
+                let status = unsafe { release_event(event.token, ptr::null_mut()) };
+                if status != STATUS_OK && status != STATUS_STALE_HANDLE {
+                    if let Ok(mut state) = pump.state.lock() {
+                        state.outstanding.insert(event.token);
+                    }
                 }
                 break;
             }
@@ -512,10 +512,13 @@ fn pump_events(pump: &Arc<Pump>) {
             }
             state.outstanding.remove(&event.token);
             drop(state);
-            unsafe {
-                release_event(event.token, ptr::null_mut());
-                post_terminal_failure(pump.port);
+            let status = unsafe { release_event(event.token, ptr::null_mut()) };
+            if status != STATUS_OK && status != STATUS_STALE_HANDLE {
+                if let Ok(mut state) = pump.state.lock() {
+                    state.outstanding.insert(event.token);
+                }
             }
+            unsafe { post_terminal_failure(pump.port) };
             break;
         }
 
@@ -532,10 +535,16 @@ fn pump_events(pump: &Arc<Pump>) {
             break;
         }
         if kind == EVENT_SPAWN_FAILED || kind == EVENT_CLOSE_COMPLETE {
-            release_completed_session(pump, session);
+            let status = release_completed_session(pump, session);
+            if status != STATUS_OK && status != STATUS_STALE_HANDLE {
+                unsafe {
+                    post_terminal_failure(pump.port);
+                }
+                break;
+            }
         }
     }
-    stop_pump(pump);
+    let _ = stop_pump(pump);
     let _ = cleanup_pump(pump);
 }
 
@@ -569,18 +578,19 @@ unsafe fn post_event(port: i64, event: &Event) -> bool {
     )
 }
 
-fn release_completed_session(pump: &Pump, session: u64) {
+fn release_completed_session(pump: &Pump, session: u64) -> u32 {
     let Ok(mut state) = pump.state.lock() else {
-        return;
+        return STATUS_INTERNAL;
     };
     if !state.sessions.contains(&session) {
-        return;
+        return STATUS_STALE_HANDLE;
     }
     let mut released = session;
     let status = unsafe { c_api::ptyx_session_release(&mut released, ptr::null_mut()) };
     if status == STATUS_OK || status == STATUS_STALE_HANDLE {
         state.sessions.remove(&session);
     }
+    status
 }
 
 unsafe fn release_event(token: u64, error: *mut Error) -> u32 {
@@ -589,13 +599,29 @@ unsafe fn release_event(token: u64, error: *mut Error) -> u32 {
     c_api::ptyx_event_release(&mut event, error)
 }
 
-fn stop_pump(pump: &Pump) {
+fn acknowledge_token(pump: &Pump, token: u64, release: impl FnOnce() -> u32) -> u32 {
+    {
+        let Ok(state) = pump.state.lock() else {
+            return STATUS_INTERNAL;
+        };
+        if !state.outstanding.contains(&token) {
+            return STATUS_STALE_HANDLE;
+        }
+    }
+    let status = release();
+    if status == STATUS_OK || status == STATUS_STALE_HANDLE {
+        if let Ok(mut state) = pump.state.lock() {
+            state.outstanding.remove(&token);
+        }
+    }
+    status
+}
+
+fn stop_pump(pump: &Pump) -> u32 {
     if let Ok(mut state) = pump.state.lock() {
         state.stopping = true;
     }
-    unsafe {
-        c_api::ptyx_runtime_shutdown(pump.runtime, ptr::null_mut());
-    }
+    unsafe { c_api::ptyx_runtime_shutdown(pump.runtime, ptr::null_mut()) }
 }
 
 fn cleanup_pump(pump: &Pump) -> u32 {
@@ -605,29 +631,45 @@ fn cleanup_pump(pump: &Pump) -> u32 {
     if pump.cleaned.load(Ordering::Acquire) {
         return STATUS_OK;
     }
-    stop_pump(pump);
+    let shutdown_status = stop_pump(pump);
     let (events, sessions) = {
-        let mut state = pump
+        let state = pump
             .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let events = state.outstanding.drain().collect::<Vec<_>>();
+        let events = state.outstanding.iter().copied().collect::<Vec<_>>();
         let sessions = state.sessions.iter().copied().collect::<Vec<_>>();
         (events, sessions)
     };
+    let mut cleanup_status = if shutdown_status == STATUS_OK {
+        STATUS_OK
+    } else {
+        shutdown_status
+    };
     for token in events {
         unsafe {
-            release_event(token, ptr::null_mut());
+            let status = release_event(token, ptr::null_mut());
+            if status != STATUS_OK && status != STATUS_STALE_HANDLE {
+                cleanup_status = status;
+            } else if let Ok(mut state) = pump.state.lock() {
+                state.outstanding.remove(&token);
+            }
         }
     }
     for session in sessions {
         let mut released = session;
         let status = unsafe { c_api::ptyx_session_release(&mut released, ptr::null_mut()) };
+        if status != STATUS_OK && status != STATUS_STALE_HANDLE {
+            cleanup_status = status;
+        }
         if status == STATUS_OK || status == STATUS_STALE_HANDLE {
             if let Ok(mut state) = pump.state.lock() {
                 state.sessions.remove(&session);
             }
         }
+    }
+    if cleanup_status != STATUS_OK {
+        return cleanup_status;
     }
     let mut runtime = pump.runtime;
     let status = unsafe { c_api::ptyx_runtime_release(&mut runtime, ptr::null_mut()) };
@@ -869,8 +911,10 @@ unsafe extern "C" {
 
 #[cfg(test)]
 mod tests {
-    use super::{detach_handle, ptyd_runtime_detach, pumps, release_tracked_session, Pump};
-    use ptyx_c::private::{self as c_api, Error, STATUS_OK};
+    use super::{
+        acknowledge_token, detach_handle, ptyd_runtime_detach, pumps, release_tracked_session, Pump,
+    };
+    use ptyx_c::private::{self as c_api, Error, STATUS_INTERNAL, STATUS_OK};
     use std::sync::Arc;
 
     #[test]
@@ -919,5 +963,30 @@ mod tests {
         drop(cleanup);
         assert_eq!(finalizer.join().expect("finalizer thread"), STATUS_OK);
         assert!(!pump.state.lock().expect("pump state").sessions.contains(&7));
+    }
+
+    #[test]
+    fn failed_event_release_retains_the_token_for_retry() {
+        let pump = Pump::new(0, 1);
+        pump.state.lock().expect("pump state").outstanding.insert(7);
+
+        assert_eq!(
+            acknowledge_token(&pump, 7, || STATUS_INTERNAL),
+            STATUS_INTERNAL
+        );
+        assert!(pump
+            .state
+            .lock()
+            .expect("pump state")
+            .outstanding
+            .contains(&7));
+
+        assert_eq!(acknowledge_token(&pump, 7, || STATUS_OK), STATUS_OK);
+        assert!(!pump
+            .state
+            .lock()
+            .expect("pump state")
+            .outstanding
+            .contains(&7));
     }
 }

@@ -41,6 +41,9 @@ PTYX_EXPORT ptyx_status_t PTYX_CALL ptyd_initialize(void *api_data);
  * Each message is an eleven-element Dart array containing kind, session,
  * token, flags, value, error domain, error kind, error operation, native error
  * code, error flags, and nullable Uint8List data, in that order.
+ * The Dart router validates the message shape and event-kind requirements
+ * before dispatch. A malformed global message reports infrastructure loss;
+ * a malformed session event terminates that session's projected delivery.
  * Output remains bounded by each session's configured native output capacity.
  * Withholding an acknowledgement applies backpressure only to that session;
  * the shared runtime continues fairly delivering other sessions' events.
@@ -75,7 +78,12 @@ PTYX_EXPORT ptyx_status_t PTYX_CALL ptyd_session_spawn_start(
  * @param[in] adapter Owning adapter.
  * @param[in,out] session Tracked handle, cleared on success.
  * @param[out] error Optional initialized error destination.
- * @return PTYX_STATUS_OK or a typed failure.
+ * @return PTYX_STATUS_OK or a typed failure. A failure leaves the session
+ * tracked and its ownership available for a later release attempt.
+ *
+ * The handle is cleared only after native release succeeds or reports a stale
+ * generation. A busy or internal result leaves ownership tracked so cleanup
+ * can be retried.
  */
 PTYX_EXPORT ptyx_status_t PTYX_CALL ptyd_session_release(
     ptyd_adapter_t adapter, ptyx_session_t *session, ptyx_error_t *error);
@@ -104,7 +112,8 @@ PTYX_EXPORT ptyx_status_t PTYX_CALL ptyd_event_ack(ptyd_adapter_t adapter,
  *
  * @param[in,out] adapter Adapter handle, cleared on success.
  * @param[out] error Optional initialized error destination.
- * @return PTYX_STATUS_OK or a typed failure.
+ * @return PTYX_STATUS_OK or a typed failure. A failure leaves the adapter
+ * registered so the caller can retry cleanup.
  */
 PTYX_EXPORT ptyx_status_t PTYX_CALL ptyd_runtime_detach(ptyd_adapter_t *adapter,
                                                         ptyx_error_t *error);

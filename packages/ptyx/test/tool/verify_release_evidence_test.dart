@@ -117,14 +117,14 @@ Map<String, Object?> _resultEvidence(String key) {
   } else if (key == 'performance') {
     result.addAll({
       'direct_output_ratio': 0.90,
-      'production_output_mib_s': 90.0,
-      'direct_output_mib_s': 100.0,
+      'production_output_mib_s': 128.0,
+      'direct_output_mib_s': 142.22222222222223,
       'production_runs': [
         for (var index = 0; index < 3; index++)
           {
             'bytes': 128 * 1024 * 1024,
             'elapsed_us': 1_000_000,
-            'mib_per_second': 90.0,
+            'mib_per_second': 128.0,
             'exit_code': 0,
           },
       ],
@@ -133,7 +133,7 @@ Map<String, Object?> _resultEvidence(String key) {
           {
             'bytes': 128 * 1024 * 1024,
             'elapsed_us': 900_000,
-            'mib_per_second': 100.0,
+            'mib_per_second': 142.22222222222223,
             'exit_code': 0,
           },
       ],
@@ -164,8 +164,11 @@ Map<String, Object?> _resultEvidence(String key) {
             '+nightly-2026-07-20',
             'test',
             '-Zsanitizer=${name == 'thread_sanitizer' ? 'thread' : 'address'}',
-            if (name == 'leak_sanitizer') 'detect_leaks=1',
           ],
+          'environment': {
+            name == 'thread_sanitizer' ? 'TSAN_OPTIONS' : 'ASAN_OPTIONS':
+                'detect_leaks=1:halt_on_error=1',
+          },
         },
     };
   } else if (key == 'fuzz') {
@@ -383,7 +386,15 @@ void main() {
           }),
           'performance' => jsonEncode({
             ..._resultEvidence('performance'),
-            'production_runs': <Object?>[],
+            'production_runs': [
+              for (var index = 0; index < 3; index++)
+                {
+                  'bytes': 128 * 1024 * 1024,
+                  'elapsed_us': 1_000_000,
+                  'mib_per_second': 1.0,
+                  'exit_code': 0,
+                },
+            ],
           }),
           _ => jsonEncode(switch (entry.key) {
             'runtime-windows-x64' => {

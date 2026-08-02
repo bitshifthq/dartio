@@ -879,22 +879,21 @@ pub unsafe extern "C" fn ptyx_runtime_next_event(
                         );
                         return STATUS_OK;
                     }
-                    let Ok(mut sessions) = runtime.sessions.lock() else {
+                    let Ok(mut state) = entry.state.lock() else {
                         runtime.engine.try_abandon(engine_handle);
                         continue;
                     };
-                    let activated = entry
-                        .state
-                        .lock()
-                        .map(|mut state| {
-                            if matches!(*state, SessionState::Activating) {
-                                *state = SessionState::Active(engine_handle);
-                                true
-                            } else {
-                                false
-                            }
-                        })
-                        .unwrap_or(false);
+                    let Ok(mut sessions) = runtime.sessions.lock() else {
+                        *state = SessionState::Failed;
+                        runtime.engine.try_abandon(engine_handle);
+                        continue;
+                    };
+                    let activated = if matches!(*state, SessionState::Activating) {
+                        *state = SessionState::Active(engine_handle);
+                        true
+                    } else {
+                        false
+                    };
                     if activated {
                         sessions.insert(engine_handle, request);
                     } else {
@@ -1818,10 +1817,11 @@ pub unsafe extern "C" fn ptyx_session_release(session: *mut u64, error: *mut Err
             return STATUS_STALE_HANDLE;
         };
         let engine_handle = {
-            // Keep the registry lock order consistent with `populate_event`:
-            // session state first, then the runtime session map.  Reversing
-            // these locks lets a close event and a finalizer deadlock while
-            // they race to publish/release the same session.
+            // Keep the registry lock order consistent with event publication
+            // and spawn activation: session state first, then the runtime
+            // session map. Reversing these locks lets a close event, spawn
+            // notification, and finalizer deadlock while they race to publish
+            // or release the same session.
             let mut session_state = entry
                 .state
                 .lock()

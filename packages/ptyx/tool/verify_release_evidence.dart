@@ -343,7 +343,7 @@ List<String> _verifyResult(
         (production - measuredProduction).abs() > 0.000001 ||
         (direct - measuredDirect).abs() > 0.000001 ||
         measuredRatio == null ||
-        measuredRatio < 0.90 ||
+        measuredRatio + 0.000001 < 0.90 ||
         (measuredRatio - ratio).abs() > 0.000001) {
       failures.add(
         'performance evidence must include reproducible raw runs, '
@@ -365,7 +365,8 @@ List<String> _verifyResult(
               _matchesSanitizerCommand(
                 result['command']! as List<Object?>,
                 name,
-              );
+              ) &&
+              _matchesSanitizerEnvironment(result, name);
         })) {
       failures.add('sanitizer evidence must prove ASan, LSan, and TSan');
     }
@@ -457,6 +458,12 @@ bool _validThroughputRuns(Object? value, int repetitions) {
         run['exit_code'] != 0) {
       return false;
     }
+    final measured =
+        (run['bytes']! as int) /
+        (1024 * 1024) /
+        ((run['elapsed_us']! as int) / 1000000);
+    final supplied = (run['mib_per_second']! as num).toDouble();
+    if ((supplied - measured).abs() > 0.000001) return false;
     bytes.add(run['bytes']! as int);
   }
   return bytes.length == 1;
@@ -483,19 +490,22 @@ bool _matchesSanitizerCommand(List<Object?> command, String name) {
     'thread_sanitizer' => 'thread',
     _ => null,
   };
-  final leakOptions =
-      name != 'leak_sanitizer' ||
-      command.any(
-        (argument) => argument is String && argument.contains('detect_leaks=1'),
-      );
   return sanitizer != null &&
-      leakOptions &&
       command.contains('cargo') &&
       command.contains('test') &&
       command.any(
         (argument) =>
             argument is String && argument.contains('-Zsanitizer=$sanitizer'),
       );
+}
+
+bool _matchesSanitizerEnvironment(Map<String, Object?> result, String name) {
+  final environment = result['environment'];
+  if (environment is! Map<String, Object?>) return false;
+  final variable = name == 'thread_sanitizer' ? 'TSAN_OPTIONS' : 'ASAN_OPTIONS';
+  final options = environment[variable];
+  if (options is! String || !options.contains('halt_on_error=1')) return false;
+  return name != 'leak_sanitizer' || options.contains('detect_leaks=1');
 }
 
 List<String> _verifySoak(File file, Map<String, Object?> manifest) {
