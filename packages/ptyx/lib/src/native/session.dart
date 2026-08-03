@@ -6,30 +6,23 @@ final class _NativeSession implements Finalizable, PtySession {
   final _NativeRuntime _controller;
   final int _handle;
   final int _inputCapacity;
-  late final StreamController<Uint8List> _outputController;
+  late final _NativeOutput _output;
   late final StreamController<PtyTermMode> _modeController;
   final PtyCapabilities _capabilities;
   final _exit = Completer<int>();
-  ({Uint8List bytes, int token})? _pendingOutput;
   Completer<void>? _close;
   PtyInputException? _inputFailure;
   Object? _terminalFailure;
-  ({Object? error, StackTrace? stackTrace})? _outputTermination;
-  var _paused = true;
-  var _outputCancelled = false;
   PtyTermMode? _lastMode;
 
   _NativeSession._(_NativeRuntime controller, this._handle, this._inputCapacity)
     : _controller = controller,
       _capabilities = _capabilitiesFromBits(controller.capabilityBits) {
-    // Synchronous delivery preserves FIFO ordering and avoids an extra event
-    // turn for each native output chunk. Callbacks are therefore reentrant.
-    _outputController = StreamController<Uint8List>(
-      sync: true,
-      onListen: _resumeOutput,
-      onPause: _pauseOutput,
-      onResume: _resumeOutput,
+    _output = _NativeOutput(
+      controller,
+      _handle,
       onCancel: _cancelOutput,
+      onInfrastructureFailure: _nativeInfrastructureFailed,
     );
     _modeController = StreamController<PtyTermMode>.broadcast(
       sync: true,
@@ -93,7 +86,7 @@ final class _NativeSession implements Finalizable, PtySession {
   Stream<PtyTermMode> get modeChanges => _modeController.stream;
 
   @override
-  Stream<Uint8List> get output => _outputController.stream;
+  Stream<Uint8List> get output => _output.stream;
 
   @override
   int? get pid {
@@ -228,27 +221,7 @@ final class _NativeSession implements Finalizable, PtySession {
   }
 
   void _nativeOutput(Uint8List bytes, int token) {
-    if (_outputCancelled || _outputController.isClosed) {
-      _acknowledge(token);
-      return;
-    }
-    if (_paused || !_outputController.hasListener) {
-      if (_pendingOutput != null) {
-        _acknowledge(token);
-        _failReleasedSession(
-          const PtyInfrastructureException(
-            'native output exceeded the one-event delivery lease',
-            operation: 'output',
-          ),
-          StackTrace.current,
-        );
-        return;
-      }
-      _pendingOutput = (bytes: bytes, token: token);
-      return;
-    }
-    _outputController.add(bytes);
-    _acknowledge(token);
+    _output.deliver(bytes, token);
   }
 
   void _nativeInputFailed(_NativeFailure failure) {
@@ -261,7 +234,7 @@ final class _NativeSession implements Finalizable, PtySession {
   }
 
   void _nativeOutputFailed(_NativeFailure failure) {
-    _endOutput(_exception(failure));
+    _output.fail(_exception(failure));
   }
 
   void _nativeInfrastructureFailed(_NativeFailure failure) {
@@ -274,7 +247,7 @@ final class _NativeSession implements Finalizable, PtySession {
   }
 
   void _nativeOutputDone() {
-    _endOutput(_inputFailure);
+    _output.complete(_inputFailure);
   }
 
   void _nativeExit(int status) {
@@ -291,8 +264,7 @@ final class _NativeSession implements Finalizable, PtySession {
 
   void _nativeCloseComplete(_NativeFailure? failure) {
     _controller.detachFinalizer(this);
-    _discardPendingOutput();
-    _endOutput(null, force: true);
+    _output.close();
     if (!_modeController.isClosed) {
       unawaited(_modeController.close());
     }
@@ -347,7 +319,7 @@ final class _NativeSession implements Finalizable, PtySession {
     if (!_exit.isCompleted) {
       _exit.completeError(error, stackTrace);
     }
-    _endOutput(error, force: true, stackTrace: stackTrace);
+    _output.fail(error, force: true, stackTrace: stackTrace);
     if (!_modeController.isClosed) {
       _modeController.addError(error, stackTrace);
       unawaited(_modeController.close());
@@ -368,90 +340,15 @@ final class _NativeSession implements Finalizable, PtySession {
     }
   }
 
-  void _pauseOutput() {
-    _paused = true;
-  }
-
-  void _resumeOutput() {
-    if (_outputCancelled) {
-      return;
-    }
-    _paused = false;
-    final event = _takePendingOutput();
-    if (!_paused && event != null) {
-      _outputController.add(event.bytes);
-      _acknowledge(event.token);
-    }
-    _completeOutputIfReady();
-  }
-
   void _cancelOutput() {
-    if (_outputCancelled) {
-      return;
-    }
-    _outputCancelled = true;
-    _paused = false;
-    Object? failure;
-    StackTrace? failureStack;
-    if (_outputTermination == null) {
-      try {
-        _controller.cancelOutput(_handle);
-      } on _NativeFailure catch (error, stackTrace) {
-        failure = _operationFailure(error, operation: 'output.cancel');
-        failureStack = stackTrace;
-      }
-    }
-    _discardPendingOutput();
-    _completeOutputIfReady();
-    if (failure != null) {
-      Error.throwWithStackTrace(failure, failureStack!);
-    }
-  }
-
-  void _acknowledge(int token) {
-    if (token == 0) {
-      return;
-    }
     try {
-      _controller.acknowledge(token);
-    } on _NativeFailure catch (failure) {
-      _nativeInfrastructureFailed(failure);
+      _output.cancel();
+    } on _NativeFailure catch (failure, stackTrace) {
+      Error.throwWithStackTrace(
+        _operationFailure(failure, operation: 'output.cancel'),
+        stackTrace,
+      );
     }
-  }
-
-  void _endOutput(Object? error, {bool force = false, StackTrace? stackTrace}) {
-    _outputTermination ??= (error: error, stackTrace: stackTrace);
-    if (force) {
-      _discardPendingOutput();
-    }
-    _completeOutputIfReady();
-  }
-
-  void _completeOutputIfReady() {
-    final termination = _outputTermination;
-    if (termination == null ||
-        _pendingOutput != null ||
-        _outputController.isClosed) {
-      return;
-    }
-    final error = termination.error;
-    if (error != null && !_outputCancelled) {
-      _outputController.addError(error, termination.stackTrace);
-    }
-    unawaited(_outputController.close());
-  }
-
-  void _discardPendingOutput() {
-    final event = _takePendingOutput();
-    if (event != null) {
-      _acknowledge(event.token);
-    }
-  }
-
-  ({Uint8List bytes, int token})? _takePendingOutput() {
-    final event = _pendingOutput;
-    _pendingOutput = null;
-    return event;
   }
 
   void _observeModes(bool enabled, String operation) {
@@ -483,6 +380,146 @@ final class _NativeSession implements Finalizable, PtySession {
       _nativeInfrastructureFailed(failure);
     }
     return error;
+  }
+}
+
+/// Projects the native output lease into Dart's single-subscription stream.
+///
+/// Native owns the queue and output credit. This class owns only the one
+/// delivery lease needed to bridge native backpressure to StreamController
+/// pause, resume, cancellation, and terminal delivery.
+final class _NativeOutput {
+  final _NativeRuntime _controller;
+  final int _handle;
+  final void Function(_NativeFailure failure) _onInfrastructureFailure;
+  late final StreamController<Uint8List> _controllerStream;
+  ({Uint8List bytes, int token})? _pending;
+  ({Object? error, StackTrace? stackTrace})? _termination;
+  var _paused = true;
+  var _cancelled = false;
+
+  _NativeOutput(
+    this._controller,
+    this._handle, {
+    required void Function() onCancel,
+    required void Function(_NativeFailure failure) onInfrastructureFailure,
+  }) : _onInfrastructureFailure = onInfrastructureFailure {
+    _controllerStream = StreamController<Uint8List>(
+      sync: true,
+      onListen: _resume,
+      onPause: _pause,
+      onResume: _resume,
+      onCancel: onCancel,
+    );
+  }
+
+  Stream<Uint8List> get stream => _controllerStream.stream;
+
+  void deliver(Uint8List bytes, int token) {
+    if (_cancelled || _controllerStream.isClosed) {
+      _acknowledge(token);
+      return;
+    }
+    if (_paused || !_controllerStream.hasListener) {
+      if (_pending != null) {
+        _acknowledge(token);
+        _onInfrastructureFailure(
+          const _NativeFailure(
+            status: ptyx_status.PTYX_STATUS_INTERNAL,
+            domain: ptyx_error_domain.PTYX_ERROR_DOMAIN_RUNTIME,
+            kind: ptyx_error_kind.PTYX_ERROR_INFRASTRUCTURE_LOST,
+            operation: ptyx_operation.PTYX_OPERATION_OUTPUT,
+            nativeCode: 0,
+            flags: 0,
+            message: 'native output exceeded the one-event delivery lease',
+          ),
+        );
+        return;
+      }
+      _pending = (bytes: bytes, token: token);
+      return;
+    }
+    _controllerStream.add(bytes);
+    _acknowledge(token);
+  }
+
+  void complete(Object? error, {StackTrace? stackTrace}) =>
+      fail(error, stackTrace: stackTrace);
+
+  void fail(Object? error, {bool force = false, StackTrace? stackTrace}) {
+    _termination ??= (error: error, stackTrace: stackTrace);
+    if (force) {
+      _discardPending();
+    }
+    _completeIfReady();
+  }
+
+  void close() {
+    _discardPending();
+    fail(null, force: true);
+  }
+
+  void cancel() {
+    if (_cancelled) {
+      return;
+    }
+    _cancelled = true;
+    _paused = false;
+    if (_termination == null) {
+      _controller.cancelOutput(_handle);
+    }
+    _discardPending();
+    _completeIfReady();
+  }
+
+  void _pause() => _paused = true;
+
+  void _resume() {
+    if (_cancelled) {
+      return;
+    }
+    _paused = false;
+    final event = _takePending();
+    if (event != null) {
+      _controllerStream.add(event.bytes);
+      _acknowledge(event.token);
+    }
+    _completeIfReady();
+  }
+
+  void _acknowledge(int token) {
+    if (token == 0) {
+      return;
+    }
+    try {
+      _controller.acknowledge(token);
+    } on _NativeFailure catch (failure) {
+      _onInfrastructureFailure(failure);
+    }
+  }
+
+  void _discardPending() {
+    final event = _takePending();
+    if (event != null) {
+      _acknowledge(event.token);
+    }
+  }
+
+  ({Uint8List bytes, int token})? _takePending() {
+    final event = _pending;
+    _pending = null;
+    return event;
+  }
+
+  void _completeIfReady() {
+    final termination = _termination;
+    if (termination == null || _pending != null || _controllerStream.isClosed) {
+      return;
+    }
+    if (termination.error != null && !_cancelled) {
+      _controllerStream.addError(termination.error!, termination.stackTrace);
+    }
+    unawaited(_controllerStream.close());
   }
 }
 
