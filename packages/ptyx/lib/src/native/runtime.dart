@@ -59,13 +59,15 @@ final class _NativeRuntime implements Finalizable {
   final RawReceivePort _port;
   final int _adapter;
   final int capabilityBits;
-  final Pointer<ptyx_error_t> _writeError;
+  // Reused for synchronous control calls. Native entry points clear it before
+  // writing a failure, so reusing the slot avoids a native allocation on the
+  // resize/kill/close and output-control paths.
+  final Pointer<ptyx_error_t> _error;
   late final _NativeEventRouter _router;
   _NativeRuntime._(this._port, this._adapter, this.capabilityBits)
-    : _writeError = calloc<ptyx_error_t>() {
+    : _error = _allocateError() {
     _router = _NativeEventRouter(this);
-    _writeError.ref.struct_size = sizeOf<ptyx_error_t>();
-    _allocationFinalizer.attach(this, _writeError.cast(), detach: this);
+    _allocationFinalizer.attach(this, _error.cast(), detach: this);
     _adapterFinalizer.attach(
       this,
       Pointer<Void>.fromAddress(_adapter),
@@ -224,15 +226,14 @@ final class _NativeRuntime implements Finalizable {
             .ref;
 
         final session = arena<ptyx_session_t>();
-        final error = _newError(arena);
         final status = ptyd_session_spawn_start(
           _adapter,
           options,
           session,
-          error,
+          _error,
         );
         if (status != ptyx_status.PTYX_STATUS_OK) {
-          throw _failure(status, error);
+          throw _failure(status, _error);
         }
         _router.addPendingSpawn(
           session.value,
@@ -263,10 +264,10 @@ final class _NativeRuntime implements Finalizable {
       session,
       data.address,
       data.length,
-      _writeError,
+      _error,
     );
     if (status != ptyx_status.PTYX_STATUS_OK) {
-      throw _failure(status, _writeError);
+      throw _failure(status, _error);
     }
   }
 
@@ -289,10 +290,9 @@ final class _NativeRuntime implements Finalizable {
         pixel_width: pixelWidth,
         pixel_height: pixelHeight,
       );
-      final error = _newError(arena);
-      final status = ptyx_session_resize(session, size, error);
+      final status = ptyx_session_resize(session, size, _error);
       if (status != ptyx_status.PTYX_STATUS_OK) {
-        throw _failure(status, error);
+        throw _failure(status, _error);
       }
     });
   }
@@ -300,10 +300,9 @@ final class _NativeRuntime implements Finalizable {
   bool terminate(int session, int signal) {
     return using((arena) {
       final delivered = arena<Uint32>();
-      final error = _newError(arena);
-      final status = ptyx_session_terminate(session, signal, delivered, error);
+      final status = ptyx_session_terminate(session, signal, delivered, _error);
       if (status != ptyx_status.PTYX_STATUS_OK) {
-        throw _failure(status, error);
+        throw _failure(status, _error);
       }
       return delivered.value != 0;
     });
@@ -313,18 +312,17 @@ final class _NativeRuntime implements Finalizable {
     return using((arena) {
       final snapshot = arena<ptyx_session_snapshot_t>();
       snapshot.ref.struct_size = sizeOf<ptyx_session_snapshot_t>();
-      final error = _newError(arena);
-      var status = ptyx_session_snapshot(session, snapshot, error);
+      var status = ptyx_session_snapshot(session, snapshot, _error);
       if (status == ptyx_status.PTYX_STATUS_BUFFER_TOO_SMALL &&
           snapshot.ref.tty_name_required > 0) {
         final name = arena<Uint8>(snapshot.ref.tty_name_required);
         snapshot.ref
           ..tty_name = name
           ..tty_name_capacity = snapshot.ref.tty_name_required;
-        status = ptyx_session_snapshot(session, snapshot, error);
+        status = ptyx_session_snapshot(session, snapshot, _error);
       }
       if (status != ptyx_status.PTYX_STATUS_OK) {
-        throw _failure(status, error);
+        throw _failure(status, _error);
       }
       final flags = snapshot.ref.flags;
       final nameLength = snapshot.ref.tty_name_required;
@@ -355,11 +353,10 @@ final class _NativeRuntime implements Finalizable {
   _NativeFailure? abort() {
     final failure = using((arena) {
       final adapter = arena<ptyd_adapter_t>()..value = _adapter;
-      final error = _newError(arena);
-      final status = ptyd_runtime_abort(adapter, error);
+      final status = ptyd_runtime_abort(adapter, _error);
       return status == ptyx_status.PTYX_STATUS_OK
           ? null
-          : _failure(status, error);
+          : _failure(status, _error);
     });
     _updateLiveness();
     return failure;
@@ -381,11 +378,10 @@ final class _NativeRuntime implements Finalizable {
     try {
       using((arena) {
         final session = arena<ptyx_session_t>()..value = handle;
-        final error = _newError(arena);
-        status = ptyd_session_release(_adapter, session, error);
+        status = ptyd_session_release(_adapter, session, _error);
         if (status != ptyx_status.PTYX_STATUS_OK &&
             status != ptyx_status.PTYX_STATUS_STALE_HANDLE) {
-          failure = _failure(status, error);
+          failure = _failure(status, _error);
         }
       });
     } finally {
@@ -402,13 +398,16 @@ final class _NativeRuntime implements Finalizable {
   }
 
   void _sessionCall(int Function(Pointer<ptyx_error_t> error) operation) {
-    using((arena) {
-      final error = _newError(arena);
-      final status = operation(error);
-      if (status != ptyx_status.PTYX_STATUS_OK) {
-        throw _failure(status, error);
-      }
-    });
+    final status = operation(_error);
+    if (status != ptyx_status.PTYX_STATUS_OK) {
+      throw _failure(status, _error);
+    }
+  }
+
+  static Pointer<ptyx_error_t> _allocateError() {
+    final error = calloc<ptyx_error_t>();
+    error.ref.struct_size = sizeOf<ptyx_error_t>();
+    return error;
   }
 
   void _onMessage(Object? message) {
