@@ -66,9 +66,9 @@ external int ptyd_runtime_abort(
 /// @param[out] error Optional initialized error destination.
 /// @return PTYX_STATUS_OK or a typed failure.
 ///
-/// Each message is an eleven-element Dart array containing kind, session,
-/// token, flags, value, error domain, error kind, error operation, native error
-/// code, error flags, and nullable Uint8List data, in that order.
+/// Each message is a nine-element Dart array containing kind, session, token,
+/// flags, value, error domain, error kind, native error code, and nullable
+/// Uint8List data, in that order.
 /// The adapter owns output-token registration and release. The Dart side keeps
 /// only a fixed message-shape guard for ABI safety; unknown or malformed port
 /// messages converge through the adapter abort operation.
@@ -658,11 +658,11 @@ external int ptyx_session_write(
 
 const int PTYD_INVALID_ADAPTER = 0;
 
-const int PTYX_ABI_VERSION = 4;
+const int PTYX_ABI_VERSION = 5;
 
 const int PTYX_ABI_VERSION_MAJOR = 0;
 
-const int PTYX_ABI_VERSION_MINOR = 4;
+const int PTYX_ABI_VERSION_MINOR = 5;
 
 const int PTYX_CAPABILITY_CONPTY = 8;
 
@@ -720,6 +720,8 @@ typedef ptyx_bytes_view_t = ptyx_bytes_view;
 
 /// @brief Stable value describing one failure.
 ///
+/// The operation is identified by the calling function or event kind, so the
+/// ABI carries only the domain, category, and optional operating-system code.
 /// This structure owns no pointers. Unknown trailing fields are reserved for
 /// compatible ABI growth. Initialize the complete structure to zero and set
 /// struct_size before passing it to ptyx.
@@ -736,25 +738,21 @@ final class ptyx_error extends ffi.Struct {
   @ffi.UnsignedInt()
   external int kind;
 
-  /// < PTYX_OPERATION_* value.
-  @ffi.UnsignedInt()
-  external int operation;
-
   /// < Optional errno or Win32 status, or zero.
   @ffi.Int32()
   external int native_code;
 
-  /// < Reserved error-detail bits.
-  @ffi.Uint32()
-  external int flags;
-
-  /// < Bounded non-secret numeric context.
-  @ffi.Array.multi([2])
-  external ffi.Array<ffi.Uint64> context;
-
-  /// < Must be zero.
-  @ffi.Array.multi([3])
-  external ffi.Array<ffi.Uint64> reserved;
+  static ffi.Pointer<ptyx_error> $allocate(
+    ffi.Allocator $allocator, {
+    required int struct_size,
+    required int domain,
+    required int kind,
+    required int native_code,
+  }) => $allocator<ptyx_error>()
+    ..ref.struct_size = struct_size
+    ..ref.domain = domain
+    ..ref.kind = kind
+    ..ref.native_code = native_code;
 }
 
 /// Stable subsystem that reported an error.
@@ -935,54 +933,6 @@ typedef ptyx_event_t = ptyx_event;
 /// Generation-checked owning event identity.
 typedef ptyx_event_token_t = ffi.Uint64;
 typedef Dartptyx_event_token_t = int;
-
-/// Stable operation associated with an error.
-sealed class ptyx_operation {
-  /// No associated operation.
-  static const PTYX_OPERATION_NONE = 0;
-
-  /// Runtime construction.
-  static const PTYX_OPERATION_RUNTIME_CREATE = 1;
-
-  /// Runtime shutdown or release.
-  static const PTYX_OPERATION_RUNTIME_SHUTDOWN = 2;
-
-  /// Child and terminal spawn.
-  static const PTYX_OPERATION_SPAWN = 3;
-
-  /// Terminal input write.
-  static const PTYX_OPERATION_WRITE = 4;
-
-  /// Terminal output delivery or cancellation.
-  static const PTYX_OPERATION_OUTPUT = 5;
-
-  /// Terminal resize.
-  static const PTYX_OPERATION_RESIZE = 6;
-
-  /// Child termination.
-  static const PTYX_OPERATION_TERMINATE = 7;
-
-  /// Terminal size query.
-  static const PTYX_OPERATION_SIZE = 8;
-
-  /// Direct-child process identifier query.
-  static const PTYX_OPERATION_PROCESS_ID = 9;
-
-  /// Terminal mode query or observation.
-  static const PTYX_OPERATION_TERMINAL_MODE = 10;
-
-  /// Controller terminal-name query.
-  static const PTYX_OPERATION_TERMINAL_NAME = 11;
-
-  /// Session cleanup.
-  static const PTYX_OPERATION_CLOSE = 12;
-
-  /// Direct-child exit-status observation.
-  static const PTYX_OPERATION_EXIT = 13;
-
-  /// Reserved value that fixes the public enum representation at 32 bits.
-  static const PTYX_OPERATION_ENUM_FORCE_32_BIT = 2147483647;
-}
 
 /// @brief Runtime creation options.
 ///

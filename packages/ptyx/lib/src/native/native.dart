@@ -13,6 +13,8 @@ import 'errors.dart';
 import 'event_decoder.dart';
 import 'types.dart';
 
-part 'interface.dart';
 part 'runtime.dart';
 part 'session.dart';
+
+Future<PtySession> spawnSession(PtySpawnOptions options) =>
+    _NativeSession.spawn(options);

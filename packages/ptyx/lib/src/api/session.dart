@@ -1,4 +1,4 @@
-part of 'native.dart';
+part of 'api.dart';
 
 /// A child process connected to a pseudo terminal.
 ///
@@ -42,7 +42,7 @@ abstract interface class PtySession {
   /// unavailable, [PtySpawnException] when native process creation fails, or
   /// [PtyInfrastructureException] when controller setup cannot be completed.
   static Future<PtySession> spawn(PtySpawnOptions options) =>
-      _NativeSession.spawn(options);
+      native.spawnSession(options);
 
   /// Completes with the child process exit code when the child exits.
   ///

@@ -116,9 +116,8 @@ final class _NativeSession implements PtyxFinalizable, PtySession {
 
   @override
   String? get ttyName {
-    if (!capabilities.terminalName) {
-      return null;
-    }
+    if (!capabilities.terminalName) return null;
+
     try {
       return sessionTtyName(_handle);
     } on NativeFailure catch (failure) {
@@ -170,9 +169,8 @@ final class _NativeSession implements PtyxFinalizable, PtySession {
 
   @override
   bool kill([ProcessSignal signal = .sigterm]) {
-    if (_close != null || _exit.isCompleted) {
-      return false;
-    }
+    if (_close != null || _exit.isCompleted) return false;
+
     try {
       return sessionTerminate(_handle, signal.signalNumber);
     } on NativeFailure catch (failure) {
@@ -226,7 +224,7 @@ final class _NativeSession implements PtyxFinalizable, PtySession {
   }
 
   void _nativeInputFailed(NativeFailure failure) {
-    final error = exceptionFromFailure(failure);
+    final error = exceptionFromFailure(failure, operation: 'write');
     if (error is PtyInputException) {
       _inputFailure ??= error;
       return;
@@ -235,40 +233,34 @@ final class _NativeSession implements PtyxFinalizable, PtySession {
   }
 
   void _nativeOutputFailed(NativeFailure failure) {
-    _output.fail(exceptionFromFailure(failure));
+    _output.fail(exceptionFromFailure(failure, operation: 'output'));
   }
 
   void _nativeInfrastructureFailed(NativeFailure failure) {
     final error = exceptionFromFailure(failure);
-    if (_terminalFailure != null) {
-      return;
-    }
+    if (_terminalFailure != null) return;
+
     _terminalFailure = error;
     _failReleasedSession(error);
   }
 
-  void _nativeOutputDone() {
-    _output.complete(_inputFailure);
-  }
+  void _nativeOutputDone() => _output.complete(_inputFailure);
 
   void _nativeExit(int status) {
-    if (!_exit.isCompleted) {
-      _exit.complete(status);
-    }
+    if (!_exit.isCompleted) _exit.complete(status);
   }
 
   void _nativeExitFailed(NativeFailure failure) {
     if (!_exit.isCompleted) {
-      _exit.completeError(exceptionFromFailure(failure));
+      _exit.completeError(exceptionFromFailure(failure, operation: 'exit'));
     }
   }
 
   void _nativeCloseComplete(NativeFailure? failure) {
     _finalizer.detach(this);
     _output.close();
-    if (!_modeController.isClosed) {
-      unawaited(_modeController.close());
-    }
+    if (!_modeController.isClosed) unawaited(_modeController.close());
+
     if (!_exit.isCompleted) {
       _exit.completeError(
         const PtyExitException(
@@ -278,9 +270,8 @@ final class _NativeSession implements PtyxFinalizable, PtySession {
     }
 
     final close = _close ??= Completer<void>();
-    if (close.isCompleted) {
-      return;
-    }
+    if (close.isCompleted) return;
+
     final terminalFailure = _terminalFailure;
     if (terminalFailure != null) {
       close.completeError(terminalFailure);
@@ -394,14 +385,6 @@ final class _NativeSession implements PtyxFinalizable, PtySession {
 NativeFailure _eventFailure(NativeEvent event) =>
     event.failure ??
     syntheticFailure(
-      operation: switch (event.kind) {
-        .inputFailed => ptyx_operation.PTYX_OPERATION_WRITE,
-        .outputFailed => ptyx_operation.PTYX_OPERATION_OUTPUT,
-        .infrastructureFailed => ptyx_operation.PTYX_OPERATION_RUNTIME_SHUTDOWN,
-        .exitFailed => ptyx_operation.PTYX_OPERATION_EXIT,
-        .modeFailed => ptyx_operation.PTYX_OPERATION_TERMINAL_MODE,
-        _ => ptyx_operation.PTYX_OPERATION_NONE,
-      },
       kind: ptyx_error_kind.PTYX_ERROR_INFRASTRUCTURE_LOST,
       message: 'native event omitted its failure details',
     );
@@ -450,7 +433,6 @@ final class _OutputLease {
         _acknowledge(token);
         _onInfrastructureFailure(
           syntheticFailure(
-            operation: ptyx_operation.PTYX_OPERATION_OUTPUT,
             kind: ptyx_error_kind.PTYX_ERROR_INFRASTRUCTURE_LOST,
             message: 'native output exceeded the one-event delivery lease',
           ),
@@ -532,21 +514,18 @@ final class _OutputLease {
   }
 }
 
-_NativeSpawnRequest _snapshotSpawnRequest(PtySpawnOptions options) {
+SpawnRequest _snapshotSpawnRequest(PtySpawnOptions options) {
   final effectiveEnvironment = _effectiveEnvironment(options);
-  return (
+  return SpawnRequest(
     executable: options.executable,
-    arguments: List.unmodifiable(options.arguments),
-    environment: List.unmodifiable([
+    arguments: List<String>.unmodifiable(options.arguments),
+    environment: List<String>.unmodifiable([
       for (final entry in effectiveEnvironment.entries)
         '${entry.key}=${entry.value}',
     ]),
     inheritEnvironment: options.environmentMode == .inherit,
     workingDirectory: options.workingDirectory ?? Directory.current.path,
-    rows: options.initialSize.rows,
-    columns: options.initialSize.columns,
-    pixelWidth: options.initialSize.pixelWidth,
-    pixelHeight: options.initialSize.pixelHeight,
+    size: options.initialSize,
     inputCapacity: options.maxBufferedInput,
     outputCapacity: options.maxBufferedOutput,
     gracefulCloseTimeout: options.gracefulCloseTimeout,

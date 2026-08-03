@@ -1,38 +1,45 @@
 import 'dart:ffi';
 
+import '../api/api.dart';
+
 typedef PtyxFinalizable = Finalizable;
 
 final class NativeFailure implements Exception {
   final int status;
   final int domain;
   final int kind;
-  final int operation;
   final int nativeCode;
-  final int flags;
   final String message;
 
   const NativeFailure({
     required this.status,
     required this.domain,
     required this.kind,
-    required this.operation,
     required this.nativeCode,
-    required this.flags,
     required this.message,
   });
 }
 
-typedef PtyxSpawnRequest = ({
-  String executable,
-  List<String> arguments,
-  List<String> environment,
-  bool inheritEnvironment,
-  String workingDirectory,
-  int rows,
-  int columns,
-  int pixelWidth,
-  int pixelHeight,
-  int inputCapacity,
-  int outputCapacity,
-  Duration gracefulCloseTimeout,
-});
+final class SpawnRequest {
+  final String executable;
+  final List<String> arguments;
+  final List<String> environment;
+  final bool inheritEnvironment;
+  final String workingDirectory;
+  final PtySize size;
+  final int inputCapacity;
+  final int outputCapacity;
+  final Duration gracefulCloseTimeout;
+
+  const SpawnRequest({
+    required this.executable,
+    required this.arguments,
+    required this.environment,
+    required this.inheritEnvironment,
+    required this.workingDirectory,
+    required this.size,
+    required this.inputCapacity,
+    required this.outputCapacity,
+    required this.gracefulCloseTimeout,
+  });
+}

@@ -709,9 +709,7 @@ unsafe fn post_event(port: i64, event: &Event) -> bool {
         event.value,
         event.error.domain,
         event.error.kind,
-        event.error.operation,
         event.error.native_code,
-        event.error.flags,
         event.data,
         event.data_length as isize,
     )
@@ -1041,9 +1039,7 @@ unsafe extern "C" {
         value: i64,
         error_domain: u32,
         error_kind: u32,
-        error_operation: u32,
         native_code: i32,
-        error_flags: u32,
         bytes: *const u8,
         length: isize,
     ) -> bool;

@@ -39,7 +39,7 @@ extern "C" {
 /** ABI major version. */
 #define PTYX_ABI_VERSION_MAJOR UINT32_C(0)
 /** ABI minor version. */
-#define PTYX_ABI_VERSION_MINOR UINT32_C(4)
+#define PTYX_ABI_VERSION_MINOR UINT32_C(5)
 /** Packed ABI version returned by ptyx_abi_version(). */
 #define PTYX_ABI_VERSION                                                       \
   ((PTYX_ABI_VERSION_MAJOR << UINT32_C(16)) | PTYX_ABI_VERSION_MINOR)
@@ -173,43 +173,11 @@ typedef enum ptyx_error_kind {
   PTYX_ERROR_KIND_ENUM_FORCE_32_BIT = INT32_MAX
 } ptyx_error_kind_t;
 
-/** Stable operation associated with an error. */
-typedef enum ptyx_operation {
-  /** No associated operation. */
-  PTYX_OPERATION_NONE = 0,
-  /** Runtime construction. */
-  PTYX_OPERATION_RUNTIME_CREATE = 1,
-  /** Runtime shutdown or release. */
-  PTYX_OPERATION_RUNTIME_SHUTDOWN = 2,
-  /** Child and terminal spawn. */
-  PTYX_OPERATION_SPAWN = 3,
-  /** Terminal input write. */
-  PTYX_OPERATION_WRITE = 4,
-  /** Terminal output delivery or cancellation. */
-  PTYX_OPERATION_OUTPUT = 5,
-  /** Terminal resize. */
-  PTYX_OPERATION_RESIZE = 6,
-  /** Child termination. */
-  PTYX_OPERATION_TERMINATE = 7,
-  /** Terminal size query. */
-  PTYX_OPERATION_SIZE = 8,
-  /** Direct-child process identifier query. */
-  PTYX_OPERATION_PROCESS_ID = 9,
-  /** Terminal mode query or observation. */
-  PTYX_OPERATION_TERMINAL_MODE = 10,
-  /** Controller terminal-name query. */
-  PTYX_OPERATION_TERMINAL_NAME = 11,
-  /** Session cleanup. */
-  PTYX_OPERATION_CLOSE = 12,
-  /** Direct-child exit-status observation. */
-  PTYX_OPERATION_EXIT = 13,
-  /** Reserved value that fixes the public enum representation at 32 bits. */
-  PTYX_OPERATION_ENUM_FORCE_32_BIT = INT32_MAX
-} ptyx_operation_t;
-
 /**
  * @brief Stable value describing one failure.
  *
+ * The operation is identified by the calling function or event kind, so the
+ * ABI carries only the domain, category, and optional operating-system code.
  * This structure owns no pointers. Unknown trailing fields are reserved for
  * compatible ABI growth. Initialize the complete structure to zero and set
  * struct_size before passing it to ptyx.
@@ -218,11 +186,7 @@ typedef struct ptyx_error {
   uint32_t struct_size;       /**< Caller-visible structure size. */
   ptyx_error_domain_t domain; /**< PTYX_ERROR_DOMAIN_* value. */
   ptyx_error_kind_t kind;     /**< PTYX_ERROR_* value. */
-  ptyx_operation_t operation; /**< PTYX_OPERATION_* value. */
   int32_t native_code;        /**< Optional errno or Win32 status, or zero. */
-  uint32_t flags;             /**< Reserved error-detail bits. */
-  uint64_t context[2];        /**< Bounded non-secret numeric context. */
-  uint64_t reserved[3];       /**< Must be zero. */
 } ptyx_error_t;
 
 /**

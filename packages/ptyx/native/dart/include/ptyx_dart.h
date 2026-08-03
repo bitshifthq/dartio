@@ -38,9 +38,9 @@ PTYX_EXPORT ptyx_status_t PTYX_CALL ptyd_initialize(void *api_data);
  * @param[out] error Optional initialized error destination.
  * @return PTYX_STATUS_OK or a typed failure.
  *
- * Each message is an eleven-element Dart array containing kind, session,
- * token, flags, value, error domain, error kind, error operation, native error
- * code, error flags, and nullable Uint8List data, in that order.
+ * Each message is a nine-element Dart array containing kind, session, token,
+ * flags, value, error domain, error kind, native error code, and nullable
+ * Uint8List data, in that order.
  * The adapter owns output-token registration and release. The Dart side keeps
  * only a fixed message-shape guard for ABI safety; unknown or malformed port
  * messages converge through the adapter abort operation.

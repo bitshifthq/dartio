@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::Duration;
 
-const ABI_VERSION: u32 = 4;
+const ABI_VERSION: u32 = 5;
 pub const STATUS_OK: u32 = 0;
 pub const STATUS_INVALID_ARGUMENT: u32 = 1;
 pub const STATUS_STALE_HANDLE: u32 = 2;
@@ -125,24 +125,16 @@ pub struct Error {
     pub struct_size: u32,
     pub domain: u32,
     pub kind: u32,
-    pub operation: u32,
     pub native_code: i32,
-    pub flags: u32,
-    pub context: [u64; 2],
-    pub reserved: [u64; 3],
 }
 
 impl Error {
-    pub fn value(domain: u32, kind: u32, operation: u32, native_code: i32) -> Self {
+    pub fn value(domain: u32, kind: u32, _operation: u32, native_code: i32) -> Self {
         Self {
             struct_size: size_of::<Self>() as u32,
             domain,
             kind,
-            operation,
             native_code,
-            flags: 0,
-            context: [0; 2],
-            reserved: [0; 3],
         }
     }
 
@@ -2004,8 +1996,8 @@ mod tests {
         active_session_for_write, copy_write_result, decode_handle, io_error, operation_error,
         operation_status, sessions, write_boundary, Error, Event, Registry, RuntimeOptions,
         SpawnOptions, ERROR_DOMAIN_ARGUMENT, ERROR_DOMAIN_PROCESS, ERROR_INVALID_ARGUMENT,
-        ERROR_NATIVE_FAILURE, OPERATION_EXIT, OPERATION_SPAWN, OPERATION_TERMINATE,
-        STATUS_BACKPRESSURE, STATUS_INVALID_ARGUMENT, STATUS_OK, STATUS_OS_ERROR,
+        ERROR_NATIVE_FAILURE, OPERATION_SPAWN, OPERATION_TERMINATE, STATUS_BACKPRESSURE,
+        STATUS_INVALID_ARGUMENT, STATUS_OK, STATUS_OS_ERROR,
     };
     use ptyx::__private_adapter::CopyWriteResult;
     use ptyx::{FailureKind, Operation, OperationError};
@@ -2014,10 +2006,10 @@ mod tests {
 
     #[test]
     fn error_layout_matches_the_public_header() {
-        assert_eq!(size_of::<Error>(), 64);
+        assert_eq!(size_of::<Error>(), 16);
         assert_eq!(size_of::<RuntimeOptions>(), 56);
         assert_eq!(size_of::<SpawnOptions>(), 144);
-        assert_eq!(size_of::<Event>(), 136);
+        assert_eq!(size_of::<Event>(), 88);
     }
 
     #[test]
@@ -2057,7 +2049,6 @@ mod tests {
         assert_eq!(status, STATUS_INVALID_ARGUMENT);
         assert_eq!(error.domain, ERROR_DOMAIN_ARGUMENT);
         assert_eq!(error.kind, ERROR_INVALID_ARGUMENT);
-        assert_eq!(error.operation, OPERATION_SPAWN);
     }
 
     #[test]
@@ -2069,7 +2060,6 @@ mod tests {
         assert_eq!(operation_status(failure), STATUS_OS_ERROR);
         assert_eq!(error.domain, ERROR_DOMAIN_PROCESS);
         assert_eq!(error.kind, ERROR_NATIVE_FAILURE);
-        assert_eq!(error.operation, OPERATION_TERMINATE);
         assert_eq!(error.native_code, 73);
     }
 
@@ -2080,7 +2070,6 @@ mod tests {
 
         assert_eq!(operation_status(failure), STATUS_OS_ERROR);
         assert_eq!(error.domain, ERROR_DOMAIN_PROCESS);
-        assert_eq!(error.operation, OPERATION_EXIT);
         assert_eq!(error.native_code, 87);
     }
 
@@ -2108,7 +2097,6 @@ mod tests {
         let status = unsafe { write_boundary(&mut error, || STATUS_OK) };
 
         assert_eq!(status, STATUS_OK);
-        assert_eq!(error.operation, OPERATION_TERMINATE);
         assert_eq!(error.native_code, 73);
     }
 }

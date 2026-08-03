@@ -14,8 +14,11 @@ PtyCapabilities capabilitiesFromBits(int bits) => PtyCapabilities(
   terminalName: bits & PTYX_CAPABILITY_TERMINAL_NAME != 0,
 );
 
-PtyException exceptionFromFailure(NativeFailure failure, {String? operation}) {
-  final publicOperation = operation ?? _operationName(failure.operation);
+PtyException exceptionFromFailure(
+  NativeFailure failure, {
+  String operation = 'controller',
+}) {
+  final publicOperation = operation;
   final nativeCode = failure.nativeCode == 0 ? null : failure.nativeCode;
   if (publicOperation == 'mode' || publicOperation.startsWith('modeChanges.')) {
     return PtyModeException(
@@ -66,11 +69,11 @@ PtyException exceptionFromFailure(NativeFailure failure, {String? operation}) {
     );
   }
   if (failure.domain == ptyx_error_domain.PTYX_ERROR_DOMAIN_INPUT ||
-      failure.operation == ptyx_operation.PTYX_OPERATION_WRITE) {
+      publicOperation == 'write') {
     return inputException(failure: failure, operation: publicOperation);
   }
   if (failure.domain == ptyx_error_domain.PTYX_ERROR_DOMAIN_OUTPUT ||
-      failure.operation == ptyx_operation.PTYX_OPERATION_OUTPUT) {
+      publicOperation == 'output') {
     return PtyOutputException(
       failure.message,
       operation: publicOperation,
@@ -86,36 +89,33 @@ PtyException exceptionFromFailure(NativeFailure failure, {String? operation}) {
       nativeCode: nativeCode,
     );
   }
-  return switch (failure.operation) {
-    ptyx_operation.PTYX_OPERATION_SPAWN => PtySpawnException(
+  return switch (publicOperation) {
+    'spawn' => PtySpawnException(
       failure.message,
       operation: publicOperation,
       nativeCode: nativeCode,
     ),
-    ptyx_operation.PTYX_OPERATION_TERMINATE => PtySignalException(
+    'kill' => PtySignalException(
       failure.message,
       operation: publicOperation,
       nativeCode: nativeCode,
     ),
-    ptyx_operation.PTYX_OPERATION_EXIT => PtyExitException(
+    'exit' => PtyExitException(
       failure.message,
       operation: publicOperation,
       nativeCode: nativeCode,
     ),
-    ptyx_operation.PTYX_OPERATION_RESIZE => PtyResizeException(
+    'resize' => PtyResizeException(
       failure.message,
       operation: publicOperation,
       nativeCode: nativeCode,
     ),
-    ptyx_operation.PTYX_OPERATION_SIZE ||
-    ptyx_operation.PTYX_OPERATION_PROCESS_ID ||
-    ptyx_operation.PTYX_OPERATION_TERMINAL_MODE ||
-    ptyx_operation.PTYX_OPERATION_TERMINAL_NAME => PtyMetadataException(
+    'size' || 'pid' || 'ttyName' => PtyMetadataException(
       failure.message,
       operation: publicOperation,
       nativeCode: nativeCode,
     ),
-    ptyx_operation.PTYX_OPERATION_CLOSE => PtyCloseException(
+    'close' => PtyCloseException(
       failure.message,
       operation: publicOperation,
       nativeCode: nativeCode,
@@ -131,16 +131,12 @@ PtyException exceptionFromFailure(NativeFailure failure, {String? operation}) {
 NativeFailure failureFromEvent({
   required int domain,
   required int kind,
-  required int operation,
   required int nativeCode,
-  required int flags,
 }) => NativeFailure(
   status: ptyx_status.PTYX_STATUS_INTERNAL,
   domain: domain,
   kind: kind,
-  operation: operation,
   nativeCode: nativeCode,
-  flags: flags,
   message: 'native PTY operation failed',
 );
 
@@ -150,24 +146,19 @@ NativeFailure failureFromNative(int status, Pointer<ptyx_error_t> error) {
     status: status,
     domain: value.domain,
     kind: value.kind,
-    operation: value.operation,
     nativeCode: value.native_code,
-    flags: value.flags,
     message: _formatError(error),
   );
 }
 
 NativeFailure syntheticFailure({
-  required int operation,
   required int kind,
   String message = 'native PTY operation failed',
 }) => NativeFailure(
   status: ptyx_status.PTYX_STATUS_INTERNAL,
   domain: ptyx_error_domain.PTYX_ERROR_DOMAIN_RUNTIME,
   kind: kind,
-  operation: operation,
   nativeCode: 0,
-  flags: 0,
   message: message,
 );
 
@@ -220,18 +211,3 @@ String _formatError(Pointer<ptyx_error_t> error) {
     return utf8.decode(bytes.asTypedList(required.value));
   });
 }
-
-String _operationName(int operation) => switch (operation) {
-  ptyx_operation.PTYX_OPERATION_SPAWN => 'spawn',
-  ptyx_operation.PTYX_OPERATION_WRITE => 'write',
-  ptyx_operation.PTYX_OPERATION_OUTPUT => 'output',
-  ptyx_operation.PTYX_OPERATION_RESIZE => 'resize',
-  ptyx_operation.PTYX_OPERATION_TERMINATE => 'kill',
-  ptyx_operation.PTYX_OPERATION_EXIT => 'exit',
-  ptyx_operation.PTYX_OPERATION_SIZE => 'size',
-  ptyx_operation.PTYX_OPERATION_PROCESS_ID => 'pid',
-  ptyx_operation.PTYX_OPERATION_TERMINAL_MODE => 'mode',
-  ptyx_operation.PTYX_OPERATION_TERMINAL_NAME => 'ttyName',
-  ptyx_operation.PTYX_OPERATION_CLOSE => 'close',
-  _ => 'controller',
-};

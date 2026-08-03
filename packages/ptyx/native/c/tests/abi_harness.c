@@ -16,7 +16,7 @@
 #include <time.h>
 #endif
 
-_Static_assert(PTYX_ABI_VERSION == UINT32_C(4), "unexpected ABI version");
+_Static_assert(PTYX_ABI_VERSION == UINT32_C(5), "unexpected ABI version");
 _Static_assert(sizeof(ptyx_runtime_t) == 8, "runtime handle width changed");
 _Static_assert(sizeof(ptyx_session_t) == 8, "session handle width changed");
 _Static_assert(sizeof(ptyx_status_t) == sizeof(int32_t),
@@ -27,8 +27,6 @@ _Static_assert(sizeof(ptyx_error_domain_t) == sizeof(int32_t),
                "error domain enum width changed");
 _Static_assert(sizeof(ptyx_error_kind_t) == sizeof(int32_t),
                "error kind enum width changed");
-_Static_assert(sizeof(ptyx_operation_t) == sizeof(int32_t),
-               "operation enum width changed");
 _Static_assert(sizeof(ptyx_event_kind_t) == sizeof(int32_t),
                "event kind enum width changed");
 _Static_assert(PTYX_STATUS_ENUM_FORCE_32_BIT == INT32_MAX,
@@ -37,8 +35,6 @@ _Static_assert(PTYX_ERROR_DOMAIN_ENUM_FORCE_32_BIT == INT32_MAX,
                "error domain enum does not force 32-bit storage");
 _Static_assert(PTYX_ERROR_KIND_ENUM_FORCE_32_BIT == INT32_MAX,
                "error kind enum does not force 32-bit storage");
-_Static_assert(PTYX_OPERATION_ENUM_FORCE_32_BIT == INT32_MAX,
-               "operation enum does not force 32-bit storage");
 _Static_assert(PTYX_EVENT_KIND_ENUM_FORCE_32_BIT == INT32_MAX,
                "event kind enum does not force 32-bit storage");
 _Static_assert(PTYX_EVENT_MODE_FAILED == 11, "mode failure event value changed");
@@ -48,12 +44,12 @@ _Static_assert(PTYX_MODE_CANONICAL == UINT32_C(1),
 _Static_assert(PTYX_MODE_ECHO == UINT32_C(2), "echo mode bit changed");
 _Static_assert(PTYX_MODE_SIGNALS == UINT32_C(4), "signal mode bit changed");
 _Static_assert(sizeof(ptyx_size_t) == 16, "size layout changed");
-_Static_assert(sizeof(ptyx_error_t) == 64, "error layout changed");
+_Static_assert(sizeof(ptyx_error_t) == 16, "error layout changed");
 _Static_assert(sizeof(ptyx_runtime_options_t) == 56,
                "runtime options layout changed");
 _Static_assert(sizeof(ptyx_spawn_options_t) == 144,
                "spawn options layout changed");
-_Static_assert(sizeof(ptyx_event_t) == 136, "event layout changed");
+_Static_assert(sizeof(ptyx_event_t) == 88, "event layout changed");
 
 static void require(int condition, const char *message) {
   if (!condition) {

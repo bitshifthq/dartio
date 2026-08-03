@@ -36,6 +36,10 @@ public Dart API -> Dart value/marshaling -> generated FFI -> C adapter -> Rust c
   followed by a fill call is the explicit exception required by the C ABI.
 - Use integer handles at the Dart boundary. Handles are opaque, nonzero, and
   native-owned; Dart must not dereference or fabricate them.
+- Do not add one-line redirect helpers for constants, handle predicates, or
+  methods that merely forward to another method. Use the value directly at
+  the call site. Keep a helper only when it owns allocation, error conversion,
+  cleanup, or another invariant that would otherwise be duplicated.
 
 ## Ownership and events
 
@@ -67,14 +71,16 @@ synchronous direct C callers, never the Dart adapter's async contract.
 The preferred stable contract is:
 
 ```c
-ptyx_status_t ptyx_operation(..., ptyx_error_t *error);
+ptyx_status_t ptyx_session_write(..., ptyx_error_t *error);
 ```
 
 - `ptyx_status_t` has an explicit fixed-width representation. Zero is success;
   unknown nonzero values are errors.
 - `ptyx_error_t` is caller-owned and versioned by `struct_size`. It contains
-  only fixed-width domain/kind/operation/native-code/flags fields: no borrowed
-  pointers or message storage. A null error is allowed only when documented.
+  only fixed-width domain/kind/native-code fields: no borrowed pointers,
+  operation strings, flags, or message storage. The calling function or event
+  kind supplies operation context. A null error is allowed only when
+  documented.
 - On failure the operation fills the supplied error with the primary failure.
   On success it does not leave stale diagnostics visible. Error lifetime ends
   with the next operation that writes that storage.

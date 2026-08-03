@@ -27,6 +27,7 @@ export 'src/api/api.dart'
         PtyModeException,
         PtyOutputException,
         PtyResizeException,
+        PtySession,
         PtySignalException,
         PtySignaled,
         PtySize,
@@ -34,5 +35,3 @@ export 'src/api/api.dart'
         PtySpawnOptions,
         PtyTermMode,
         PtyUnsupportedException;
-
-export 'src/native/native.dart' show PtySession;

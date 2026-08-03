@@ -32,7 +32,7 @@ Future<void> _guardNativeOwner(SendPort ready) async {
     await for (final message in commands) {
       switch (message) {
         case [_guardianCreate, final int port, final SendPort reply]
-            when isInvalidAdapter(adapter):
+            when adapter == PTYD_INVALID_ADAPTER:
           unarmedLease.cancel();
           try {
             adapter = _createRuntime(port);
@@ -43,9 +43,7 @@ Future<void> _guardNativeOwner(SendPort ready) async {
               failure.status,
               failure.domain,
               failure.kind,
-              failure.operation,
               failure.nativeCode,
-              failure.flags,
               failure.message,
             ]);
             commands.close();
@@ -56,7 +54,7 @@ Future<void> _guardNativeOwner(SendPort ready) async {
     }
   } finally {
     unarmedLease.cancel();
-    if (!isInvalidAdapter(adapter)) {
+    if (adapter != PTYD_INVALID_ADAPTER) {
       try {
         runtimeDetach(adapter);
       } on NativeFailure {
@@ -66,7 +64,6 @@ Future<void> _guardNativeOwner(SendPort ready) async {
   }
 }
 
-typedef _NativeSpawnRequest = PtyxSpawnRequest;
 typedef _PendingSpawn = ({
   _NativeSession Function(int handle) onReady,
   void Function(NativeFailure failure) onFailure,
@@ -120,7 +117,7 @@ final class _NativeRuntime implements PtyxFinalizable {
   }
 
   void startSpawn(
-    _NativeSpawnRequest request, {
+    SpawnRequest request, {
     required _NativeSession Function(int handle) onReady,
     required void Function(NativeFailure failure) onFailure,
   }) {
@@ -157,10 +154,7 @@ final class _NativeRuntime implements PtyxFinalizable {
   void _abortProtocol() {
     final failure =
         abort() ??
-        syntheticFailure(
-          operation: ptyx_operation.PTYX_OPERATION_OUTPUT,
-          kind: ptyx_error_kind.PTYX_ERROR_INFRASTRUCTURE_LOST,
-        );
+        syntheticFailure(kind: ptyx_error_kind.PTYX_ERROR_INFRASTRUCTURE_LOST);
     _handleInfrastructureFailure(failure);
   }
 
@@ -169,7 +163,6 @@ final class _NativeRuntime implements PtyxFinalizable {
       _handleInfrastructureFailure(
         event.failure ??
             syntheticFailure(
-              operation: ptyx_operation.PTYX_OPERATION_RUNTIME_SHUTDOWN,
               kind: ptyx_error_kind.PTYX_ERROR_INFRASTRUCTURE_LOST,
             ),
       );
@@ -185,7 +178,7 @@ final class _NativeRuntime implements PtyxFinalizable {
     }
     final target = _sessions[event.session]?.target;
     if (target == null) {
-      if (!isInvalidToken(event.token)) {
+      if (event.token != PTYX_INVALID_EVENT_TOKEN) {
         _ackOrRelease(event.session, event.token);
       }
       final failure = releaseSession(event.session);
@@ -253,10 +246,7 @@ final class _NativeRuntime implements PtyxFinalizable {
     _retainTerminalDeliveryTurn(pending);
     pending.onFailure(
       failure ??
-          syntheticFailure(
-            operation: ptyx_operation.PTYX_OPERATION_SPAWN,
-            kind: ptyx_error_kind.PTYX_ERROR_NATIVE_FAILURE,
-          ),
+          syntheticFailure(kind: ptyx_error_kind.PTYX_ERROR_NATIVE_FAILURE),
     );
     _updateLiveness();
   }
@@ -314,18 +304,14 @@ final class _NativeRuntime implements PtyxFinalizable {
           final int status,
           final int domain,
           final int kind,
-          final int operation,
           final int nativeCode,
-          final int flags,
           final String message,
         ]:
           throw NativeFailure(
             status: status,
             domain: domain,
             kind: kind,
-            operation: operation,
             nativeCode: nativeCode,
-            flags: flags,
             message: message,
           );
         default:

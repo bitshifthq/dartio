@@ -1,5 +1,17 @@
 part of 'api.dart';
 
+bool _sameArguments(List<String> left, List<String> right) =>
+    left.length == right.length &&
+    left.indexed.every((entry) => entry.$2 == right[entry.$1]);
+
+bool _sameEnvironment(Map<String, String> left, Map<String, String> right) {
+  if (left.length != right.length) return false;
+  for (final entry in left.entries) {
+    if (right[entry.key] != entry.value) return false;
+  }
+  return true;
+}
+
 /// How spawn options build the child process environment.
 enum PtyEnvironmentMode {
   /// Inherits the parent environment and ignores [PtySpawnOptions.environment].
@@ -98,4 +110,32 @@ final class PtySpawnOptions {
     this.maxBufferedOutput = 256 * 1024,
     this.gracefulCloseTimeout = const Duration(milliseconds: 250),
   });
+
+  @override
+  int get hashCode => Object.hash(
+    executable,
+    Object.hashAll(arguments),
+    Object.hashAllUnordered(
+      environment.entries.map((entry) => Object.hash(entry.key, entry.value)),
+    ),
+    environmentMode,
+    workingDirectory,
+    initialSize,
+    maxBufferedInput,
+    maxBufferedOutput,
+    gracefulCloseTimeout,
+  );
+
+  @override
+  bool operator ==(Object other) =>
+      other is PtySpawnOptions &&
+      executable == other.executable &&
+      _sameArguments(arguments, other.arguments) &&
+      _sameEnvironment(environment, other.environment) &&
+      environmentMode == other.environmentMode &&
+      workingDirectory == other.workingDirectory &&
+      initialSize == other.initialSize &&
+      maxBufferedInput == other.maxBufferedInput &&
+      maxBufferedOutput == other.maxBufferedOutput &&
+      gracefulCloseTimeout == other.gracefulCloseTimeout;
 }

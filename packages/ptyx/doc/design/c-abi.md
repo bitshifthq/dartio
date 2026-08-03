@@ -44,7 +44,7 @@ The exported-symbol allowlist is tested for each produced library.
 The ABI uses:
 
 - `uint64_t` generation-tagged runtime and session identities;
-- named C enums for single-choice status, domain, kind, operation, and event
+- named C enums for single-choice status, domain, kind, and event
   values;
 - fixed-width integer flag, capability, length, handle, code, and reserved
   fields;
@@ -167,19 +167,21 @@ unrelated input, output, or process lifetime.
 
 ## Errors
 
-Errors are values containing:
+Errors are compact values containing:
 
 - a stable domain;
 - a stable kind;
-- the failed operation;
 - an optional native or OS code;
-- bounded non-secret numeric context.
+
+The calling function or event kind identifies the operation, so the ABI does
+not duplicate it in every error value. It also avoids optional context and
+reserved diagnostic fields that would increase every event and error copy.
 
 Delayed failures retain the same value through native state, events, close,
 and binding translation. A close-complete event uses flags to report every
 co-occurring direction and carries the primary error in fixed priority:
-cleanup, then accepted input, then output. Flags never override the operation
-or domain carried by that error.
+cleanup, then accepted input, then output. The event kind and close flags
+provide the operation context without expanding the error value.
 
 An error contains no borrowed message pointer. `ptyx_error_format` writes an
 actionable description into caller-owned storage and reports the required

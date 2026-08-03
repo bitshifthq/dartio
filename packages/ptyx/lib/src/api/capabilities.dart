@@ -22,4 +22,16 @@ final class PtyCapabilities {
     required this.terminalModes,
     required this.terminalName,
   });
+
+  @override
+  int get hashCode =>
+      Object.hash(signals, processGroups, terminalModes, terminalName);
+
+  @override
+  bool operator ==(Object other) =>
+      other is PtyCapabilities &&
+      signals == other.signals &&
+      processGroups == other.processGroups &&
+      terminalModes == other.terminalModes &&
+      terminalName == other.terminalName;
 }

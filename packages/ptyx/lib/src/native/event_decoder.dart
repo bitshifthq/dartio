@@ -35,12 +35,6 @@ NativeEventKind decodeEventKind(int value) => switch (value) {
   _ => throw FormatException('unknown native event kind: $value'),
 };
 
-bool isInvalidSession(int value) => value == PTYX_INVALID_SESSION;
-
-bool isInvalidToken(int value) => value == PTYX_INVALID_EVENT_TOKEN;
-
-bool isInvalidAdapter(int value) => value == PTYD_INVALID_ADAPTER;
-
 final class NativeEvent {
   final NativeEventKind kind;
   final int session;
@@ -61,7 +55,7 @@ final class NativeEvent {
   });
 
   bool get isGlobalInfrastructureFailure =>
-      isInvalidSession(session) && kind == .infrastructureFailed;
+      session == PTYX_INVALID_SESSION && kind == .infrastructureFailed;
 }
 
 NativeEvent? decodeEvent(Object? message) {
@@ -73,9 +67,7 @@ NativeEvent? decodeEvent(Object? message) {
     final int value,
     final int errorDomain,
     final int errorKind,
-    final int errorOperation,
     final int errorNativeCode,
-    final int errorFlags,
     final Object? data,
   ]) {
     if (data != null && data is! Uint8List) return null;
@@ -86,9 +78,7 @@ NativeEvent? decodeEvent(Object? message) {
         : failureFromEvent(
             domain: errorDomain,
             kind: errorKind,
-            operation: errorOperation,
             nativeCode: errorNativeCode,
-            flags: errorFlags,
           );
     final event = NativeEvent(
       kind: kind,
