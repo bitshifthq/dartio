@@ -64,11 +64,11 @@ Future<void> _guardNativeOwner(SendPort ready) async {
 }
 
 typedef _PendingSpawn = ({
-  _NativeSession Function(int handle) onReady,
+  NativeSession Function(int handle) onReady,
   void Function(PtyException error) onFailure,
 });
 
-final class _NativeRuntime implements PtyxFinalizable {
+final class _NativeRuntime implements Finalizable {
   static final _finalizer = NativeFinalizer(
     Native.addressOf<NativeFinalizerFunction>(ptyd_runtime_finalize),
   );
@@ -78,7 +78,7 @@ final class _NativeRuntime implements PtyxFinalizable {
   final int _adapter;
   PtyCapabilities? _capabilities;
   final Map<int, _PendingSpawn> _pendingSpawns = {};
-  final Map<int, WeakReference<_NativeSession>> _sessions = {};
+  final Map<int, WeakReference<NativeSession>> _sessions = {};
   final List<Object> _terminalDeliveryTargets = [];
 
   _NativeRuntime._(this._port, int adapter) : _adapter = adapter {
@@ -102,9 +102,7 @@ final class _NativeRuntime implements PtyxFinalizable {
     return failure;
   }
 
-  void acknowledge(int token) {
-    eventAcknowledge(_adapter, token);
-  }
+  void acknowledge(int token) => eventAcknowledge(_adapter, token);
 
   PtyException? releaseSession(int handle) {
     PtyException? failure;
@@ -123,7 +121,7 @@ final class _NativeRuntime implements PtyxFinalizable {
 
   void startSpawn(
     SpawnRequest request, {
-    required _NativeSession Function(int handle) onReady,
+    required NativeSession Function(int handle) onReady,
     required void Function(PtyException error) onFailure,
   }) {
     try {
@@ -196,7 +194,7 @@ final class _NativeRuntime implements PtyxFinalizable {
     final pending = _pendingSpawns.values.toList(growable: false);
     final sessions = [
       for (final reference in _sessions.values)
-        if (reference.target case final _NativeSession target) target,
+        if (reference.target case final NativeSession target) target,
     ];
     if (pending.isNotEmpty || sessions.isNotEmpty) {
       _retainTerminalDeliveryTurn((pending, sessions));
@@ -207,7 +205,7 @@ final class _NativeRuntime implements PtyxFinalizable {
       spawn.onFailure(error);
     }
     for (final session in sessions) {
-      session._failInfrastructure(error);
+      session._failSession(error);
     }
     _updateLiveness();
   }

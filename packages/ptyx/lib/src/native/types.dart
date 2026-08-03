@@ -1,8 +1,4 @@
-import 'dart:ffi';
-
 import '../api/api.dart';
-
-typedef PtyxFinalizable = Finalizable;
 
 final class SpawnRequest {
   final String executable;

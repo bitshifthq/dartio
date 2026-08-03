@@ -17,17 +17,17 @@
 #endif
 
 _Static_assert(PTYX_ABI_VERSION == UINT32_C(5), "unexpected ABI version");
-_Static_assert(sizeof(ptyx_runtime_t) == 8, "runtime handle width changed");
-_Static_assert(sizeof(ptyx_session_t) == 8, "session handle width changed");
-_Static_assert(sizeof(ptyx_status_t) == sizeof(int32_t),
+_Static_assert(sizeof(PtyxRuntime) == 8, "runtime handle width changed");
+_Static_assert(sizeof(PtyxSession) == 8, "session handle width changed");
+_Static_assert(sizeof(PtyxStatus) == sizeof(int32_t),
                "status enum width changed");
-_Static_assert(_Alignof(ptyx_status_t) == _Alignof(int32_t),
+_Static_assert(_Alignof(PtyxStatus) == _Alignof(int32_t),
                "status enum alignment changed");
-_Static_assert(sizeof(ptyx_error_domain_t) == sizeof(int32_t),
+_Static_assert(sizeof(PtyxErrorDomain) == sizeof(int32_t),
                "error domain enum width changed");
-_Static_assert(sizeof(ptyx_error_kind_t) == sizeof(int32_t),
+_Static_assert(sizeof(PtyxErrorKind) == sizeof(int32_t),
                "error kind enum width changed");
-_Static_assert(sizeof(ptyx_event_kind_t) == sizeof(int32_t),
+_Static_assert(sizeof(PtyxEventKind) == sizeof(int32_t),
                "event kind enum width changed");
 _Static_assert(PTYX_STATUS_ENUM_FORCE_32_BIT == INT32_MAX,
                "status enum does not force 32-bit storage");
@@ -43,13 +43,13 @@ _Static_assert(PTYX_MODE_CANONICAL == UINT32_C(1),
                "canonical mode bit changed");
 _Static_assert(PTYX_MODE_ECHO == UINT32_C(2), "echo mode bit changed");
 _Static_assert(PTYX_MODE_SIGNALS == UINT32_C(4), "signal mode bit changed");
-_Static_assert(sizeof(ptyx_size_t) == 16, "size layout changed");
-_Static_assert(sizeof(ptyx_error_t) == 16, "error layout changed");
-_Static_assert(sizeof(ptyx_runtime_options_t) == 56,
+_Static_assert(sizeof(PtyxSize) == 16, "size layout changed");
+_Static_assert(sizeof(PtyxError) == 16, "error layout changed");
+_Static_assert(sizeof(PtyxRuntimeOptions) == 56,
                "runtime options layout changed");
-_Static_assert(sizeof(ptyx_spawn_options_t) == 144,
+_Static_assert(sizeof(PtyxSpawnOptions) == 144,
                "spawn options layout changed");
-_Static_assert(sizeof(ptyx_event_t) == 88, "event layout changed");
+_Static_assert(sizeof(PtyxEvent) == 88, "event layout changed");
 
 static void require(int condition, const char *message) {
   if (!condition) {
@@ -58,15 +58,15 @@ static void require(int condition, const char *message) {
   }
 }
 
-static ptyx_error_t error_value(void) {
-  ptyx_error_t error;
+static PtyxError error_value(void) {
+  PtyxError error;
   memset(&error, 0, sizeof(error));
   error.struct_size = sizeof(error);
   return error;
 }
 
-static ptyx_bytes_view_t bytes_view(const char *value) {
-  ptyx_bytes_view_t view;
+static PtyxBytesView bytes_view(const char *value) {
+  PtyxBytesView view;
   view.data = (const uint8_t *)value;
   view.length = strlen(value);
   return view;
@@ -92,11 +92,11 @@ static void yield_thread(void) {
 #endif
 }
 
-static void write_when_admitted(ptyx_session_t session, const char *input,
-                                ptyx_error_t *error) {
+static void write_when_admitted(PtyxSession session, const char *input,
+                                PtyxError *error) {
   const uint64_t deadline = monotonic_milliseconds() + UINT64_C(5000);
   for (;;) {
-    const ptyx_status_t status =
+    const PtyxStatus status =
         ptyx_session_write(session, (const uint8_t *)input, strlen(input),
                            error);
     if (status == PTYX_STATUS_OK) {
@@ -124,16 +124,16 @@ static void exercise_session_lifecycle(void) {
                                    "read line; echo ptyx-c-abi; sleep 30"};
   const char *input = "x\n";
 #endif
-  ptyx_bytes_view_t
+  PtyxBytesView
       arguments[sizeof(argument_values) / sizeof(argument_values[0])];
-  ptyx_error_t error = error_value();
-  ptyx_event_t event;
-  ptyx_runtime_t runtime = PTYX_INVALID_RUNTIME;
-  ptyx_session_t session = PTYX_INVALID_SESSION;
-  ptyx_size_t size;
+  PtyxError error = error_value();
+  PtyxEvent event;
+  PtyxRuntime runtime = PTYX_INVALID_RUNTIME;
+  PtyxSession session = PTYX_INVALID_SESSION;
+  PtyxSize size;
   int64_t pid = 0;
   uint64_t tty_required = 0;
-  ptyx_spawn_options_t options;
+  PtyxSpawnOptions options;
   uint8_t tty_name[1024];
   size_t index;
   int close_started = 0;
@@ -165,7 +165,7 @@ static void exercise_session_lifecycle(void) {
           "session spawn request was not admitted");
 
   while (!close_completed) {
-    ptyx_status_t status = ptyx_runtime_next_event(runtime, &event, &error);
+    PtyxStatus status = ptyx_runtime_next_event(runtime, &event, &error);
     if (status != PTYX_STATUS_OK) {
       fprintf(stderr,
               "next event status=%" PRIu32 " domain=%" PRIu32 " kind=%" PRIu32
@@ -239,16 +239,16 @@ static void exercise_session_lifecycle(void) {
 }
 
 int main(void) {
-  const ptyx_runtime_t stale_runtime = UINT64_C(0xffffffffffffffff);
-  const ptyx_session_t stale_session = UINT64_C(0xffffffffffffffff);
-  ptyx_error_t error = error_value();
-  ptyx_event_t event;
-  ptyx_size_t size;
+  const PtyxRuntime stale_runtime = UINT64_C(0xffffffffffffffff);
+  const PtyxSession stale_session = UINT64_C(0xffffffffffffffff);
+  PtyxError error = error_value();
+  PtyxEvent event;
+  PtyxSize size;
   int64_t pid = 0;
   uint32_t mode = 0;
   uint64_t tty_required = 0;
-  ptyx_runtime_t runtime = PTYX_INVALID_RUNTIME;
-  ptyx_session_t session = PTYX_INVALID_SESSION;
+  PtyxRuntime runtime = PTYX_INVALID_RUNTIME;
+  PtyxSession session = PTYX_INVALID_SESSION;
   uint64_t value = 0;
   uint32_t word = 0;
 

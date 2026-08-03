@@ -1075,33 +1075,3 @@ sealed class PtyxStatus {
   /// Reserved value that fixes the public enum representation at 32 bits.
   static const PTYX_STATUS_ENUM_FORCE_32_BIT = 2147483647;
 }
-
-/// @deprecated Use PtydAdapter.
-typedef ptyd_adapter_t = PtydAdapter;
-
-/// @deprecated Use PtyxBytesView.
-typedef ptyx_bytes_view_t = PtyxBytesView;
-
-/// @deprecated Use PtyxError.
-typedef ptyx_error_t = PtyxError;
-
-/// @deprecated Use PtyxEvent.
-typedef ptyx_event_t = PtyxEvent;
-
-/// @deprecated Use PtyxEventToken.
-typedef ptyx_event_token_t = PtyxEventToken;
-
-/// @deprecated Use PtyxRuntimeOptions.
-typedef ptyx_runtime_options_t = PtyxRuntimeOptions;
-
-/// @deprecated Use PtyxRuntime.
-typedef ptyx_runtime_t = PtyxRuntime;
-
-/// @deprecated Use PtyxSession.
-typedef ptyx_session_t = PtyxSession;
-
-/// @deprecated Use PtyxSize.
-typedef ptyx_size_t = PtyxSize;
-
-/// @deprecated Use PtyxSpawnOptions.
-typedef ptyx_spawn_options_t = PtyxSpawnOptions;

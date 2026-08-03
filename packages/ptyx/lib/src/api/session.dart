@@ -41,7 +41,7 @@ abstract interface class PtySession {
   /// [PtyUnsupportedException] when the platform backend is unavailable, or
   /// [PtyInfraException] when controller setup cannot be completed.
   static Future<PtySession> spawn(PtySpawnOptions options) =>
-      native.spawnSession(options);
+      native.NativeSession.spawn(options);
 
   /// Completes with the child process exit code when the child exits.
   ///

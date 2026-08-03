@@ -17,8 +17,6 @@ extern "C" {
 
 /** Generation-checked identity of one Dart event-pump adapter. */
 typedef uint64_t PtydAdapter;
-/** @deprecated Use PtydAdapter. */
-typedef PtydAdapter ptyd_adapter_t;
 
 /** Invalid or empty Dart adapter handle. */
 #define PTYD_INVALID_ADAPTER UINT64_C(0)

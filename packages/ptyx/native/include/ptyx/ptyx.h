@@ -59,16 +59,10 @@ extern "C" {
  */
 /** Generation-checked runtime identity. */
 typedef uint64_t PtyxRuntime;
-/** @deprecated Use PtyxRuntime. */
-typedef PtyxRuntime ptyx_runtime_t;
 /** Generation-checked session identity. */
 typedef uint64_t PtyxSession;
-/** @deprecated Use PtyxSession. */
-typedef PtyxSession ptyx_session_t;
 /** Generation-checked owning event identity. */
 typedef uint64_t PtyxEventToken;
-/** @deprecated Use PtyxEventToken. */
-typedef PtyxEventToken ptyx_event_token_t;
 
 /** Invalid or empty runtime handle. */
 #define PTYX_INVALID_RUNTIME UINT64_C(0)
@@ -106,8 +100,6 @@ typedef enum PtyxStatus {
   /** Reserved value that fixes the public enum representation at 32 bits. */
   PTYX_STATUS_ENUM_FORCE_32_BIT = INT32_MAX
 } PtyxStatus;
-/** @deprecated Use PtyxStatus. */
-typedef PtyxStatus ptyx_status_t;
 
 /** Unix signal delivery is available. */
 #define PTYX_CAPABILITY_SIGNALS UINT32_C(1)
@@ -156,8 +148,6 @@ typedef enum PtyxErrorDomain {
   /** Reserved value that fixes the public enum representation at 32 bits. */
   PTYX_ERROR_DOMAIN_ENUM_FORCE_32_BIT = INT32_MAX
 } PtyxErrorDomain;
-/** @deprecated Use PtyxErrorDomain. */
-typedef PtyxErrorDomain ptyx_error_domain_t;
 
 /** Stable category of an error. */
 typedef enum PtyxErrorKind {
@@ -182,8 +172,6 @@ typedef enum PtyxErrorKind {
   /** Reserved value that fixes the public enum representation at 32 bits. */
   PTYX_ERROR_KIND_ENUM_FORCE_32_BIT = INT32_MAX
 } PtyxErrorKind;
-/** @deprecated Use PtyxErrorKind. */
-typedef PtyxErrorKind ptyx_error_kind_t;
 
 /**
  * @brief Stable value describing one failure.
@@ -200,8 +188,6 @@ typedef struct PtyxError {
   PtyxErrorKind kind;     /**< PTYX_ERROR_* value. */
   int32_t native_code;        /**< Optional errno or Win32 status, or zero. */
 } PtyxError;
-/** @deprecated Use PtyxError. */
-typedef PtyxError ptyx_error_t;
 
 /**
  * @brief Formats an error into caller-owned UTF-8 storage.
@@ -236,8 +222,6 @@ typedef struct PtyxBytesView {
   const uint8_t *data; /**< Borrowed bytes, or NULL when length is zero. */
   uint64_t length;     /**< Number of readable bytes at data. */
 } PtyxBytesView;
-/** @deprecated Use PtyxBytesView. */
-typedef PtyxBytesView ptyx_bytes_view_t;
 
 /**
  * @brief Runtime creation options.
@@ -253,8 +237,6 @@ typedef struct PtyxRuntimeOptions {
   PtyxBytesView broker_path; /**< Optional absolute Unix broker path. */
   uint64_t reserved[4];          /**< Must be zero. */
 } PtyxRuntimeOptions;
-/** @deprecated Use PtyxRuntimeOptions. */
-typedef PtyxRuntimeOptions ptyx_runtime_options_t;
 
 /**
  * @brief Creates an isolated PTY runtime.
@@ -367,8 +349,6 @@ typedef struct PtyxSize {
   uint32_t pixel_width;  /**< Optional pixel width in 0..=65535. */
   uint32_t pixel_height; /**< Optional pixel height in 0..=65535. */
 } PtyxSize;
-/** @deprecated Use PtyxSize. */
-typedef PtyxSize ptyx_size_t;
 
 /**
  * @brief Spawn configuration.
@@ -399,8 +379,6 @@ typedef struct PtyxSpawnOptions {
   uint64_t graceful_close_timeout_us;   /**< Unix TERM-to-force interval. */
   uint64_t reserved[4];                 /**< Must be zero. */
 } PtyxSpawnOptions;
-/** @deprecated Use PtyxSpawnOptions. */
-typedef PtyxSpawnOptions ptyx_spawn_options_t;
 
 /**
  * @brief Starts asynchronous PTY session creation.
@@ -624,8 +602,6 @@ typedef enum PtyxEventKind {
   /** Reserved value that fixes the public enum representation at 32 bits. */
   PTYX_EVENT_KIND_ENUM_FORCE_32_BIT = INT32_MAX
 } PtyxEventKind;
-/** @deprecated Use PtyxEventKind. */
-typedef PtyxEventKind ptyx_event_kind_t;
 
 /** Close lost accepted input. */
 #define PTYX_EVENT_CLOSE_INPUT_FAILED UINT32_C(1)
@@ -671,8 +647,6 @@ typedef struct PtyxEvent {
   PtyxError error;       /**< Kind-specific value error. */
   uint64_t reserved[2];     /**< Must be zero. */
 } PtyxEvent;
-/** @deprecated Use PtyxEvent. */
-typedef PtyxEvent ptyx_event_t;
 
 /**
  * @brief Releases one transferred event and its output credit.

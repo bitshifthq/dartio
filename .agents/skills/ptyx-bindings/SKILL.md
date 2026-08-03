@@ -71,12 +71,12 @@ synchronous direct C callers, never the Dart adapter's async contract.
 The preferred stable contract is:
 
 ```c
-ptyx_status_t ptyx_session_write(..., ptyx_error_t *error);
+PtyxStatus ptyx_session_write(..., PtyxError *error);
 ```
 
-- `ptyx_status_t` has an explicit fixed-width representation. Zero is success;
+- `PtyxStatus` has an explicit fixed-width representation. Zero is success;
   unknown nonzero values are errors.
-- `ptyx_error_t` is caller-owned and versioned by `struct_size`. It contains
+- `PtyxError` is caller-owned and versioned by `struct_size`. It contains
   only fixed-width domain/kind/native-code fields: no borrowed pointers,
   operation strings, flags, or message storage. The calling function or event
   kind supplies operation context. A null error is allowed only when

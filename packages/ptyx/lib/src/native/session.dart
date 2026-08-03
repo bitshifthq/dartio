@@ -34,28 +34,36 @@ SpawnRequest _snapshotSpawnRequest(PtySpawnOptions options) {
   );
 }
 
-final class _NativeSession implements PtyxFinalizable, PtySession {
+@internal
+final class NativeSession implements Finalizable, PtySession {
   static final _finalizer = NativeFinalizer(
     Native.addressOf<NativeFinalizerFunction>(ptyd_session_finalize),
   );
   final _NativeRuntime _controller;
   final int _handle;
   final int _inputCapacity;
-  late final _OutputLease _output;
+  late final StreamController<Uint8List> _output;
   late final StreamController<PtyTermMode> _modeController;
   final _exit = Completer<int>();
+  // Native close completes through a later event; one completer shares that
+  // result with every concurrent or repeated close call.
   Completer<void>? _close;
   PtyInputException? _inputFailure;
   PtyException? _terminalFailure;
   PtyTermMode? _lastMode;
+  ({Uint8List bytes, int token})? _pendingOutput;
+  ({Object? error, StackTrace? stackTrace})? _outputTermination;
+  var _outputPaused = true;
+  var _outputCancelled = false;
 
-  _NativeSession._(_NativeRuntime controller, this._handle, this._inputCapacity)
+  NativeSession._(_NativeRuntime controller, this._handle, this._inputCapacity)
     : _controller = controller {
-    _output = _OutputLease(
-      onCancel: () => _output.cancel(),
-      onNativeCancel: () => sessionCancelOutput(_handle),
-      onAcknowledge: controller.acknowledge,
-      onInfrastructureFailure: _failInfrastructure,
+    _output = StreamController<Uint8List>(
+      sync: true,
+      onListen: _resumeOutput,
+      onPause: () => _outputPaused = true,
+      onResume: _resumeOutput,
+      onCancel: _cancelOutput,
     );
     _modeController = StreamController<PtyTermMode>.broadcast(
       sync: true,
@@ -120,15 +128,10 @@ final class _NativeSession implements PtyxFinalizable, PtySession {
       return completion.future;
     }
     try {
-      _output.cancel();
+      _cancelOutput();
       sessionClose(_handle);
     } on PtyException catch (error, stackTrace) {
-      if (completion.isCompleted) return completion.future;
-      if (error is PtyInfraException) {
-        _failInfrastructure(error);
-        return completion.future;
-      }
-      _failReleasedSession(error, stackTrace);
+      if (!completion.isCompleted) _failSession(error, stackTrace);
     }
     return completion.future;
   }
@@ -169,30 +172,32 @@ final class _NativeSession implements PtyxFinalizable, PtySession {
       _inputFailure ??= error;
       throw _inputFailure!;
     } on PtyInfraException catch (error) {
-      _failInfrastructure(error);
+      _failSession(error);
       rethrow;
     }
   }
 
-  void _failReleasedSession(PtyException error, [StackTrace? stackTrace]) {
-    _terminalFailure ??= error;
-    if (!_exit.isCompleted) _exit.completeError(error, stackTrace);
-    _output.fail(error, force: true, stackTrace: stackTrace);
-    if (!_modeController.isClosed) {
-      _modeController.addError(error, stackTrace);
-      unawaited(_modeController.close());
+  void _acknowledgeOutput(int token) {
+    if (token == 0) return;
+    try {
+      _controller.acknowledge(token);
+    } on PtyException catch (error) {
+      _failSession(error);
     }
-    final close = _close;
-    if (close != null && !close.isCompleted) {
-      close.completeError(error, stackTrace);
-    }
-    _finalizer.detach(this);
-    _controller.releaseSession(_handle);
+  }
+
+  void _cancelOutput() {
+    if (_outputCancelled) return;
+    _outputCancelled = true;
+    _outputPaused = false;
+    if (_outputTermination == null) sessionCancelOutput(_handle);
+    _discardOutput();
+    _completeOutput();
   }
 
   void _completeClose(PtyException? error) {
     _finalizer.detach(this);
-    _output.close();
+    _finishOutput(null, force: true);
     if (!_modeController.isClosed) unawaited(_modeController.close());
 
     if (!_exit.isCompleted) {
@@ -208,30 +213,79 @@ final class _NativeSession implements PtyxFinalizable, PtySession {
     final close = _close ??= Completer<void>();
     if (close.isCompleted) return;
 
-    final terminalFailure = _terminalFailure;
-    if (terminalFailure != null) {
-      close.completeError(terminalFailure);
-      return;
+    final failure = _terminalFailure ?? error;
+    if (failure != null) {
+      close.completeError(failure);
+    } else {
+      close.complete();
     }
-    if (error != null) {
-      close.completeError(error);
-      return;
-    }
-    close.complete();
   }
 
-  void _failInfrastructure(PtyException error) {
+  void _completeOutput() {
+    final termination = _outputTermination;
+    if (termination == null || _pendingOutput != null || _output.isClosed) {
+      return;
+    }
+    if (termination.error != null && !_outputCancelled) {
+      _output.addError(termination.error!, termination.stackTrace);
+    }
+    unawaited(_output.close());
+  }
+
+  void _deliverOutput(Uint8List bytes, int token) {
+    if (_outputCancelled || _output.isClosed) {
+      _acknowledgeOutput(token);
+      return;
+    }
+    if (_outputPaused || !_output.hasListener) {
+      if (_pendingOutput != null) {
+        _acknowledgeOutput(token);
+        _failSession(
+          syntheticError(
+            operation: 'controller',
+            message: 'native output exceeded the one-event delivery lease',
+          ),
+        );
+        return;
+      }
+      _pendingOutput = (bytes: bytes, token: token);
+      return;
+    }
+    _output.add(bytes);
+    _acknowledgeOutput(token);
+  }
+
+  void _discardOutput() {
+    final pending = _pendingOutput;
+    _pendingOutput = null;
+    if (pending != null) _acknowledgeOutput(pending.token);
+  }
+
+  void _failSession(PtyException error, [StackTrace? stackTrace]) {
     if (_terminalFailure != null) return;
     _terminalFailure = error;
-    _failReleasedSession(error);
+    if (!_exit.isCompleted) _exit.completeError(error, stackTrace);
+    _finishOutput(error, force: true, stackTrace: stackTrace);
+    if (!_modeController.isClosed) {
+      _modeController.addError(error, stackTrace);
+      unawaited(_modeController.close());
+    }
+    final close = _close;
+    if (close != null && !close.isCompleted) {
+      close.completeError(error, stackTrace);
+    }
+    _finalizer.detach(this);
+    _controller.releaseSession(_handle);
   }
 
-  void _updateMode(int modes) {
-    final mode = modeFromBits(modes);
-    if (mode != _lastMode && !_modeController.isClosed) {
-      _lastMode = mode;
-      _modeController.add(mode);
-    }
+  void _finishOutput(
+    Object? error, {
+    bool force = false,
+    StackTrace? stackTrace,
+  }) {
+    _outputTermination ??= (error: error, stackTrace: stackTrace);
+    if (force) _discardOutput();
+    _completeOutput();
   }
 
   void _observeModes(bool enabled) {
@@ -240,8 +294,9 @@ final class _NativeSession implements PtyxFinalizable, PtySession {
     try {
       sessionObserveMode(_handle, enabled: enabled);
     } on PtyException catch (error, stackTrace) {
-      if (error is PtyInfraException) _failInfrastructure(error);
-      if (!_modeController.isClosed) {
+      if (error is PtyInfraException) {
+        _failSession(error, stackTrace);
+      } else if (!_modeController.isClosed) {
         _modeController.addError(error, stackTrace);
       }
     }
@@ -251,21 +306,21 @@ final class _NativeSession implements PtyxFinalizable, PtySession {
     switch (event.kind) {
       case .output:
         if (event.data case final bytes?) {
-          _output.deliver(bytes, event.token);
+          _deliverOutput(bytes, event.token);
         }
       case .inputFailed:
         final error = _eventError(event);
         if (error is PtyInputException) {
           _inputFailure ??= error;
         } else {
-          _failInfrastructure(error);
+          _failSession(error);
         }
       case .outputFailed:
-        _output.fail(_eventError(event));
+        _finishOutput(_eventError(event));
       case .infrastructureFailed:
-        _failInfrastructure(_eventError(event));
+        _failSession(_eventError(event));
       case .outputDone:
-        _output.complete(_inputFailure);
+        _finishOutput(_inputFailure);
       case .exit:
         if (!_exit.isCompleted) _exit.complete(event.value);
       case .exitFailed:
@@ -283,15 +338,35 @@ final class _NativeSession implements PtyxFinalizable, PtySession {
     }
   }
 
-  static Future<_NativeSession> spawn(PtySpawnOptions options) async {
+  void _resumeOutput() {
+    if (_outputCancelled) return;
+    _outputPaused = false;
+    final pending = _pendingOutput;
+    _pendingOutput = null;
+    if (pending != null) {
+      _output.add(pending.bytes);
+      _acknowledgeOutput(pending.token);
+    }
+    _completeOutput();
+  }
+
+  void _updateMode(int modes) {
+    final mode = modeFromBits(modes);
+    if (mode != _lastMode && !_modeController.isClosed) {
+      _lastMode = mode;
+      _modeController.add(mode);
+    }
+  }
+
+  static Future<NativeSession> spawn(PtySpawnOptions options) async {
     final request = _snapshotSpawnRequest(options);
     final controller = await _NativeRuntime.instance;
 
-    final completion = Completer<_NativeSession>();
+    final completion = Completer<NativeSession>();
     controller.startSpawn(
       request,
       onReady: (handle) {
-        final session = _NativeSession._(
+        final session = NativeSession._(
           controller,
           handle,
           request.inputCapacity,
@@ -302,130 +377,5 @@ final class _NativeSession implements PtyxFinalizable, PtySession {
       onFailure: completion.completeError,
     );
     return completion.future;
-  }
-}
-
-/// Projects the native output lease into Dart's single-subscription stream.
-///
-/// Native owns the queue and output credit. This class owns only the one
-/// delivery lease needed to bridge native backpressure to StreamController
-/// pause, resume, cancellation, and terminal delivery.
-final class _OutputLease {
-  final void Function() _onNativeCancel;
-  final void Function(int token) _onAcknowledge;
-  final void Function(PtyException error) _onInfrastructureFailure;
-  late final StreamController<Uint8List> _controllerStream;
-  ({Uint8List bytes, int token})? _pending;
-  ({Object? error, StackTrace? stackTrace})? _termination;
-  var _paused = true;
-  var _cancelled = false;
-
-  _OutputLease({
-    required void Function() onCancel,
-    required void Function() onNativeCancel,
-    required void Function(int token) onAcknowledge,
-    required void Function(PtyException error) onInfrastructureFailure,
-  }) : _onNativeCancel = onNativeCancel,
-       _onAcknowledge = onAcknowledge,
-       _onInfrastructureFailure = onInfrastructureFailure {
-    _controllerStream = StreamController<Uint8List>(
-      sync: true,
-      onListen: _resume,
-      onPause: _pause,
-      onResume: _resume,
-      onCancel: onCancel,
-    );
-  }
-
-  Stream<Uint8List> get stream => _controllerStream.stream;
-
-  void cancel() {
-    if (_cancelled) return;
-    _cancelled = true;
-    _paused = false;
-    if (_termination == null) _onNativeCancel();
-    _discardPending();
-    _completeIfReady();
-  }
-
-  void close() {
-    _discardPending();
-    fail(null, force: true);
-  }
-
-  void complete(Object? error, {StackTrace? stackTrace}) =>
-      fail(error, stackTrace: stackTrace);
-
-  void deliver(Uint8List bytes, int token) {
-    if (_cancelled || _controllerStream.isClosed) {
-      _acknowledge(token);
-      return;
-    }
-    if (_paused || !_controllerStream.hasListener) {
-      if (_pending != null) {
-        _acknowledge(token);
-        _onInfrastructureFailure(
-          syntheticError(
-            operation: 'controller',
-            message: 'native output exceeded the one-event delivery lease',
-          ),
-        );
-        return;
-      }
-      _pending = (bytes: bytes, token: token);
-      return;
-    }
-    _controllerStream.add(bytes);
-    _acknowledge(token);
-  }
-
-  void fail(Object? error, {bool force = false, StackTrace? stackTrace}) {
-    _termination ??= (error: error, stackTrace: stackTrace);
-    if (force) _discardPending();
-    _completeIfReady();
-  }
-
-  void _acknowledge(int token) {
-    if (token == 0) return;
-    try {
-      _onAcknowledge(token);
-    } on PtyException catch (error) {
-      _onInfrastructureFailure(error);
-    }
-  }
-
-  void _completeIfReady() {
-    final termination = _termination;
-    if (termination == null || _pending != null || _controllerStream.isClosed) {
-      return;
-    }
-    if (termination.error != null && !_cancelled) {
-      _controllerStream.addError(termination.error!, termination.stackTrace);
-    }
-    unawaited(_controllerStream.close());
-  }
-
-  void _discardPending() {
-    final event = _takePending();
-    if (event != null) _acknowledge(event.token);
-  }
-
-  void _pause() => _paused = true;
-
-  void _resume() {
-    if (_cancelled) return;
-    _paused = false;
-    final event = _takePending();
-    if (event != null) {
-      _controllerStream.add(event.bytes);
-      _acknowledge(event.token);
-    }
-    _completeIfReady();
-  }
-
-  ({Uint8List bytes, int token})? _takePending() {
-    final event = _pending;
-    _pending = null;
-    return event;
   }
 }
