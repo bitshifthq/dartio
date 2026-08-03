@@ -1,0 +1,4 @@
+interface:
+  display_name: "Ptyx bindings"
+  short_description: "Maintain the ptyx Dart, FFI, and C ABI boundary"
+  default_prompt: "Apply the ptyx binding-boundary rules before changing generated bindings, Dart marshaling, or native error contracts."
