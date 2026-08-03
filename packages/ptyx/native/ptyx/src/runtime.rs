@@ -247,15 +247,10 @@ impl Session {
         if self.control.closing.load(Ordering::Acquire) {
             return Err(WriteError::new(WriteErrorKind::Closed, bytes, None));
         }
-        match self
-            .control
+        self.control
             .runtime
             .native
             .write(self.control.handle, bytes)
-        {
-            Ok(()) => Ok(()),
-            Err(rejection) => Err(rejection.into_error()),
-        }
     }
 
     /// Returns the current terminal dimensions.

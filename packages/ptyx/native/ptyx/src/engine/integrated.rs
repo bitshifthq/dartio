@@ -11,8 +11,8 @@ use crate::engine::CopyWriteResult;
 use crate::engine::Failure;
 #[cfg(any(feature = "__private_adapter", test))]
 use crate::engine::WRITE_INFRASTRUCTURE_FAILURE;
-use crate::engine::{CloseResult, Completion, Notice, WriteRejection};
-use crate::error::{FailureKind, Operation, OperationError};
+use crate::engine::{CloseResult, Completion, Notice};
+use crate::error::{FailureKind, Operation, OperationError, WriteError, WriteErrorKind};
 use bytes::Bytes;
 use std::collections::{HashMap, VecDeque};
 use std::ffi::CString;
@@ -470,26 +470,24 @@ impl IntegratedRuntime {
         self.request_result(|reply| Command::Activate { handle, reply })?
     }
 
-    pub(crate) fn write(&self, handle: u64, bytes: Bytes) -> Result<(), WriteRejection> {
+    pub(crate) fn write(&self, handle: u64, bytes: Bytes) -> Result<(), WriteError> {
         let admission = match self.admissions.lock() {
             Ok(admissions) => match admissions.get(&handle).cloned() {
                 Some(admission) => admission,
                 None => {
-                    return Err(WriteRejection::Closed {
-                        bytes,
-                        failure: None,
-                    });
+                    return Err(WriteError::new(WriteErrorKind::Closed, bytes, None));
                 }
             },
             Err(_) => {
-                return Err(WriteRejection::Infrastructure {
+                return Err(WriteError::new(
+                    WriteErrorKind::Infrastructure,
                     bytes,
-                    failure: OperationError::new(
+                    Some(OperationError::new(
                         Operation::Write,
                         FailureKind::InfrastructureLost,
                         None,
-                    ),
-                });
+                    )),
+                ));
             }
         };
         admit_owned_write(&self.commands, handle, bytes, admission)?;
@@ -2318,32 +2316,34 @@ fn admit_owned_write(
     handle: u64,
     bytes: Bytes,
     admission: Arc<InputAdmission>,
-) -> Result<(), WriteRejection> {
+) -> Result<(), WriteError> {
     let length = bytes.len();
     let mut state = match admission.state.lock() {
         Ok(state) => state,
         Err(_) => {
-            return Err(WriteRejection::Infrastructure {
+            return Err(WriteError::new(
+                WriteErrorKind::Infrastructure,
                 bytes,
-                failure: OperationError::new(
+                Some(OperationError::new(
                     Operation::Write,
                     FailureKind::InfrastructureLost,
                     None,
-                ),
-            });
+                )),
+            ));
         }
     };
     if !state.open {
-        return Err(WriteRejection::Closed {
+        return Err(WriteError::new(
+            WriteErrorKind::Closed,
             bytes,
-            failure: state.failure,
-        });
+            state.failure,
+        ));
     }
     if length == 0
         || state.bytes.saturating_add(length) > admission.capacity
         || state.entries >= admission.entry_capacity()
     {
-        return Err(WriteRejection::Backpressure(bytes));
+        return Err(WriteError::new(WriteErrorKind::Backpressure, bytes, None));
     }
     state.bytes += length;
     state.entries += 1;
@@ -2360,14 +2360,18 @@ fn admit_owned_write(
     state.entries -= 1;
     match error {
         TrySendError::Full(Command::Write { bytes, .. }) => {
-            Err(WriteRejection::Backpressure(bytes))
+            Err(WriteError::new(WriteErrorKind::Backpressure, bytes, None))
         }
         TrySendError::Disconnected(Command::Write { bytes, .. }) => {
             state.open = false;
             let failure =
                 OperationError::new(Operation::Write, FailureKind::InfrastructureLost, None);
             state.failure.get_or_insert(failure);
-            Err(WriteRejection::Infrastructure { bytes, failure })
+            Err(WriteError::new(
+                WriteErrorKind::Infrastructure,
+                bytes,
+                Some(failure),
+            ))
         }
         TrySendError::Full(_) | TrySendError::Disconnected(_) => {
             unreachable!("owned write admission submits only write commands")
@@ -2383,7 +2387,7 @@ mod tests {
         Notice, RuntimeCounters, Session, OUTPUT_BATCH, WRITE_INFRASTRUCTURE_FAILURE,
     };
     use crate::engine::{broker_client::BrokerSession, event, GenerationRegistry};
-    use crate::error::{FailureKind, Operation, OperationError};
+    use crate::error::{FailureKind, Operation, OperationError, WriteErrorKind};
     use bytes::Bytes;
     use std::collections::VecDeque;
     use std::fs::File;
@@ -2465,13 +2469,9 @@ mod tests {
             admit_owned_write(&sender, 7, Bytes::from_static(b"x"), Arc::clone(&admission))
                 .expect_err("failed input must reject later writes");
 
-        let crate::engine::WriteRejection::Closed {
-            bytes,
-            failure: retained,
-        } = rejected
-        else {
-            panic!("failed input must be a closed write rejection");
-        };
+        assert_eq!(rejected.kind(), WriteErrorKind::Closed);
+        let retained = rejected.failure();
+        let bytes = rejected.into_bytes();
         assert_eq!(bytes, Bytes::from_static(b"x"));
         assert_eq!(retained, Some(failure));
     }
@@ -2523,9 +2523,8 @@ mod tests {
         let rejected = admit_owned_write(&sender, 7, bytes, admission)
             .expect_err("full command queue must reject the write");
 
-        let crate::engine::WriteRejection::Backpressure(bytes) = rejected else {
-            panic!("full command queue must report backpressure");
-        };
+        assert_eq!(rejected.kind(), WriteErrorKind::Backpressure);
+        let bytes = rejected.into_bytes();
         assert_eq!(bytes.as_ptr(), original_pointer);
     }
 

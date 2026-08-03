@@ -7,39 +7,6 @@ use std::os::fd::RawFd;
 
 const MAX_NOTICE_GENERATION: u32 = ((i64::MAX as u64 >> 3) >> 32) as u32;
 
-#[derive(Debug)]
-pub(crate) enum WriteRejection {
-    Backpressure(bytes::Bytes),
-    Closed {
-        bytes: bytes::Bytes,
-        failure: Option<crate::error::OperationError>,
-    },
-    Infrastructure {
-        bytes: bytes::Bytes,
-        failure: crate::error::OperationError,
-    },
-}
-
-impl WriteRejection {
-    pub(crate) fn into_error(self) -> crate::error::WriteError {
-        match self {
-            Self::Backpressure(bytes) => crate::error::WriteError::new(
-                crate::error::WriteErrorKind::Backpressure,
-                bytes,
-                None,
-            ),
-            Self::Closed { bytes, failure } => {
-                crate::error::WriteError::new(crate::error::WriteErrorKind::Closed, bytes, failure)
-            }
-            Self::Infrastructure { bytes, failure } => crate::error::WriteError::new(
-                crate::error::WriteErrorKind::Infrastructure,
-                bytes,
-                Some(failure),
-            ),
-        }
-    }
-}
-
 #[cfg(feature = "__private_adapter")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CopyWriteResult {

@@ -42,8 +42,8 @@ use crate::engine::CopyWriteResult;
 use crate::engine::Failure;
 #[cfg(feature = "__private_adapter")]
 use crate::engine::WRITE_INFRASTRUCTURE_FAILURE;
-use crate::engine::{CloseResult, Completion, GenerationRegistry, Notice, WriteRejection};
-use crate::error::{FailureKind, Operation, OperationError};
+use crate::engine::{CloseResult, Completion, GenerationRegistry, Notice};
+use crate::error::{FailureKind, Operation, OperationError, WriteError, WriteErrorKind};
 
 const BYTE_QUANTUM: usize = 64 * 1024;
 const INTERACTIVE_BATCH: usize = 256;
@@ -922,31 +922,30 @@ impl IntegratedRuntime {
             .is_ok()
     }
 
-    pub(crate) fn write(&self, handle: u64, bytes: Bytes) -> Result<(), WriteRejection> {
+    pub(crate) fn write(&self, handle: u64, bytes: Bytes) -> Result<(), WriteError> {
         let _submission = match self.command_submission.lock() {
             Ok(submission) => submission,
             Err(_) => {
-                return Err(WriteRejection::Infrastructure {
+                return Err(WriteError::new(
+                    WriteErrorKind::Infrastructure,
                     bytes,
-                    failure: infrastructure_failure(Operation::Write),
-                });
+                    Some(infrastructure_failure(Operation::Write)),
+                ));
             }
         };
         let admission = match self.admissions.lock() {
             Ok(admissions) => match admissions.get(&handle).cloned() {
                 Some(admission) => admission,
                 None => {
-                    return Err(WriteRejection::Closed {
-                        bytes,
-                        failure: None,
-                    });
+                    return Err(WriteError::new(WriteErrorKind::Closed, bytes, None));
                 }
             },
             Err(_) => {
-                return Err(WriteRejection::Infrastructure {
+                return Err(WriteError::new(
+                    WriteErrorKind::Infrastructure,
                     bytes,
-                    failure: infrastructure_failure(Operation::Write),
-                });
+                    Some(infrastructure_failure(Operation::Write)),
+                ));
             }
         };
         admit_owned_write(
@@ -1232,34 +1231,40 @@ fn admit_owned_write(
     handle: u64,
     bytes: Bytes,
     admission: Arc<InputAdmission>,
-) -> Result<(), WriteRejection> {
+) -> Result<(), WriteError> {
     let length = bytes.len();
     let mut state = match admission.state.lock() {
         Ok(state) => state,
         Err(_) => {
-            return Err(WriteRejection::Infrastructure {
+            return Err(WriteError::new(
+                WriteErrorKind::Infrastructure,
                 bytes,
-                failure: infrastructure_failure(Operation::Write),
-            });
+                Some(infrastructure_failure(Operation::Write)),
+            ));
         }
     };
     if !state.open {
-        return Err(WriteRejection::Closed {
+        return Err(WriteError::new(
+            WriteErrorKind::Closed,
             bytes,
-            failure: state.failure,
-        });
+            state.failure,
+        ));
     }
     if length == 0
         || state.bytes.saturating_add(length) > admission.capacity
         || state.entries >= admission.entry_capacity()
     {
-        return Err(WriteRejection::Backpressure(bytes));
+        return Err(WriteError::new(WriteErrorKind::Backpressure, bytes, None));
     }
     if wake().is_err() {
         let failure = infrastructure_failure(Operation::Write);
         state.failure.get_or_insert(failure);
         state.open = false;
-        return Err(WriteRejection::Infrastructure { bytes, failure });
+        return Err(WriteError::new(
+            WriteErrorKind::Infrastructure,
+            bytes,
+            Some(failure),
+        ));
     }
     state.bytes += length;
     state.entries += 1;
@@ -1276,13 +1281,17 @@ fn admit_owned_write(
     state.entries -= 1;
     match error {
         TrySendError::Full(Command::Write { bytes, .. }) => {
-            Err(WriteRejection::Backpressure(bytes))
+            Err(WriteError::new(WriteErrorKind::Backpressure, bytes, None))
         }
         TrySendError::Disconnected(Command::Write { bytes, .. }) => {
             state.open = false;
             let failure = infrastructure_failure(Operation::Write);
             state.failure.get_or_insert(failure);
-            Err(WriteRejection::Infrastructure { bytes, failure })
+            Err(WriteError::new(
+                WriteErrorKind::Infrastructure,
+                bytes,
+                Some(failure),
+            ))
         }
         TrySendError::Full(_) | TrySendError::Disconnected(_) => {
             unreachable!("owned write admission submits only write commands")
@@ -2564,7 +2573,8 @@ mod tests {
         try_command_submission, CloseAdmission, NoticeBudget, OutputTerminalNotice,
         WRITE_INFRASTRUCTURE_FAILURE,
     };
-    use crate::engine::{session::InputAdmission, WriteRejection};
+    use crate::engine::session::InputAdmission;
+    use crate::error::WriteErrorKind;
     use bytes::Bytes;
     use std::io;
     use std::sync::Mutex;
@@ -2629,9 +2639,8 @@ mod tests {
         let rejected = admit_owned_write(&sender, || Ok(()), 7, bytes, admission)
             .expect_err("full command queue must reject the write");
 
-        let WriteRejection::Backpressure(bytes) = rejected else {
-            panic!("full command queue must report backpressure");
-        };
+        assert_eq!(rejected.kind(), WriteErrorKind::Backpressure);
+        let bytes = rejected.into_bytes();
         assert_eq!(bytes.as_ptr(), original_pointer);
     }
 
@@ -2702,9 +2711,8 @@ mod tests {
         )
         .expect_err("failed wake must reject the write");
 
-        let WriteRejection::Infrastructure { bytes, .. } = rejected else {
-            panic!("failed wake must report infrastructure failure");
-        };
+        assert_eq!(rejected.kind(), WriteErrorKind::Infrastructure);
+        let bytes = rejected.into_bytes();
         assert_eq!(bytes.as_ptr(), original_pointer);
         assert!(receiver.try_recv().is_err());
     }
