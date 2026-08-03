@@ -20,6 +20,26 @@ pub(crate) enum WriteRejection {
     },
 }
 
+impl WriteRejection {
+    pub(crate) fn into_error(self) -> crate::error::WriteError {
+        match self {
+            Self::Backpressure(bytes) => crate::error::WriteError::new(
+                crate::error::WriteErrorKind::Backpressure,
+                bytes,
+                None,
+            ),
+            Self::Closed { bytes, failure } => {
+                crate::error::WriteError::new(crate::error::WriteErrorKind::Closed, bytes, failure)
+            }
+            Self::Infrastructure { bytes, failure } => crate::error::WriteError::new(
+                crate::error::WriteErrorKind::Infrastructure,
+                bytes,
+                Some(failure),
+            ),
+        }
+    }
+}
+
 #[cfg(feature = "__private_adapter")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CopyWriteResult {

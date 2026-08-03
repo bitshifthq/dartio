@@ -139,17 +139,20 @@ pub struct Spawn {
 }
 
 impl Spawn {
+    fn resolve(&self, result: Option<std::io::Result<u64>>) -> Result<Spawned, SpawnError> {
+        let handle = result
+            .ok_or(SpawnError::Activation)?
+            .map_err(SpawnError::Native)?;
+        publish_session(&self.runtime, handle)
+    }
+
     /// Blocks until the child is attached and its session is published.
     pub fn wait(mut self) -> Result<Spawned, SpawnError> {
         let completion = self
             .completion
             .take()
             .expect("spawn completion is present until resolved");
-        let handle = completion
-            .wait()
-            .ok_or(SpawnError::Activation)?
-            .map_err(SpawnError::Native)?;
-        publish_session(&self.runtime, handle)
+        self.resolve(completion.wait())
     }
 }
 
@@ -166,12 +169,7 @@ impl Future for Spawn {
             Poll::Ready(result) => result,
         };
         self.completion = None;
-        let handle = match result {
-            Some(Ok(handle)) => handle,
-            Some(Err(error)) => return Poll::Ready(Err(SpawnError::Native(error))),
-            None => return Poll::Ready(Err(SpawnError::Activation)),
-        };
-        Poll::Ready(publish_session(&self.runtime, handle))
+        Poll::Ready(self.resolve(result))
     }
 }
 
@@ -256,15 +254,7 @@ impl Session {
             .write(self.control.handle, bytes)
         {
             Ok(()) => Ok(()),
-            Err(crate::engine::WriteRejection::Backpressure(bytes)) => {
-                Err(WriteError::new(WriteErrorKind::Backpressure, bytes, None))
-            }
-            Err(crate::engine::WriteRejection::Closed { bytes, failure }) => {
-                Err(WriteError::new(WriteErrorKind::Closed, bytes, failure))
-            }
-            Err(crate::engine::WriteRejection::Infrastructure { bytes, failure }) => Err(
-                WriteError::new(WriteErrorKind::Infrastructure, bytes, Some(failure)),
-            ),
+            Err(rejection) => Err(rejection.into_error()),
         }
     }
 

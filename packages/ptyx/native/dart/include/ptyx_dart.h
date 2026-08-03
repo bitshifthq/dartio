@@ -168,62 +168,6 @@ PTYX_EXPORT void PTYX_CALL ptyd_runtime_finalize(void *token);
  */
 PTYX_EXPORT void PTYX_CALL ptyd_session_finalize(void *token);
 
-#if defined(PTYX_TEST_CONTROLS)
-/** Forces the next Dart port post to fail in diagnostic builds. */
-PTYX_EXPORT void PTYX_CALL ptyd_test_fail_next_post(void);
-/**
- * Terminates the Unix broker in diagnostic builds.
- *
- * @return One when a broker was terminated; otherwise zero.
- */
-PTYX_EXPORT uint32_t PTYX_CALL ptyd_test_kill_broker(void);
-/**
- * Delays the next spawn worker in diagnostic builds.
- *
- * @param[in] milliseconds Delay duration.
- */
-PTYX_EXPORT void PTYX_CALL ptyd_test_delay_next_spawn(uint64_t milliseconds);
-/**
- * Reports whether the diagnostic spawn delay is active.
- *
- * @return One while a delayed worker is active; otherwise zero.
- */
-PTYX_EXPORT uint32_t PTYX_CALL ptyd_test_spawn_delay_active(void);
-/** Forces the next admitted write to fail in diagnostic builds. */
-PTYX_EXPORT void PTYX_CALL ptyd_test_fail_next_write(void);
-/**
- * Injects a typed exit-observation failure for the sole diagnostic session.
- *
- * @return One when the event was posted; otherwise zero.
- */
-PTYX_EXPORT uint32_t PTYX_CALL ptyd_test_fail_exit_observation(void);
-/**
- * Delays the next runtime attachment in diagnostic builds.
- *
- * @param[in] milliseconds Delay duration.
- */
-PTYX_EXPORT void PTYX_CALL ptyd_test_delay_next_attach(uint64_t milliseconds);
-/**
- * Reports whether the diagnostic runtime-attachment delay is active.
- *
- * @return One while attachment is delayed; otherwise zero.
- */
-PTYX_EXPORT uint32_t PTYX_CALL ptyd_test_attach_delay_active(void);
-/**
- * Returns the number of live Dart adapters in this process.
- *
- * @return Live adapter count, or UINT32_MAX when the registry is unavailable.
- */
-PTYX_EXPORT uint32_t PTYX_CALL ptyd_test_adapter_count(void);
-/**
- * Returns the number of sessions tracked by live Dart adapters.
- *
- * @return Tracked session count, or UINT32_MAX when native state is
- * unavailable.
- */
-PTYX_EXPORT uint32_t PTYX_CALL ptyd_test_session_count(void);
-#endif
-
 #ifdef __cplusplus
 }
 #endif

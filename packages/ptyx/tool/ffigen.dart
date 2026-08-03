@@ -46,9 +46,8 @@ FfiGenerator _generator() => FfiGenerator(
   ),
   functions: Functions(
     include: (declaration) =>
-        (declaration.originalName.startsWith('ptyx_') ||
-            declaration.originalName.startsWith('ptyd_')) &&
-        !declaration.originalName.startsWith('ptyd_test_'),
+        declaration.originalName.startsWith('ptyx_') ||
+        declaration.originalName.startsWith('ptyd_'),
     // The private Dart wrapper rejects buffers above 1 MiB before this call.
     // Native admission is nonblocking and copies at most that proven bound.
     isLeaf: (declaration) => declaration.originalName == 'ptyx_session_write',
@@ -80,10 +79,10 @@ FfiGenerator _testGenerator() => FfiGenerator(
     style: const NativeExternalBindings(assetId: 'package:ptyx/ptyx.dart'),
   ),
   headers: Headers(
-    entryPoints: [Uri.file('native/dart/include/ptyx_dart.h')],
+    entryPoints: [Uri.file('native/dart/tests/ptyx_dart_test.h')],
     include: (header) =>
-        header.path.endsWith('/native/dart/include/ptyx_dart.h') ||
-        header.path == 'native/dart/include/ptyx_dart.h',
+        header.path.endsWith('/native/dart/tests/ptyx_dart_test.h') ||
+        header.path == 'native/dart/tests/ptyx_dart_test.h',
     compilerOptions: [..._compilerOptions(), '-DPTYX_TEST_CONTROLS'],
   ),
   functions: Functions(
