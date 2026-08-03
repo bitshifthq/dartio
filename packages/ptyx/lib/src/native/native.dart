@@ -11,12 +11,12 @@ import 'package:ffi/ffi.dart';
 
 import '../api/api.dart';
 import '../ffi/ptyx.g.dart';
-import 'calls.dart';
+import 'bindings.dart';
 import 'errors.dart';
 import 'event_decoder.dart';
 import 'types.dart';
 
 part 'interface.dart';
-part 'runtime.dart';
 part 'router.dart';
+part 'runtime.dart';
 part 'session.dart';
