@@ -3,6 +3,9 @@ part of 'native.dart';
 const _maxDartWriteBytes = 1024 * 1024;
 
 final class _NativeSession implements PtyxFinalizable, PtySession {
+  static final _finalizer = NativeFinalizer(
+    Native.addressOf<NativeFinalizerFunction>(ptyd_session_finalize),
+  );
   final _NativeRuntime _controller;
   final int _handle;
   final int _inputCapacity;
@@ -17,10 +20,10 @@ final class _NativeSession implements PtyxFinalizable, PtySession {
 
   _NativeSession._(_NativeRuntime controller, this._handle, this._inputCapacity)
     : _controller = controller,
-      _capabilities = _capabilitiesFromBits(controller.capabilityBits) {
+      _capabilities = ptyxCapabilitiesFromBits(controller.capabilityBits) {
     _output = _NativeOutput(
       onCancel: _cancelOutput,
-      onNativeCancel: () => ptyxCancelOutput(_handle),
+      onNativeCancel: () => sessionCancelOutput(_handle),
       onAcknowledge: controller.acknowledge,
       onInfrastructureFailure: _nativeInfrastructureFailed,
     );
@@ -30,7 +33,12 @@ final class _NativeSession implements PtyxFinalizable, PtySession {
       onCancel: () => _observeModes(false, 'modeChanges.cancel'),
     );
     _exit.future.ignore();
-    _controller.attachFinalizer(this, _handle);
+    _finalizer.attach(
+      this,
+      Pointer<Void>.fromAddress(_handle),
+      detach: this,
+      externalSize: 64 * 1024,
+    );
   }
 
   static Future<_NativeSession> spawn(PtySpawnOptions options) async {
@@ -51,11 +59,11 @@ final class _NativeSession implements PtyxFinalizable, PtySession {
           return session;
         },
         onFailure: (failure) {
-          completion.completeError(_exception(failure, operation: 'spawn'));
+          completion.completeError(ptyxException(failure, operation: 'spawn'));
         },
       );
     } on _NativeFailure catch (failure) {
-      throw _exception(failure, operation: 'spawn');
+      throw ptyxException(failure, operation: 'spawn');
     }
     return completion.future;
   }
@@ -74,12 +82,9 @@ final class _NativeSession implements PtyxFinalizable, PtySession {
 
   @override
   PtyTermMode? get mode {
-    _checkOpen('mode');
-    if (!capabilities.terminalModes) {
-      return null;
-    }
+    if (!capabilities.terminalModes) return null;
     final modes = _snapshot('mode').modes;
-    return modes == null ? null : _mode(modes);
+    return modes == null ? null : ptyxModeFromBits(modes);
   }
 
   @override
@@ -90,13 +95,11 @@ final class _NativeSession implements PtyxFinalizable, PtySession {
 
   @override
   int? get pid {
-    _checkOpen('pid');
     return _snapshot('pid').pid;
   }
 
   @override
   PtySize get size {
-    _checkOpen('size');
     final snapshot = _snapshot('size');
     return PtySize(
       rows: snapshot.rows,
@@ -108,7 +111,6 @@ final class _NativeSession implements PtyxFinalizable, PtySession {
 
   @override
   String? get ttyName {
-    _checkOpen('ttyName');
     if (!capabilities.terminalName) {
       return null;
     }
@@ -119,10 +121,9 @@ final class _NativeSession implements PtyxFinalizable, PtySession {
   @override
   void write(Uint8List data) {
     const operation = 'write';
-    _checkOpen(operation);
     final inputFailure = _inputFailure;
     if (inputFailure != null) {
-      throw _inputError(operation, inputFailure);
+      throw ptyxInputErrorForOperation(operation, inputFailure);
     }
     if (data.isEmpty) {
       throw const PtyInvalidArgumentException(
@@ -145,12 +146,12 @@ final class _NativeSession implements PtyxFinalizable, PtySession {
       );
     }
     try {
-      ptyxWrite(_handle, data);
+      sessionWrite(_handle, data);
     } on _NativeFailure catch (failure) {
-      final error = _exception(failure, operation: operation);
+      final error = ptyxException(failure, operation: operation);
       if (error is PtyInputException) {
         _inputFailure ??= error;
-        throw _inputError(operation, _inputFailure!);
+        throw ptyxInputErrorForOperation(operation, _inputFailure!);
       }
       if (error is PtyInfrastructureException) {
         _nativeInfrastructureFailed(failure);
@@ -165,7 +166,7 @@ final class _NativeSession implements PtyxFinalizable, PtySession {
       return false;
     }
     try {
-      return ptyxTerminate(_handle, signal.signalNumber);
+      return sessionTerminate(_handle, signal.signalNumber);
     } on _NativeFailure catch (failure) {
       throw _operationFailure(failure, operation: 'kill');
     }
@@ -173,9 +174,8 @@ final class _NativeSession implements PtyxFinalizable, PtySession {
 
   @override
   void resize(PtySize size) {
-    _checkOpen('resize');
     try {
-      ptyxResize(_handle, size);
+      sessionResize(_handle, size);
     } on _NativeFailure catch (failure) {
       throw _operationFailure(failure, operation: 'resize');
     }
@@ -196,13 +196,13 @@ final class _NativeSession implements PtyxFinalizable, PtySession {
     }
     try {
       _cancelOutput();
-      ptyxClose(_handle);
+      sessionClose(_handle);
     } on Object catch (error, stackTrace) {
       if (completion.isCompleted) {
         return completion.future;
       }
       final publicError = error is _NativeFailure
-          ? _exception(error, operation: 'close')
+          ? ptyxException(error, operation: 'close')
           : error;
       if (error is _NativeFailure &&
           publicError is PtyInfrastructureException) {
@@ -219,7 +219,7 @@ final class _NativeSession implements PtyxFinalizable, PtySession {
   }
 
   void _nativeInputFailed(_NativeFailure failure) {
-    final error = _exception(failure);
+    final error = ptyxException(failure);
     if (error is PtyInputException) {
       _inputFailure ??= error;
       return;
@@ -228,11 +228,11 @@ final class _NativeSession implements PtyxFinalizable, PtySession {
   }
 
   void _nativeOutputFailed(_NativeFailure failure) {
-    _output.fail(_exception(failure));
+    _output.fail(ptyxException(failure));
   }
 
   void _nativeInfrastructureFailed(_NativeFailure failure) {
-    final error = _exception(failure);
+    final error = ptyxException(failure);
     if (_terminalFailure != null) {
       return;
     }
@@ -252,12 +252,12 @@ final class _NativeSession implements PtyxFinalizable, PtySession {
 
   void _nativeExitFailed(_NativeFailure failure) {
     if (!_exit.isCompleted) {
-      _exit.completeError(_exception(failure));
+      _exit.completeError(ptyxException(failure));
     }
   }
 
   void _nativeCloseComplete(_NativeFailure? failure) {
-    _controller.detachFinalizer(this);
+    _finalizer.detach(this);
     _output.close();
     if (!_modeController.isClosed) {
       unawaited(_modeController.close());
@@ -280,14 +280,14 @@ final class _NativeSession implements PtyxFinalizable, PtySession {
       return;
     }
     if (failure != null) {
-      close.completeError(_exception(failure, operation: 'close'));
+      close.completeError(ptyxException(failure, operation: 'close'));
       return;
     }
     close.complete();
   }
 
   void _nativeModeChanged(int modes) {
-    final mode = _mode(modes);
+    final mode = ptyxModeFromBits(modes);
     if (mode != _lastMode && !_modeController.isClosed) {
       _lastMode = mode;
       _modeController.add(mode);
@@ -297,14 +297,8 @@ final class _NativeSession implements PtyxFinalizable, PtySession {
   void _nativeModeFailed(_NativeFailure failure) {
     if (!_modeController.isClosed) {
       _modeController.addError(
-        _exception(failure, operation: 'modeChanges.observe'),
+        ptyxException(failure, operation: 'modeChanges.observe'),
       );
-    }
-  }
-
-  void _checkOpen(String operation) {
-    if (_close != null) {
-      throw PtyClosedException('session closed', operation: operation);
     }
   }
 
@@ -320,13 +314,13 @@ final class _NativeSession implements PtyxFinalizable, PtySession {
     if (close != null && !close.isCompleted) {
       close.completeError(error, stackTrace);
     }
-    _controller.detachFinalizer(this);
+    _finalizer.detach(this);
     _controller.releaseSession(_handle);
   }
 
   _NativeSnapshot _snapshot(String operation) {
     try {
-      return ptyxSnapshot(_handle);
+      return sessionSnapshot(_handle);
     } on _NativeFailure catch (failure) {
       throw _operationFailure(failure, operation: operation);
     }
@@ -348,7 +342,7 @@ final class _NativeSession implements PtyxFinalizable, PtySession {
       return;
     }
     try {
-      ptyxObserveMode(_handle, enabled: enabled);
+      sessionObserveMode(_handle, enabled: enabled);
     } on _NativeFailure catch (failure, stackTrace) {
       final error = _operationFailure(failure, operation: operation);
       if (!_modeController.isClosed) {
@@ -357,17 +351,11 @@ final class _NativeSession implements PtyxFinalizable, PtySession {
     }
   }
 
-  static PtyTermMode _mode(int bits) => PtyTermMode(
-    canonical: bits & ptyxModeCanonical != 0,
-    echo: bits & ptyxModeEcho != 0,
-    signals: bits & ptyxModeSignals != 0,
-  );
-
   PtyException _operationFailure(
     _NativeFailure failure, {
     required String operation,
   }) {
-    final error = _exception(failure, operation: operation);
+    final error = ptyxException(failure, operation: operation);
     if (error is PtyInfrastructureException) {
       _nativeInfrastructureFailed(failure);
     }
@@ -418,13 +406,7 @@ final class _NativeOutput {
       if (_pending != null) {
         _acknowledge(token);
         _onInfrastructureFailure(
-          const _NativeFailure(
-            status: ptyxStatusInternal,
-            domain: ptyxDomainRuntime,
-            kind: ptyxKindInfrastructureLost,
-            operation: ptyxOperationOutput,
-            nativeCode: 0,
-            flags: 0,
+          ptyxOutputInfrastructureFailure(
             message: 'native output exceeded the one-event delivery lease',
           ),
         );
@@ -442,9 +424,7 @@ final class _NativeOutput {
 
   void fail(Object? error, {bool force = false, StackTrace? stackTrace}) {
     _termination ??= (error: error, stackTrace: stackTrace);
-    if (force) {
-      _discardPending();
-    }
+    if (force) _discardPending();
     _completeIfReady();
   }
 
@@ -454,14 +434,10 @@ final class _NativeOutput {
   }
 
   void cancel() {
-    if (_cancelled) {
-      return;
-    }
+    if (_cancelled) return;
     _cancelled = true;
     _paused = false;
-    if (_termination == null) {
-      _onNativeCancel();
-    }
+    if (_termination == null) _onNativeCancel();
     _discardPending();
     _completeIfReady();
   }
@@ -469,9 +445,7 @@ final class _NativeOutput {
   void _pause() => _paused = true;
 
   void _resume() {
-    if (_cancelled) {
-      return;
-    }
+    if (_cancelled) return;
     _paused = false;
     final event = _takePending();
     if (event != null) {
@@ -482,9 +456,7 @@ final class _NativeOutput {
   }
 
   void _acknowledge(int token) {
-    if (token == 0) {
-      return;
-    }
+    if (token == 0) return;
     try {
       _onAcknowledge(token);
     } on _NativeFailure catch (failure) {
@@ -494,9 +466,7 @@ final class _NativeOutput {
 
   void _discardPending() {
     final event = _takePending();
-    if (event != null) {
-      _acknowledge(event.token);
-    }
+    if (event != null) _acknowledge(event.token);
   }
 
   ({Uint8List bytes, int token})? _takePending() {
@@ -516,147 +486,6 @@ final class _NativeOutput {
     unawaited(_controllerStream.close());
   }
 }
-
-PtyCapabilities _capabilitiesFromBits(int bits) => PtyCapabilities(
-  signals: bits & ptyxCapabilitySignals != 0,
-  processGroups: bits & ptyxCapabilityProcessGroups != 0,
-  terminalModes: bits & ptyxCapabilityTerminalModes != 0,
-  terminalName: bits & ptyxCapabilityTerminalName != 0,
-);
-
-PtyException _exception(_NativeFailure failure, {String? operation}) {
-  final publicOperation = operation ?? _operationName(failure.operation);
-  final nativeCode = failure.nativeCode == 0 ? null : failure.nativeCode;
-  if (publicOperation == 'mode' || publicOperation.startsWith('modeChanges.')) {
-    return PtyModeException(
-      failure.message,
-      operation: publicOperation,
-      nativeCode: nativeCode,
-    );
-  }
-  if (failure.status == ptyxStatusBackpressure ||
-      failure.kind == ptyxKindQueueFull) {
-    return PtyBackpressureException(
-      failure.message,
-      operation: publicOperation,
-      nativeCode: nativeCode,
-    );
-  }
-  if (failure.status == ptyxStatusInvalidArgument ||
-      failure.kind == ptyxKindInvalidArgument) {
-    return PtyInvalidArgumentException(
-      failure.message,
-      operation: publicOperation,
-      nativeCode: nativeCode,
-    );
-  }
-  if (failure.status == ptyxStatusUnsupported ||
-      failure.kind == ptyxKindUnsupported) {
-    return PtyUnsupportedException(
-      failure.message,
-      operation: publicOperation,
-      nativeCode: nativeCode,
-    );
-  }
-  if (failure.domain == ptyxDomainRuntime ||
-      failure.kind == ptyxKindInfrastructureLost) {
-    return PtyInfrastructureException(
-      failure.message,
-      operation: publicOperation,
-      nativeCode: nativeCode,
-    );
-  }
-  if (failure.domain == ptyxDomainInput ||
-      failure.operation == ptyxOperationWrite) {
-    return _inputException(failure, operation: publicOperation);
-  }
-  if (failure.domain == ptyxDomainOutput ||
-      failure.operation == ptyxOperationOutput) {
-    return PtyOutputException(
-      failure.message,
-      operation: publicOperation,
-      nativeCode: nativeCode,
-    );
-  }
-  if (failure.status == ptyxStatusClosed ||
-      failure.status == ptyxStatusStaleHandle ||
-      failure.status == ptyxStatusWrongState ||
-      failure.kind == ptyxKindClosed ||
-      failure.kind == ptyxKindStaleHandle ||
-      failure.kind == ptyxKindWrongState) {
-    return PtyClosedException(
-      failure.message,
-      operation: publicOperation,
-      nativeCode: nativeCode,
-    );
-  }
-  return switch (failure.operation) {
-    ptyxOperationSpawn => PtySpawnException(
-      failure.message,
-      operation: publicOperation,
-      nativeCode: nativeCode,
-    ),
-    ptyxOperationTerminate => PtySignalException(
-      failure.message,
-      operation: publicOperation,
-      nativeCode: nativeCode,
-    ),
-    ptyxOperationExit => PtyExitException(
-      failure.message,
-      operation: publicOperation,
-      nativeCode: nativeCode,
-    ),
-    ptyxOperationResize => PtyResizeException(
-      failure.message,
-      operation: publicOperation,
-      nativeCode: nativeCode,
-    ),
-    ptyxOperationMetadata => PtyMetadataException(
-      failure.message,
-      operation: publicOperation,
-      nativeCode: nativeCode,
-    ),
-    ptyxOperationClose => PtyCloseException(
-      failure.message,
-      operation: publicOperation,
-      nativeCode: nativeCode,
-    ),
-    _ => PtyException(
-      failure.message,
-      operation: publicOperation,
-      nativeCode: nativeCode,
-    ),
-  };
-}
-
-PtyInputException _inputException(
-  _NativeFailure failure, {
-  required String operation,
-}) => PtyInputException(
-  failure.message,
-  operation: operation,
-  nativeCode: failure.nativeCode == 0 ? null : failure.nativeCode,
-);
-
-PtyInputException _inputError(String operation, PtyInputException failure) =>
-    PtyInputException(
-      failure.message,
-      operation: operation,
-      nativeCode: failure.nativeCode,
-      context: failure.context,
-    );
-
-String _operationName(int operation) => switch (operation) {
-  ptyxOperationSpawn => 'spawn',
-  ptyxOperationWrite => 'write',
-  ptyxOperationOutput => 'output',
-  ptyxOperationResize => 'resize',
-  ptyxOperationTerminate => 'kill',
-  ptyxOperationExit => 'exit',
-  ptyxOperationMetadata => 'metadata',
-  ptyxOperationClose => 'close',
-  _ => 'controller',
-};
 
 _NativeSpawnRequest _snapshotSpawnRequest(PtySpawnOptions options) {
   final effectiveEnvironment = _effectiveEnvironment(options);
