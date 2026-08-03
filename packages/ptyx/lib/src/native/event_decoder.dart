@@ -1,8 +1,8 @@
 import 'dart:typed_data';
 
+import '../api/api.dart';
 import '../ffi/ptyx.g.dart';
 import 'errors.dart';
-import 'types.dart';
 
 enum NativeEventKind {
   spawnReady,
@@ -42,7 +42,7 @@ final class NativeEvent {
   final int flags;
   final int value;
   final Uint8List? data;
-  final NativeFailure? failure;
+  final PtyException? error;
 
   const NativeEvent({
     required this.kind,
@@ -51,7 +51,7 @@ final class NativeEvent {
     required this.flags,
     required this.value,
     required this.data,
-    required this.failure,
+    required this.error,
   });
 
   bool get isGlobalInfrastructureFailure =>
@@ -73,12 +73,13 @@ NativeEvent? decodeEvent(Object? message) {
     if (data != null && data is! Uint8List) return null;
     final kind = _tryDecodeKind(rawKind);
     if (kind == null) return null;
-    final failure = errorKind == ptyx_error_kind.PTYX_ERROR_NONE
+    final error = errorKind == ptyx_error_kind.PTYX_ERROR_NONE
         ? null
-        : failureFromEvent(
+        : exceptionFromEvent(
             domain: errorDomain,
             kind: errorKind,
             nativeCode: errorNativeCode,
+            operation: _operation(kind),
           );
     final event = NativeEvent(
       kind: kind,
@@ -87,12 +88,24 @@ NativeEvent? decodeEvent(Object? message) {
       flags: flags,
       value: value,
       data: data as Uint8List?,
-      failure: failure,
+      error: error,
     );
     return event;
   }
   return null;
 }
+
+String _operation(NativeEventKind kind) => switch (kind) {
+  .spawnFailed => 'spawn',
+  .output => 'output',
+  .inputFailed => 'write',
+  .outputFailed => 'output',
+  .infrastructureFailed => 'controller',
+  .exitFailed => 'exit',
+  .closeComplete => 'close',
+  .modeFailed => 'modeChanges.observe',
+  _ => 'controller',
+};
 
 NativeEventKind? _tryDecodeKind(int value) {
   try {

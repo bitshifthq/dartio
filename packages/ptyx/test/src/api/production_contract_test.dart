@@ -128,10 +128,7 @@ void main() {
     );
     addTearDown(session.close);
 
-    expect(
-      () => session.write(Uint8List(4097)),
-      throwsA(isA<PtyInvalidArgumentException>()),
-    );
+    expect(() => session.write(Uint8List(4097)), throwsA(isA<ArgumentError>()));
   });
 
   test('Dart write admission has a bounded leaf-call copy', () async {
@@ -145,7 +142,7 @@ void main() {
 
     expect(
       () => session.write(Uint8List(1024 * 1024 + 1)),
-      throwsA(isA<PtyInvalidArgumentException>()),
+      throwsA(isA<ArgumentError>()),
     );
   });
 
@@ -206,7 +203,7 @@ void main() {
           ),
         ),
         throwsA(
-          isA<PtyInvalidArgumentException>().having(
+          isA<PtyArgumentException>().having(
             (error) => error.operation,
             'operation',
             'spawn',
@@ -237,11 +234,11 @@ void main() {
     test('accepts 256 arguments and rejects 257 before native spawn', () async {
       await expectLater(
         PtySession.spawn(missing(arguments: List.filled(256, 'x'))),
-        throwsA(isA<PtySpawnException>()),
+        throwsA(isA<PtyException>()),
       );
       await expectLater(
         PtySession.spawn(missing(arguments: List.filled(257, 'x'))),
-        throwsA(isA<PtyInvalidArgumentException>()),
+        throwsA(isA<PtyArgumentException>()),
       );
     });
 
@@ -259,7 +256,7 @@ void main() {
               environmentMode: PtyEnvironmentMode.replace,
             ),
           ),
-          throwsA(isA<PtySpawnException>()),
+          throwsA(isA<PtyException>()),
         );
         await expectLater(
           PtySession.spawn(
@@ -268,7 +265,7 @@ void main() {
               environmentMode: PtyEnvironmentMode.replace,
             ),
           ),
-          throwsA(isA<PtyInvalidArgumentException>()),
+          throwsA(isA<PtyArgumentException>()),
         );
       },
     );
@@ -296,7 +293,7 @@ void main() {
             environmentMode: PtyEnvironmentMode.replace,
           ),
         ),
-        throwsA(isA<PtySpawnException>()),
+        throwsA(isA<PtyException>()),
       );
       await expectLater(
         PtySession.spawn(
@@ -305,7 +302,7 @@ void main() {
             environmentMode: PtyEnvironmentMode.replace,
           ),
         ),
-        throwsA(isA<PtyInvalidArgumentException>()),
+        throwsA(isA<PtyArgumentException>()),
       );
     });
 
@@ -317,13 +314,13 @@ void main() {
             initialSize: const PtySize(rows: maximum, columns: maximum),
           ),
         ),
-        throwsA(isA<PtySpawnException>()),
+        throwsA(isA<PtyException>()),
       );
       await expectLater(
         PtySession.spawn(
           missing(initialSize: const PtySize(rows: maximum + 1, columns: 80)),
         ),
-        throwsA(isA<PtyInvalidArgumentException>()),
+        throwsA(isA<PtyArgumentException>()),
       );
     });
 

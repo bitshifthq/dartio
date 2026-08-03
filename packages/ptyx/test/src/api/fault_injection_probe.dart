@@ -53,7 +53,7 @@ Start-Sleep -Seconds 10
   try {
     await session.exitCode;
     throw StateError('exitCode did not report the injected failure');
-  } on PtyExitException catch (error) {
+  } on PtyException catch (error) {
     if (error.nativeCode != 87) rethrow;
   } on Object {
     rethrow;
@@ -87,7 +87,7 @@ Future<void> _exerciseReentrantWriteFailure() async {
       ptyd_test_fail_next_write();
       try {
         session.write(Uint8List.fromList(const [1]));
-      } on PtyInfrastructureException {
+      } on PtyInfraException {
         result.complete();
       } on Object catch (error, stackTrace) {
         result.completeError(error, stackTrace);
@@ -108,10 +108,10 @@ Future<void> _exerciseReentrantWriteFailure() async {
 Future<void> _expectInfrastructure<T>(Future<T> operation) async {
   try {
     await operation;
-  } on PtyInfrastructureException {
+  } on PtyInfraException {
     return;
   }
-  throw StateError('operation did not fail with PtyInfrastructureException');
+  throw StateError('operation did not fail with PtyInfraException');
 }
 
 Future<void> _exerciseFailedPost() async {

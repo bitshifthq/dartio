@@ -1,42 +1,30 @@
 part of 'api.dart';
 
-/// Stable error categories exposed by ptyx operations.
+/// Stable failure domains exposed by ptyx operations.
 enum PtyErrorCategory {
-  /// Invalid caller input.
+  /// Caller input is invalid.
   invalidArgument,
 
-  /// An operation requires a live session.
+  /// The session no longer accepts the operation.
   closed,
 
-  /// The platform does not provide the requested capability.
+  /// The current platform or backend does not provide the operation.
   unsupported,
 
-  /// Native process creation failed.
-  spawn,
-
-  /// Accepted terminal input failed.
+  /// Accepted terminal input failed permanently.
   input,
 
-  /// Bounded terminal input storage could not accept one complete write.
+  /// Bounded terminal input storage cannot accept the complete write now.
   backpressure,
 
   /// Terminal output failed.
   output,
 
-  /// Direct-child exit observation failed.
-  exit,
+  /// A child-process operation failed.
+  process,
 
-  /// Native signal or termination delivery failed.
-  signal,
-
-  /// Native terminal resize failed.
-  resize,
-
-  /// Native metadata access failed.
-  metadata,
-
-  /// Terminal-mode observation failed.
-  mode,
+  /// A terminal query or mutation failed.
+  terminal,
 
   /// Session cleanup could not be established.
   cleanup,
@@ -44,23 +32,22 @@ enum PtyErrorCategory {
   /// The native controller, reactor, or broker failed.
   infrastructure,
 
-  /// An uncategorized package failure.
+  /// No more specific domain is available.
   unknown,
 }
 
 /// Base exception thrown by ptyx operations.
-class PtyException implements Exception {
+base class PtyException implements Exception {
   /// Human-readable failure detail.
   final String message;
 
   /// The public operation or infrastructure subsystem that reported failure.
   final String operation;
 
-  /// Stable machine-readable error category.
+  /// Stable machine-readable failure domain.
   final PtyErrorCategory category;
 
-  /// Native status or operating-system error code when retained by the
-  /// native boundary.
+  /// Native or operating-system error code, when available.
   final int? nativeCode;
 
   /// Non-secret context useful for diagnosing the failed operation.
@@ -84,9 +71,9 @@ class PtyException implements Exception {
   }
 }
 
-/// Thrown when a runtime-validated ptyx argument is invalid.
-class PtyInvalidArgumentException extends PtyException {
-  const PtyInvalidArgumentException(
+/// Thrown when native validation rejects an argument.
+final class PtyArgumentException extends PtyException {
+  const PtyArgumentException(
     super.message, {
     super.operation = 'validation',
     super.nativeCode,
@@ -94,15 +81,11 @@ class PtyInvalidArgumentException extends PtyException {
   }) : super(category: .invalidArgument);
 
   @override
-  String get _name => 'PtyInvalidArgumentException';
+  String get _name => 'PtyArgumentException';
 }
 
-/// Thrown when an operation requires an open session.
-///
-/// Closing a session is idempotent. Operations such as [PtySession.write],
-/// [PtySession.resize], and metadata getters require native handles released by
-/// [PtySession.close].
-class PtyClosedException extends PtyException {
+/// Thrown when an operation requires a live session.
+final class PtyClosedException extends PtyException {
   const PtyClosedException(
     super.message, {
     super.operation = 'state',
@@ -114,43 +97,7 @@ class PtyClosedException extends PtyException {
   String get _name => 'PtyClosedException';
 }
 
-/// Thrown when the current platform does not support an operation.
-///
-/// Optional platform capabilities may also be represented by nullable values,
-/// such as [PtySession.pid], [PtySession.ttyName], and [PtySession.mode].
-class PtyUnsupportedException extends PtyException {
-  const PtyUnsupportedException(
-    super.message, {
-    super.operation = 'capability',
-    super.nativeCode,
-    super.context,
-  }) : super(category: .unsupported);
-
-  @override
-  String get _name => 'PtyUnsupportedException';
-}
-
-/// Thrown when the terminal input direction has failed permanently.
-///
-/// This includes accepted input that cannot be delivered and writes rejected
-/// after the endpoint has closed.
-class PtyInputException extends PtyException {
-  const PtyInputException(
-    super.message, {
-    super.operation = 'input',
-    super.nativeCode,
-    super.context,
-  }) : super(category: .input);
-
-  @override
-  String get _name => 'PtyInputException';
-}
-
 /// Thrown when bounded native input admission is temporarily unavailable.
-///
-/// No bytes from the rejected invocation are accepted. The session remains
-/// usable, so a later write may succeed after the native writer or another
-/// concurrent admission makes progress.
 final class PtyBackpressureException extends PtyException {
   const PtyBackpressureException(
     super.message, {
@@ -163,9 +110,35 @@ final class PtyBackpressureException extends PtyException {
   String get _name => 'PtyBackpressureException';
 }
 
-/// Thrown when the native controller or Unix broker becomes unavailable.
-class PtyInfrastructureException extends PtyException {
-  const PtyInfrastructureException(
+/// Thrown when the current platform does not support an operation.
+final class PtyUnsupportedException extends PtyException {
+  const PtyUnsupportedException(
+    super.message, {
+    super.operation = 'capability',
+    super.nativeCode,
+    super.context,
+  }) : super(category: .unsupported);
+
+  @override
+  String get _name => 'PtyUnsupportedException';
+}
+
+/// Thrown when accepted terminal input cannot be delivered.
+final class PtyInputException extends PtyException {
+  const PtyInputException(
+    super.message, {
+    super.operation = 'input',
+    super.nativeCode,
+    super.context,
+  }) : super(category: .input);
+
+  @override
+  String get _name => 'PtyInputException';
+}
+
+/// Thrown when the native controller or broker becomes unavailable.
+final class PtyInfraException extends PtyException {
+  const PtyInfraException(
     super.message, {
     super.operation = 'controller',
     super.nativeCode,
@@ -173,109 +146,5 @@ class PtyInfrastructureException extends PtyException {
   }) : super(category: .infrastructure);
 
   @override
-  String get _name => 'PtyInfrastructureException';
-}
-
-/// Thrown when native process creation fails.
-class PtySpawnException extends PtyException {
-  const PtySpawnException(
-    super.message, {
-    super.operation = 'spawn',
-    super.nativeCode,
-    super.context,
-  }) : super(category: .spawn);
-
-  @override
-  String get _name => 'PtySpawnException';
-}
-
-/// Thrown on a terminal output read failure.
-class PtyOutputException extends PtyException {
-  const PtyOutputException(
-    super.message, {
-    super.operation = 'output',
-    super.nativeCode,
-    super.context,
-  }) : super(category: .output);
-
-  @override
-  String get _name => 'PtyOutputException';
-}
-
-/// Thrown when direct-child status cannot be observed.
-class PtyExitException extends PtyException {
-  const PtyExitException(
-    super.message, {
-    super.operation = 'exit',
-    super.nativeCode,
-    super.context,
-  }) : super(category: .exit);
-
-  @override
-  String get _name => 'PtyExitException';
-}
-
-/// Thrown when native signal or termination delivery fails.
-class PtySignalException extends PtyException {
-  const PtySignalException(
-    super.message, {
-    super.operation = 'signal',
-    super.nativeCode,
-    super.context,
-  }) : super(category: .signal);
-
-  @override
-  String get _name => 'PtySignalException';
-}
-
-/// Thrown when native terminal resize fails.
-class PtyResizeException extends PtyException {
-  const PtyResizeException(
-    super.message, {
-    super.operation = 'resize',
-    super.nativeCode,
-    super.context,
-  }) : super(category: .resize);
-
-  @override
-  String get _name => 'PtyResizeException';
-}
-
-/// Thrown when native terminal metadata cannot be read safely.
-class PtyMetadataException extends PtyException {
-  const PtyMetadataException(
-    super.message, {
-    super.operation = 'metadata',
-    super.nativeCode,
-    super.context,
-  }) : super(category: .metadata);
-
-  @override
-  String get _name => 'PtyMetadataException';
-}
-
-/// Thrown when terminal-mode observation fails.
-class PtyModeException extends PtyException {
-  const PtyModeException(
-    super.message, {
-    super.operation = 'mode',
-    super.nativeCode,
-    super.context,
-  }) : super(category: .mode);
-
-  @override
-  String get _name => 'PtyModeException';
-}
-
-/// Thrown when bounded native cleanup cannot be established.
-class PtyCloseException extends PtyException {
-  const PtyCloseException(
-    super.message, {
-    super.operation = 'close',
-    super.nativeCode,
-    super.context,
-  }) : super(category: .cleanup);
-
-  @override
-  String get _name => 'PtyCloseException';
+  String get _name => 'PtyInfraException';
 }

@@ -11,11 +11,11 @@ int _createRuntime(int port) {
   final runtime = runtimeCreate();
   try {
     return runtimeAttach(runtime, port);
-  } on NativeFailure {
+  } on PtyException {
     try {
       runtimeShutdown(runtime);
       runtimeRelease(runtime);
-    } on NativeFailure {
+    } on PtyException {
       // The original attach failure is the actionable result. Native cleanup
       // is retried by the adapter when shutdown or release cannot converge.
     }
@@ -37,13 +37,12 @@ Future<void> _guardNativeOwner(SendPort ready) async {
           try {
             adapter = _createRuntime(port);
             reply.send([_guardianCreated, adapter]);
-          } on NativeFailure catch (failure) {
+          } on PtyException catch (failure) {
             reply.send([
               _guardianCreateFailed,
-              failure.status,
-              failure.domain,
-              failure.kind,
-              failure.nativeCode,
+              failure.category.index,
+              failure.nativeCode ?? 0,
+              failure.operation,
               failure.message,
             ]);
             commands.close();
@@ -57,7 +56,7 @@ Future<void> _guardNativeOwner(SendPort ready) async {
     if (adapter != PTYD_INVALID_ADAPTER) {
       try {
         runtimeDetach(adapter);
-      } on NativeFailure {
+      } on PtyException {
         // The native cleanup worker retains failed ownership for retry.
       }
     }
@@ -66,7 +65,7 @@ Future<void> _guardNativeOwner(SendPort ready) async {
 
 typedef _PendingSpawn = ({
   _NativeSession Function(int handle) onReady,
-  void Function(NativeFailure failure) onFailure,
+  void Function(PtyException error) onFailure,
 });
 
 final class _NativeRuntime implements PtyxFinalizable {
@@ -86,11 +85,17 @@ final class _NativeRuntime implements PtyxFinalizable {
     _finalizer.attach(this, Pointer<Void>.fromAddress(adapter), detach: this);
   }
 
-  NativeFailure? abort() {
-    NativeFailure? failure;
+  PtyCapabilities get capabilities {
+    final cached = _capabilities;
+    if (cached != null) return cached;
+    return _capabilities = runtimeCapabilities(_adapter);
+  }
+
+  PtyException? abort() {
+    PtyException? failure;
     try {
       runtimeAbort(_adapter);
-    } on NativeFailure catch (error) {
+    } on PtyException catch (error) {
       failure = error;
     }
     _updateLiveness();
@@ -101,11 +106,11 @@ final class _NativeRuntime implements PtyxFinalizable {
     eventAcknowledge(_adapter, token);
   }
 
-  NativeFailure? releaseSession(int handle) {
-    NativeFailure? failure;
+  PtyException? releaseSession(int handle) {
+    PtyException? failure;
     try {
       sessionRelease(_adapter, handle);
-    } on NativeFailure catch (error) {
+    } on PtyException catch (error) {
       failure = error;
     }
     if (failure == null) {
@@ -119,7 +124,7 @@ final class _NativeRuntime implements PtyxFinalizable {
   void startSpawn(
     SpawnRequest request, {
     required _NativeSession Function(int handle) onReady,
-    required void Function(NativeFailure failure) onFailure,
+    required void Function(PtyException error) onFailure,
   }) {
     try {
       final handle = spawnStart(_adapter, request);
@@ -129,42 +134,24 @@ final class _NativeRuntime implements PtyxFinalizable {
     }
   }
 
-  void _onMessage(Object? message) {
-    final event = decodeEvent(message);
-    if (event == null) {
-      _abortProtocol();
-      return;
-    }
-    _dispatch(event);
-  }
-
-  void _updateLiveness() {
-    _port.keepIsolateAlive =
-        _pendingSpawns.isNotEmpty ||
-        _sessions.isNotEmpty ||
-        _terminalDeliveryTargets.isNotEmpty;
-  }
-
-  PtyCapabilities get capabilities {
-    final cached = _capabilities;
-    if (cached != null) return cached;
-    return _capabilities = runtimeCapabilities(_adapter);
-  }
-
   void _abortProtocol() {
-    final failure =
-        abort() ??
-        syntheticFailure(kind: ptyx_error_kind.PTYX_ERROR_INFRASTRUCTURE_LOST);
+    final failure = abort() ?? syntheticError(operation: 'controller');
     _handleInfrastructureFailure(failure);
+  }
+
+  void _ackOrRelease(int session, int token) {
+    try {
+      acknowledge(token);
+    } on PtyException {
+      final failure = releaseSession(session);
+      if (failure != null) _handleInfrastructureFailure(failure);
+    }
   }
 
   void _dispatch(NativeEvent event) {
     if (event.isGlobalInfrastructureFailure) {
       _handleInfrastructureFailure(
-        event.failure ??
-            syntheticFailure(
-              kind: ptyx_error_kind.PTYX_ERROR_INFRASTRUCTURE_LOST,
-            ),
+        event.error ?? syntheticError(operation: 'controller'),
       );
       return;
     }
@@ -173,7 +160,7 @@ final class _NativeRuntime implements PtyxFinalizable {
       return;
     }
     if (event.kind == .spawnFailed) {
-      _handleSpawnFailure(event.session, event.failure);
+      _handleSpawnFailure(event.session, event.error);
       return;
     }
     final target = _sessions[event.session]?.target;
@@ -205,7 +192,7 @@ final class _NativeRuntime implements PtyxFinalizable {
     }
   }
 
-  void _handleInfrastructureFailure(NativeFailure failure) {
+  void _handleInfrastructureFailure(PtyException error) {
     final pending = _pendingSpawns.values.toList(growable: false);
     final sessions = [
       for (final reference in _sessions.values)
@@ -217,11 +204,22 @@ final class _NativeRuntime implements PtyxFinalizable {
     _pendingSpawns.clear();
     _sessions.clear();
     for (final spawn in pending) {
-      spawn.onFailure(failure);
+      spawn.onFailure(error);
     }
     for (final session in sessions) {
-      session._nativeInfrastructureFailed(failure);
+      session._nativeInfrastructureFailed(error);
     }
+    _updateLiveness();
+  }
+
+  void _handleSpawnFailure(int handle, PtyException? error) {
+    final pending = _pendingSpawns.remove(handle);
+    if (pending == null) {
+      _updateLiveness();
+      return;
+    }
+    _retainTerminalDeliveryTurn(pending);
+    pending.onFailure(error ?? syntheticError(operation: 'spawn'));
     _updateLiveness();
   }
 
@@ -237,27 +235,13 @@ final class _NativeRuntime implements PtyxFinalizable {
     _updateLiveness();
   }
 
-  void _handleSpawnFailure(int handle, NativeFailure? failure) {
-    final pending = _pendingSpawns.remove(handle);
-    if (pending == null) {
-      _updateLiveness();
+  void _onMessage(Object? message) {
+    final event = decodeEvent(message);
+    if (event == null) {
+      _abortProtocol();
       return;
     }
-    _retainTerminalDeliveryTurn(pending);
-    pending.onFailure(
-      failure ??
-          syntheticFailure(kind: ptyx_error_kind.PTYX_ERROR_NATIVE_FAILURE),
-    );
-    _updateLiveness();
-  }
-
-  void _ackOrRelease(int session, int token) {
-    try {
-      acknowledge(token);
-    } on NativeFailure {
-      final failure = releaseSession(session);
-      if (failure != null) _handleInfrastructureFailure(failure);
-    }
+    _dispatch(event);
   }
 
   void _retainTerminalDeliveryTurn(Object target) {
@@ -266,6 +250,13 @@ final class _NativeRuntime implements PtyxFinalizable {
       _terminalDeliveryTargets.remove(target);
       _updateLiveness();
     });
+  }
+
+  void _updateLiveness() {
+    _port.keepIsolateAlive =
+        _pendingSpawns.isNotEmpty ||
+        _sessions.isNotEmpty ||
+        _terminalDeliveryTargets.isNotEmpty;
   }
 
   static Future<_NativeRuntime> _create() async {
@@ -301,17 +292,15 @@ final class _NativeRuntime implements PtyxFinalizable {
           controller = _NativeRuntime._(port, adapter);
         case [
           _guardianCreateFailed,
-          final int status,
-          final int domain,
-          final int kind,
+          final int category,
           final int nativeCode,
+          final String operation,
           final String message,
         ]:
-          throw NativeFailure(
-            status: status,
-            domain: domain,
-            kind: kind,
-            nativeCode: nativeCode,
+          throw exceptionFromCategory(
+            category: PtyErrorCategory.values[category],
+            nativeCode: nativeCode == 0 ? null : nativeCode,
+            operation: operation,
             message: message,
           );
         default:

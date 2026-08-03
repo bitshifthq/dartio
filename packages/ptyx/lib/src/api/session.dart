@@ -37,10 +37,9 @@ abstract interface class PtySession {
   /// [PtyUnsupportedException] because their ConPTY shutdown behavior cannot
   /// satisfy the session cleanup contract.
   ///
-  /// Throws [PtyInvalidArgumentException] for options outside the native
-  /// contract, [PtyUnsupportedException] when the platform backend is
-  /// unavailable, [PtySpawnException] when native process creation fails, or
-  /// [PtyInfrastructureException] when controller setup cannot be completed.
+  /// Throws [PtyArgumentException] for options outside the native contract,
+  /// [PtyUnsupportedException] when the platform backend is unavailable, or
+  /// [PtyInfraException] when controller setup cannot be completed.
   static Future<PtySession> spawn(PtySpawnOptions options) =>
       native.spawnSession(options);
 
@@ -72,8 +71,8 @@ abstract interface class PtySession {
   ///
   /// Returns `null` when terminal modes are not available on the current
   /// platform. Check [capabilities] to distinguish that case. Throws
-  /// [PtyModeException] when the native query fails and
-  /// [PtyClosedException] after [close].
+  /// [PtyException] when the native query fails and [PtyClosedException] after
+  /// [close].
   PtyTermMode? get mode;
 
   /// Terminal input mode changes observed from the pseudo terminal.
@@ -110,22 +109,22 @@ abstract interface class PtySession {
   /// The child process identifier.
   ///
   /// Returns `null` when no stable process identifier is available.
-  /// Throws [PtyMetadataException] when the native query fails and
-  /// [PtyClosedException] after [close].
+  /// Throws [PtyException] when the native query fails and [PtyClosedException]
+  /// after [close].
   int? get pid;
 
   /// The current pseudo terminal size.
   ///
-  /// Throws [PtyMetadataException] when the native query fails and
-  /// [PtyClosedException] after [close].
+  /// Throws [PtyException] when the native query fails and [PtyClosedException]
+  /// after [close].
   PtySize get size;
 
   /// The pseudo terminal device name.
   ///
   /// Returns `null` when no terminal device name is available. Check
   /// [capabilities] to distinguish an unsupported terminal name. Throws
-  /// [PtyMetadataException] when the native query fails and
-  /// [PtyClosedException] after [close].
+  /// [PtyException] when the native query fails and [PtyClosedException] after
+  /// [close].
   String? get ttyName;
 
   /// Closes the session and releases native resources.
@@ -135,10 +134,10 @@ abstract interface class PtySession {
   ///
   /// After this future completes, operations that require a live session throw
   /// [PtyClosedException]. The [output] and [modeChanges] streams are closed as
-  /// part of closing the session. Throws [PtyCloseException] if bounded native
+  /// part of closing the session. Throws [PtyException] if bounded native
   /// cleanup cannot be established and [PtyInputException] if accepted input
   /// cannot be delivered during cleanup. If an earlier
-  /// [PtyInfrastructureException] caused cleanup uncertainty, that root error
+  /// [PtyInfraException] caused cleanup uncertainty, that root error
   /// is preserved.
   Future<void> close();
 
@@ -152,15 +151,14 @@ abstract interface class PtySession {
   /// `false` when there is no live child, including after [exitCode] completes
   /// or after [close].
   ///
-  /// Throws [PtySignalException] if native delivery fails.
+  /// Throws [PtyException] if native delivery fails.
   bool kill([ProcessSignal signal = .sigterm]);
 
   /// Changes the pseudo terminal size.
   ///
   /// Terminal programs commonly observe this as a window-size change.
-  /// Throws [PtyInvalidArgumentException] for invalid dimensions,
-  /// [PtyResizeException] when the native resize fails, and
-  /// [PtyClosedException] after [close].
+  /// Throws [ArgumentError] for invalid dimensions, [PtyException] when the
+  /// native resize fails, and [PtyClosedException] after [close].
   void resize(PtySize size);
 
   /// Accepts all of [data] into bounded native storage in invocation order.
@@ -169,11 +167,11 @@ abstract interface class PtySession {
   /// child consumed it. The caller may mutate [data] immediately afterward.
   ///
   /// One invocation accepts at most 1 MiB; larger application payloads should
-  /// be divided into ordered chunks. Throws [PtyInvalidArgumentException] when
-  /// [data] is empty, exceeds 1 MiB, or is larger than the configured input
-  /// bound, [PtyBackpressureException] when the complete buffer cannot be
-  /// accepted without waiting, [PtyInputException] after terminal input
-  /// failure, and [PtyClosedException] after [close].
+  /// be divided into ordered chunks. Throws [ArgumentError] when [data] is
+  /// empty, exceeds 1 MiB, or is larger than the configured input bound,
+  /// [PtyBackpressureException] when the complete buffer cannot be accepted
+  /// without waiting, [PtyInputException] after terminal input failure, and
+  /// [PtyClosedException] after [close].
   ///
   /// ```dart
   /// session.write(Uint8List.fromList('status\n'.codeUnits));

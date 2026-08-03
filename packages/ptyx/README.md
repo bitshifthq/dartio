@@ -145,13 +145,14 @@ qualification is retained.
 
 Operational and validated-input errors derive from `PtyException`:
 
-- `PtyInvalidArgumentException` means a value is outside the native contract.
+- `PtyArgumentException` means the native boundary rejected a value. Pure Dart
+  validation uses `ArgumentError`.
 - `PtyClosedException` means the operation requires a live session.
 - `PtyUnsupportedException` means the native capability does not exist.
 - `PtyBackpressureException` means one write was rejected without failing the
   session because bounded native input storage was full.
 - `PtyInputException` reports an unrecoverable terminal input failure.
-- `PtyInfrastructureException` reports controller or Unix broker loss.
+- `PtyInfraException` reports controller or Unix broker loss.
 
 Output read failures are delivered on `output`. Permanent input failures become
 sticky for later writes, are delivered after safely buffered output, and are

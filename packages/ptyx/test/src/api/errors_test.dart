@@ -3,7 +3,6 @@ import 'package:ptyx/ptyx.dart'
         PtyClosedException,
         PtyErrorCategory,
         PtyException,
-        PtySignalException,
         PtyUnsupportedException;
 import 'package:test/test.dart';
 
@@ -25,19 +24,21 @@ void main() {
       });
 
       test('retains operation, category, native code, and safe context', () {
-        const error = PtySignalException(
+        const error = PtyException(
           'delivery failed',
+          operation: 'kill',
+          category: .process,
           nativeCode: 3,
           context: 'foreground process group',
         );
 
-        expect(error.operation, 'signal');
-        expect(error.category, PtyErrorCategory.signal);
+        expect(error.operation, 'kill');
+        expect(error.category, PtyErrorCategory.process);
         expect(error.nativeCode, 3);
         expect(error.context, 'foreground process group');
         expect(
           error.toString(),
-          'PtySignalException[signal/signal] (native 3): delivery failed: '
+          'PtyException[kill/process] (native 3): delivery failed: '
           'foreground process group',
         );
       });
