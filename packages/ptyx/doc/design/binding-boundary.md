@@ -45,13 +45,12 @@ Dart's stream and future contracts.
 ## Event contract
 
 The private adapter receives a fixed eleven-field message. The native event
-pump validates event kind, session identity, token ownership, payload bounds,
-error metadata, close flags, and values before posting. Output validation does
-not copy or allocate. Every output token is acknowledged or released exactly
-once, including malformed or unowned events. A malformed native event becomes
-one canonical infrastructure event and enters native cleanup. The Dart router
-only guards the message shape. If that shape is invalid, it invokes the
-idempotent native abort operation before projecting infrastructure failure.
+pump owns output-buffer bounds and token ownership; it does not duplicate a
+second semantic state machine for every event. The runtime performs one cheap
+message-shape and event-kind decode, routes the event to its session, and
+acknowledges or releases output tokens exactly once. A malformed top-level
+message invokes the idempotent native abort operation before projecting an
+infrastructure failure.
 
 Close flags remain part of the C ABI diagnostic contract. Dart exposes the
 primary native failure through its existing typed channels and does not

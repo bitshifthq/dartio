@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::Duration;
 
-const ABI_VERSION: u32 = 3;
+const ABI_VERSION: u32 = 4;
 pub const STATUS_OK: u32 = 0;
 pub const STATUS_INVALID_ARGUMENT: u32 = 1;
 pub const STATUS_STALE_HANDLE: u32 = 2;
@@ -55,9 +55,12 @@ const OPERATION_WRITE: u32 = 4;
 pub const OPERATION_OUTPUT: u32 = 5;
 const OPERATION_RESIZE: u32 = 6;
 const OPERATION_TERMINATE: u32 = 7;
-const OPERATION_METADATA: u32 = 8;
-pub const OPERATION_CLOSE: u32 = 9;
-pub const OPERATION_EXIT: u32 = 10;
+pub const OPERATION_SIZE: u32 = 8;
+pub const OPERATION_PROCESS_ID: u32 = 9;
+pub const OPERATION_TERMINAL_MODE: u32 = 10;
+pub const OPERATION_TERMINAL_NAME: u32 = 11;
+pub const OPERATION_CLOSE: u32 = 12;
+pub const OPERATION_EXIT: u32 = 13;
 
 const EVENT_SPAWN_READY: u32 = 1;
 const EVENT_SPAWN_FAILED: u32 = 2;
@@ -96,8 +99,6 @@ const CAPABILITY_TERMINAL_MODES: u32 = 4;
 const CAPABILITY_CONPTY: u32 = 8;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 const CAPABILITY_TERMINAL_NAME: u32 = 16;
-const SNAPSHOT_HAS_MODE: u32 = 1;
-const SNAPSHOT_HAS_TTY_NAME: u32 = 2;
 
 const MAX_VIEW_LENGTH: usize = isize::MAX as usize;
 const MAX_ARGUMENTS: usize = 256;
@@ -172,20 +173,6 @@ pub struct SpawnOptions {
     input_capacity: u64,
     output_capacity: u64,
     graceful_close_timeout_us: u64,
-    reserved: [u64; 4],
-}
-
-#[repr(C)]
-pub struct SessionSnapshot {
-    struct_size: u32,
-    flags: u32,
-    pid: i64,
-    size: Size,
-    modes: u32,
-    reserved0: u32,
-    tty_name: *mut u8,
-    tty_name_capacity: u64,
-    tty_name_required: u64,
     reserved: [u64; 4],
 }
 
@@ -771,11 +758,11 @@ pub unsafe extern "C" fn ptyx_runtime_capabilities(
 ) -> u32 {
     boundary(error, || {
         if output.is_null() {
-            set_error(error, invalid_error(OPERATION_METADATA));
+            set_error(error, invalid_error(OPERATION_RUNTIME_CREATE));
             return STATUS_INVALID_ARGUMENT;
         }
         if runtime_entry(runtime).is_none() {
-            set_error(error, stale_error(OPERATION_METADATA));
+            set_error(error, stale_error(OPERATION_RUNTIME_CREATE));
             return STATUS_STALE_HANDLE;
         }
         *output = capabilities();
@@ -978,7 +965,10 @@ fn operation_error(failure: OperationError) -> Error {
         Operation::Resize => OPERATION_RESIZE,
         Operation::Terminate => OPERATION_TERMINATE,
         Operation::Exit => OPERATION_EXIT,
-        Operation::Metadata => OPERATION_METADATA,
+        Operation::Size => OPERATION_SIZE,
+        Operation::ProcessId => OPERATION_PROCESS_ID,
+        Operation::TerminalMode => OPERATION_TERMINAL_MODE,
+        Operation::TerminalName => OPERATION_TERMINAL_NAME,
         Operation::Close => OPERATION_CLOSE,
         _ => OPERATION_NONE,
     };
@@ -1654,60 +1644,152 @@ pub unsafe extern "C" fn ptyx_session_terminate(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn ptyx_session_snapshot(
+/// Returns the current terminal size for an active session.
+///
+/// # Safety
+/// `size` and `error` must be valid writable pointers for the duration of the
+/// call, or `error` may be null when the caller does not need diagnostics.
+pub unsafe extern "C" fn ptyx_session_get_size(
     session: u64,
-    snapshot: *mut SessionSnapshot,
+    size: *mut Size,
     error: *mut Error,
 ) -> u32 {
     boundary(error, || {
-        if snapshot.is_null()
-            || ((*snapshot).struct_size as usize) < size_of::<SessionSnapshot>()
-            || (*snapshot).reserved0 != 0
-            || (*snapshot).reserved != [0; 4]
-            || ((*snapshot).tty_name_capacity != 0 && (*snapshot).tty_name.is_null())
-        {
-            set_error(error, invalid_error(OPERATION_METADATA));
+        if size.is_null() {
+            set_error(error, invalid_error(OPERATION_SIZE));
             return STATUS_INVALID_ARGUMENT;
         }
-        let (entry, engine_handle) = match require_active(session, OPERATION_METADATA, error) {
+        let (entry, handle) = match require_active(session, OPERATION_SIZE, error) {
             Ok(value) => value,
             Err(status) => return status,
         };
-        let value = match entry.runtime.engine.snapshot(engine_handle) {
+        match entry.runtime.engine.size(handle) {
+            Ok(value) => {
+                *size = Size {
+                    rows: value[0],
+                    columns: value[1],
+                    pixel_width: value[2],
+                    pixel_height: value[3],
+                };
+                STATUS_OK
+            }
+            Err(failure) => {
+                set_error(error, operation_error(failure));
+                operation_status(failure)
+            }
+        }
+    })
+}
+
+#[no_mangle]
+/// Returns the direct child process identifier for an active session.
+///
+/// # Safety
+/// `pid` and `error` must be valid writable pointers for the duration of the
+/// call, or `error` may be null when the caller does not need diagnostics.
+pub unsafe extern "C" fn ptyx_session_get_child_pid(
+    session: u64,
+    pid: *mut i64,
+    error: *mut Error,
+) -> u32 {
+    boundary(error, || {
+        if pid.is_null() {
+            set_error(error, invalid_error(OPERATION_PROCESS_ID));
+            return STATUS_INVALID_ARGUMENT;
+        }
+        let (entry, handle) = match require_active(session, OPERATION_PROCESS_ID, error) {
+            Ok(value) => value,
+            Err(status) => return status,
+        };
+        match entry.runtime.engine.process_id(handle) {
+            Ok(value) => {
+                *pid = value;
+                STATUS_OK
+            }
+            Err(failure) => {
+                set_error(error, operation_error(failure));
+                operation_status(failure)
+            }
+        }
+    })
+}
+
+#[no_mangle]
+/// Returns terminal mode bits for an active session.
+///
+/// # Safety
+/// `mode` and `error` must be valid writable pointers for the duration of the
+/// call, or `error` may be null when the caller does not need diagnostics.
+pub unsafe extern "C" fn ptyx_session_get_term_mode(
+    session: u64,
+    mode: *mut u32,
+    error: *mut Error,
+) -> u32 {
+    boundary(error, || {
+        if mode.is_null() {
+            set_error(error, invalid_error(OPERATION_TERMINAL_MODE));
+            return STATUS_INVALID_ARGUMENT;
+        }
+        let (entry, handle) = match require_active(session, OPERATION_TERMINAL_MODE, error) {
+            Ok(value) => value,
+            Err(status) => return status,
+        };
+        match entry.runtime.engine.terminal_mode(handle) {
+            Ok(value) => {
+                *mode = mode_bits(value);
+                STATUS_OK
+            }
+            Err(failure) => {
+                set_error(error, operation_error(failure));
+                operation_status(failure)
+            }
+        }
+    })
+}
+
+#[no_mangle]
+/// Copies the controller terminal name into a caller-owned buffer.
+///
+/// The required byte count is always written before a `STATUS_BUFFER_TOO_SMALL`
+/// result. The value is not NUL terminated.
+///
+/// # Safety
+/// `required` and `error` must be valid writable pointers for the duration of
+/// the call. When `capacity` is non-zero, `name` must point to at least
+/// `capacity` writable bytes. `name` may be null only when `capacity` is zero.
+pub unsafe extern "C" fn ptyx_session_get_tty_name(
+    session: u64,
+    name: *mut u8,
+    capacity: u64,
+    required: *mut u64,
+    error: *mut Error,
+) -> u32 {
+    boundary(error, || {
+        if required.is_null() || (capacity != 0 && name.is_null()) {
+            set_error(error, invalid_error(OPERATION_TERMINAL_NAME));
+            return STATUS_INVALID_ARGUMENT;
+        }
+        let (entry, handle) = match require_active(session, OPERATION_TERMINAL_NAME, error) {
+            Ok(value) => value,
+            Err(status) => return status,
+        };
+        let value = match entry.runtime.engine.terminal_name(handle) {
             Ok(value) => value,
             Err(failure) => {
                 set_error(error, operation_error(failure));
                 return operation_status(failure);
             }
         };
-        (*snapshot).flags = 0;
-        (*snapshot).pid = value.pid;
-        (*snapshot).size = Size {
-            rows: value.size[0],
-            columns: value.size[1],
-            pixel_width: value.size[2],
-            pixel_height: value.size[3],
-        };
-        (*snapshot).modes = 0;
-        if let Some(modes) = value.mode {
-            (*snapshot).flags |= SNAPSHOT_HAS_MODE;
-            (*snapshot).modes = mode_bits(modes);
-        }
-        (*snapshot).tty_name_required = 0;
-        let Some(name) = value.tty_name else {
-            return STATUS_OK;
-        };
-        (*snapshot).flags |= SNAPSHOT_HAS_TTY_NAME;
-        (*snapshot).tty_name_required = name.len() as u64;
-        let Ok(capacity) = usize::try_from((*snapshot).tty_name_capacity) else {
-            set_error(error, invalid_error(OPERATION_METADATA));
+        *required = value.len() as u64;
+        let Ok(capacity) = usize::try_from(capacity) else {
+            set_error(error, invalid_error(OPERATION_TERMINAL_NAME));
             return STATUS_INVALID_ARGUMENT;
         };
-        if capacity < name.len() {
+        if capacity < value.len() {
             return STATUS_BUFFER_TOO_SMALL;
         }
-        if !name.is_empty() {
-            ptr::copy_nonoverlapping(name.as_ptr(), (*snapshot).tty_name, name.len());
+        if !value.is_empty() {
+            ptr::copy_nonoverlapping(value.as_ptr(), name, value.len());
         }
         STATUS_OK
     })
@@ -1721,17 +1803,22 @@ pub unsafe extern "C" fn ptyx_session_observe_mode(
 ) -> u32 {
     boundary(error, || {
         if enabled > 1 {
-            set_error(error, invalid_error(OPERATION_METADATA));
+            set_error(error, invalid_error(OPERATION_TERMINAL_MODE));
             return STATUS_INVALID_ARGUMENT;
         }
-        let (entry, engine_handle) = match require_active(session, OPERATION_METADATA, error) {
+        let (entry, engine_handle) = match require_active(session, OPERATION_TERMINAL_MODE, error) {
             Ok(value) => value,
             Err(status) => return status,
         };
         if capabilities() & CAPABILITY_TERMINAL_MODES == 0 {
             set_error(
                 error,
-                Error::value(ERROR_DOMAIN_STATE, ERROR_UNSUPPORTED, OPERATION_METADATA, 0),
+                Error::value(
+                    ERROR_DOMAIN_STATE,
+                    ERROR_UNSUPPORTED,
+                    OPERATION_TERMINAL_MODE,
+                    0,
+                ),
             );
             return STATUS_UNSUPPORTED;
         }
@@ -1916,10 +2003,9 @@ mod tests {
     use super::{
         active_session_for_write, copy_write_result, decode_handle, io_error, operation_error,
         operation_status, sessions, write_boundary, Error, Event, Registry, RuntimeOptions,
-        SessionSnapshot, SpawnOptions, ERROR_DOMAIN_ARGUMENT, ERROR_DOMAIN_PROCESS,
-        ERROR_INVALID_ARGUMENT, ERROR_NATIVE_FAILURE, OPERATION_EXIT, OPERATION_SPAWN,
-        OPERATION_TERMINATE, STATUS_BACKPRESSURE, STATUS_INVALID_ARGUMENT, STATUS_OK,
-        STATUS_OS_ERROR,
+        SpawnOptions, ERROR_DOMAIN_ARGUMENT, ERROR_DOMAIN_PROCESS, ERROR_INVALID_ARGUMENT,
+        ERROR_NATIVE_FAILURE, OPERATION_EXIT, OPERATION_SPAWN, OPERATION_TERMINATE,
+        STATUS_BACKPRESSURE, STATUS_INVALID_ARGUMENT, STATUS_OK, STATUS_OS_ERROR,
     };
     use ptyx::__private_adapter::CopyWriteResult;
     use ptyx::{FailureKind, Operation, OperationError};
@@ -1931,7 +2017,6 @@ mod tests {
         assert_eq!(size_of::<Error>(), 64);
         assert_eq!(size_of::<RuntimeOptions>(), 56);
         assert_eq!(size_of::<SpawnOptions>(), 144);
-        assert_eq!(size_of::<SessionSnapshot>(), 96);
         assert_eq!(size_of::<Event>(), 136);
     }
 

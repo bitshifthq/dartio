@@ -9,7 +9,7 @@ final class PtyCapabilities {
   /// Whether the session owns a Unix terminal process group.
   final bool processGroups;
 
-  /// Whether terminal-mode snapshots are available.
+  /// Whether terminal-mode queries and change observation are available.
   final bool terminalModes;
 
   /// Whether [PtySession.ttyName] is available.

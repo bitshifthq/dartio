@@ -40,4 +40,4 @@ pub use error::{
 };
 pub use event::{CloseResult, Event, Events, ExitStatus, OutputChunk, TerminalMode};
 pub use options::{Size, SpawnOptions};
-pub use runtime::{Close, Runtime, RuntimeBuilder, Session, SessionSnapshot, Spawn, Spawned};
+pub use runtime::{Close, Runtime, RuntimeBuilder, Session, Spawn, Spawned};

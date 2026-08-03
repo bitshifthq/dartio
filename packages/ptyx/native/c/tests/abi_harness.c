@@ -16,7 +16,7 @@
 #include <time.h>
 #endif
 
-_Static_assert(PTYX_ABI_VERSION == UINT32_C(3), "unexpected ABI version");
+_Static_assert(PTYX_ABI_VERSION == UINT32_C(4), "unexpected ABI version");
 _Static_assert(sizeof(ptyx_runtime_t) == 8, "runtime handle width changed");
 _Static_assert(sizeof(ptyx_session_t) == 8, "session handle width changed");
 _Static_assert(sizeof(ptyx_status_t) == sizeof(int32_t),
@@ -53,8 +53,6 @@ _Static_assert(sizeof(ptyx_runtime_options_t) == 56,
                "runtime options layout changed");
 _Static_assert(sizeof(ptyx_spawn_options_t) == 144,
                "spawn options layout changed");
-_Static_assert(sizeof(ptyx_session_snapshot_t) == 96,
-               "session snapshot layout changed");
 _Static_assert(sizeof(ptyx_event_t) == 136, "event layout changed");
 
 static void require(int condition, const char *message) {
@@ -136,7 +134,9 @@ static void exercise_session_lifecycle(void) {
   ptyx_event_t event;
   ptyx_runtime_t runtime = PTYX_INVALID_RUNTIME;
   ptyx_session_t session = PTYX_INVALID_SESSION;
-  ptyx_session_snapshot_t snapshot;
+  ptyx_size_t size;
+  int64_t pid = 0;
+  uint64_t tty_required = 0;
   ptyx_spawn_options_t options;
   uint8_t tty_name[1024];
   size_t index;
@@ -160,10 +160,7 @@ static void exercise_session_lifecycle(void) {
   options.input_capacity = UINT64_C(65536);
   options.output_capacity = UINT64_C(65536);
   options.graceful_close_timeout_us = UINT64_C(250000);
-  memset(&snapshot, 0, sizeof(snapshot));
-  snapshot.struct_size = sizeof(snapshot);
-  snapshot.tty_name = tty_name;
-  snapshot.tty_name_capacity = sizeof(tty_name);
+  memset(&size, 0, sizeof(size));
 
   require(ptyx_runtime_create(NULL, &runtime, &error) == PTYX_STATUS_OK,
           "session runtime was not created");
@@ -184,12 +181,21 @@ static void exercise_session_lifecycle(void) {
     require(event.kind != PTYX_EVENT_SPAWN_FAILED, "session spawn failed");
     if (event.kind == PTYX_EVENT_SPAWN_READY) {
       require(!close_started, "spawn readiness was delivered twice");
-      require(ptyx_session_snapshot(session, &snapshot, &error) ==
+      require(ptyx_session_get_child_pid(session, &pid, &error) ==
                   PTYX_STATUS_OK,
-              "session metadata snapshot failed");
-      require(snapshot.pid > 0, "session snapshot returned an invalid pid");
-      require(snapshot.size.rows == 24 && snapshot.size.columns == 80,
-              "session snapshot returned the wrong size");
+              "session pid query failed");
+      require(pid > 0, "session pid query returned an invalid pid");
+      require(ptyx_session_get_size(session, &size, &error) == PTYX_STATUS_OK,
+              "session size query failed");
+      require(size.rows == 24 && size.columns == 80,
+              "session size query returned the wrong size");
+      require(ptyx_session_get_tty_name(session, NULL, 0, &tty_required,
+                                        &error) == PTYX_STATUS_BUFFER_TOO_SMALL,
+              "session terminal-name size query failed");
+      require(tty_required > 0, "session terminal-name size was empty");
+      require(ptyx_session_get_tty_name(session, tty_name, sizeof(tty_name),
+                                        &tty_required, &error) == PTYX_STATUS_OK,
+              "session terminal-name query failed");
       write_when_admitted(session, input, &error);
     }
     if (event.kind == PTYX_EVENT_CLOSE_COMPLETE) {
@@ -241,8 +247,10 @@ int main(void) {
   const ptyx_session_t stale_session = UINT64_C(0xffffffffffffffff);
   ptyx_error_t error = error_value();
   ptyx_event_t event;
-  ptyx_session_snapshot_t snapshot;
   ptyx_size_t size;
+  int64_t pid = 0;
+  uint32_t mode = 0;
+  uint64_t tty_required = 0;
   ptyx_runtime_t runtime = PTYX_INVALID_RUNTIME;
   ptyx_session_t session = PTYX_INVALID_SESSION;
   uint64_t value = 0;
@@ -250,8 +258,6 @@ int main(void) {
 
   memset(&event, 0, sizeof(event));
   event.struct_size = sizeof(event);
-  memset(&snapshot, 0, sizeof(snapshot));
-  snapshot.struct_size = sizeof(snapshot);
   memset(&size, 0, sizeof(size));
 
   require(ptyx_abi_version() == PTYX_ABI_VERSION, "ABI version mismatch");
@@ -306,9 +312,18 @@ int main(void) {
   require(ptyx_session_terminate(stale_session, 15, &word, &error) ==
               PTYX_STATUS_STALE_HANDLE,
           "stale session was terminated");
-  require(ptyx_session_snapshot(stale_session, &snapshot, &error) ==
+  require(ptyx_session_get_size(stale_session, &size, &error) ==
               PTYX_STATUS_STALE_HANDLE,
-          "stale session returned a snapshot");
+          "stale session returned a size");
+  require(ptyx_session_get_child_pid(stale_session, &pid, &error) ==
+              PTYX_STATUS_STALE_HANDLE,
+          "stale session returned a pid");
+  require(ptyx_session_get_term_mode(stale_session, &mode, &error) ==
+              PTYX_STATUS_STALE_HANDLE,
+          "stale session returned a terminal mode");
+  require(ptyx_session_get_tty_name(stale_session, NULL, 0, &tty_required,
+                                    &error) == PTYX_STATUS_STALE_HANDLE,
+          "stale session returned a terminal name");
   require(ptyx_session_observe_mode(stale_session, 1, &error) ==
               PTYX_STATUS_STALE_HANDLE,
           "stale session observed modes");

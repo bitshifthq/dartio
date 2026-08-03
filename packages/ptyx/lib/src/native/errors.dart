@@ -7,16 +7,6 @@ import '../api/api.dart';
 import '../ffi/ptyx.g.dart';
 import 'types.dart';
 
-NativeFailure acknowledgementFailure(int status) => NativeFailure(
-  status: status,
-  domain: ptyx_error_domain.PTYX_ERROR_DOMAIN_RUNTIME,
-  kind: ptyx_error_kind.PTYX_ERROR_INFRASTRUCTURE_LOST,
-  operation: ptyx_operation.PTYX_OPERATION_OUTPUT,
-  nativeCode: 0,
-  flags: 0,
-  message: 'native output acknowledgement failed',
-);
-
 PtyCapabilities capabilitiesFromBits(int bits) => PtyCapabilities(
   signals: bits & PTYX_CAPABILITY_SIGNALS != 0,
   processGroups: bits & PTYX_CAPABILITY_PROCESS_GROUPS != 0,
@@ -117,7 +107,10 @@ PtyException exceptionFromFailure(NativeFailure failure, {String? operation}) {
       operation: publicOperation,
       nativeCode: nativeCode,
     ),
-    ptyx_operation.PTYX_OPERATION_METADATA => PtyMetadataException(
+    ptyx_operation.PTYX_OPERATION_SIZE ||
+    ptyx_operation.PTYX_OPERATION_PROCESS_ID ||
+    ptyx_operation.PTYX_OPERATION_TERMINAL_MODE ||
+    ptyx_operation.PTYX_OPERATION_TERMINAL_NAME => PtyMetadataException(
       failure.message,
       operation: publicOperation,
       nativeCode: nativeCode,
@@ -235,7 +228,10 @@ String _operationName(int operation) => switch (operation) {
   ptyx_operation.PTYX_OPERATION_RESIZE => 'resize',
   ptyx_operation.PTYX_OPERATION_TERMINATE => 'kill',
   ptyx_operation.PTYX_OPERATION_EXIT => 'exit',
-  ptyx_operation.PTYX_OPERATION_METADATA => 'metadata',
+  ptyx_operation.PTYX_OPERATION_SIZE => 'size',
+  ptyx_operation.PTYX_OPERATION_PROCESS_ID => 'pid',
+  ptyx_operation.PTYX_OPERATION_TERMINAL_MODE => 'mode',
+  ptyx_operation.PTYX_OPERATION_TERMINAL_NAME => 'ttyName',
   ptyx_operation.PTYX_OPERATION_CLOSE => 'close',
   _ => 'controller',
 };

@@ -23,8 +23,14 @@ pub enum Operation {
     Terminate,
     /// Direct-child exit-status observation.
     Exit,
-    /// Atomic metadata snapshot or terminal-mode observation.
-    Metadata,
+    /// Terminal size query.
+    Size,
+    /// Direct-child process identifier query.
+    ProcessId,
+    /// Terminal mode query or observation.
+    TerminalMode,
+    /// Controller terminal-name query.
+    TerminalName,
     /// Session cleanup.
     Close,
 }
@@ -39,7 +45,10 @@ impl fmt::Display for Operation {
             Self::Resize => "resize",
             Self::Terminate => "termination",
             Self::Exit => "exit observation",
-            Self::Metadata => "metadata",
+            Self::Size => "size",
+            Self::ProcessId => "process identifier",
+            Self::TerminalMode => "terminal mode",
+            Self::TerminalName => "terminal name",
             Self::Close => "close",
         })
     }
@@ -403,7 +412,7 @@ impl fmt::Display for RecvError {
 
 impl Error for RecvError {}
 
-/// Session metadata could not be captured atomically.
+/// A session query could not be completed.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct MetadataError {
     failure: OperationError,

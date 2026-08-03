@@ -46,18 +46,6 @@ mod spawn;
 ))]
 pub const WRITE_INFRASTRUCTURE_FAILURE: i64 = -2;
 
-/// Reactor-atomic session metadata shared by native adapters.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SessionSnapshot {
-    /// Native direct-child process identifier.
-    pub pid: i64,
-    /// Rows, columns, pixel width, and pixel height.
-    pub size: [u32; 4],
-    /// Canonical, echo, and signal modes when supported.
-    pub mode: Option<[bool; 3]>,
-    /// Platform-native controller terminal name bytes when supported.
-    pub tty_name: Option<Vec<u8>>,
-}
 #[cfg(windows)]
 mod windows;
 

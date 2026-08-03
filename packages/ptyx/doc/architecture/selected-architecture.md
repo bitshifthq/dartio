@@ -82,7 +82,10 @@ impl Session {
     pub fn write(&self, data: bytes::Bytes) -> Result<(), WriteError>;
     pub fn resize(&self, size: Size) -> Result<(), ControlError>;
     pub fn terminate(&self) -> Result<bool, ControlError>;
-    pub fn snapshot(&self) -> Result<SessionSnapshot, MetadataError>;
+    pub fn size(&self) -> Result<Size, MetadataError>;
+    pub fn process_id(&self) -> Result<u64, MetadataError>;
+    pub fn terminal_mode(&self) -> Result<Option<TerminalMode>, MetadataError>;
+    pub fn terminal_name(&self) -> Result<Option<std::ffi::OsString>, MetadataError>;
     pub fn close(&self) -> Result<Close, CloseError>;
 }
 
@@ -178,7 +181,7 @@ The C ABI exposes only:
 - asynchronous session spawn;
 - synchronous bounded write admission;
 - resize and termination;
-- a typed metadata snapshot;
+- independent size, process-id, terminal-mode, and terminal-name queries;
 - mode-observation subscription state;
 - asynchronous close and nonblocking release;
 - event release and error formatting.

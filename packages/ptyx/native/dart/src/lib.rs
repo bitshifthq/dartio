@@ -19,30 +19,12 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-const EVENT_SPAWN_READY: u32 = 1;
 const EVENT_SPAWN_FAILED: u32 = 2;
 const EVENT_OUTPUT: u32 = 3;
-const EVENT_INPUT_FAILED: u32 = 4;
-const EVENT_OUTPUT_FAILED: u32 = 5;
 const EVENT_INFRASTRUCTURE_FAILED: u32 = 6;
-const EVENT_OUTPUT_DONE: u32 = 7;
-const EVENT_EXIT: u32 = 8;
 const EVENT_CLOSE_COMPLETE: u32 = 9;
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-const EVENT_MODE_CHANGED: u32 = 10;
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-const EVENT_MODE_FAILED: u32 = 11;
+#[cfg(feature = "test-controls")]
 const EVENT_EXIT_FAILED: u32 = 12;
-const EVENT_CLOSE_INPUT_FAILED: u32 = 1;
-const EVENT_CLOSE_OUTPUT_FAILED: u32 = 2;
-const EVENT_CLOSE_CLEANUP_FAILED: u32 = 4;
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-const MODE_CANONICAL: u32 = 1;
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-const MODE_ECHO: u32 = 2;
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-const MODE_SIGNALS: u32 = 4;
-const ERROR_NONE: u32 = 0;
 const CLEANUP_RETRIES: usize = 8;
 const CLEANUP_RETRY_DELAY: Duration = Duration::from_millis(10);
 const CLEANUP_RETRY_MAX_DELAY: Duration = Duration::from_secs(1);
@@ -636,7 +618,11 @@ fn pump_events(pump: &Arc<Pump>) {
                 .state
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            if !event_is_valid_for_session(&event, state.sessions.contains(&event.session)) {
+            if event.token == 0
+                || event.data.is_null()
+                || event.data_length == 0
+                || event.data_length > isize::MAX as u64
+            {
                 drop(state);
                 handle_invalid_event(pump, &event);
                 break;
@@ -665,11 +651,6 @@ fn pump_events(pump: &Arc<Pump>) {
                 }
             }
             unsafe { post_terminal_failure(pump.port) };
-            break;
-        }
-
-        if !event_is_valid(pump, &event) {
-            handle_invalid_event(pump, &event);
             break;
         }
 
@@ -734,108 +715,6 @@ unsafe fn post_event(port: i64, event: &Event) -> bool {
         event.data,
         event.data_length as isize,
     )
-}
-
-fn event_is_valid(pump: &Pump, event: &Event) -> bool {
-    let session_tracked = event.session != 0
-        && pump
-            .state
-            .lock()
-            .map(|state| state.sessions.contains(&event.session))
-            .unwrap_or(false);
-    event_is_valid_for_session(event, session_tracked)
-}
-
-fn event_is_valid_for_session(event: &Event, session_tracked: bool) -> bool {
-    if (event.struct_size as usize) < size_of::<Event>()
-        || event.reserved0 != 0
-        || event.reserved != [0; 2]
-        || event.data_length > isize::MAX as u64
-    {
-        return false;
-    }
-    let has_error = event.error.kind != ERROR_NONE;
-    let no_payload = event.data.is_null() && event.data_length == 0;
-    let output_payload = !event.data.is_null() && event.data_length != 0;
-    let failure = has_error && event.error.domain != 0 && event.error.operation != 0;
-    let zero_value = event.value == 0;
-    match event.kind {
-        EVENT_SPAWN_READY => {
-            session_tracked
-                && event.token == 0
-                && event.flags == 0
-                && no_payload
-                && zero_value
-                && !has_error
-        }
-        EVENT_SPAWN_FAILED | EVENT_INPUT_FAILED | EVENT_OUTPUT_FAILED | EVENT_EXIT_FAILED => {
-            session_tracked
-                && event.token == 0
-                && event.flags == 0
-                && no_payload
-                && zero_value
-                && failure
-        }
-        EVENT_OUTPUT => {
-            session_tracked
-                && event.token != 0
-                && event.flags == 0
-                && output_payload
-                && zero_value
-                && !has_error
-        }
-        EVENT_INFRASTRUCTURE_FAILED => {
-            (event.session == 0 || session_tracked)
-                && event.token == 0
-                && event.flags == 0
-                && no_payload
-                && zero_value
-                && failure
-        }
-        EVENT_OUTPUT_DONE => {
-            session_tracked
-                && event.token == 0
-                && event.flags == 0
-                && no_payload
-                && zero_value
-                && !has_error
-        }
-        EVENT_EXIT => {
-            session_tracked && event.token == 0 && event.flags == 0 && no_payload && !has_error
-        }
-        EVENT_CLOSE_COMPLETE => {
-            session_tracked
-                && event.token == 0
-                && event.flags
-                    & !(EVENT_CLOSE_INPUT_FAILED
-                        | EVENT_CLOSE_OUTPUT_FAILED
-                        | EVENT_CLOSE_CLEANUP_FAILED)
-                    == 0
-                && no_payload
-                && (event.flags == 0) == !has_error
-                && zero_value
-        }
-        #[cfg(any(target_os = "linux", target_os = "macos"))]
-        EVENT_MODE_CHANGED => {
-            session_tracked
-                && event.token == 0
-                && event.flags == 0
-                && no_payload
-                && event.value >= 0
-                && event.value & !(i64::from(MODE_CANONICAL | MODE_ECHO | MODE_SIGNALS)) == 0
-                && !has_error
-        }
-        #[cfg(any(target_os = "linux", target_os = "macos"))]
-        EVENT_MODE_FAILED => {
-            session_tracked
-                && event.token == 0
-                && event.flags == 0
-                && no_payload
-                && zero_value
-                && failure
-        }
-        _ => false,
-    }
 }
 
 fn handle_invalid_event(pump: &Pump, event: &Event) {
@@ -1175,9 +1054,8 @@ unsafe extern "C" {
 #[cfg(test)]
 mod tests {
     use super::{
-        acknowledge_token, event_is_valid, ptyd_runtime_abort, ptyd_runtime_detach, pumps,
-        release_tracked_session, retry_adapter, Event, Pump, EVENT_CLOSE_COMPLETE,
-        EVENT_CLOSE_INPUT_FAILED, EVENT_INFRASTRUCTURE_FAILED, EVENT_OUTPUT,
+        acknowledge_token, ptyd_runtime_abort, ptyd_runtime_detach, pumps, release_tracked_session,
+        retry_adapter, Pump,
     };
     use ptyx_c::private::{self as c_api, Error, STATUS_INTERNAL, STATUS_OK};
     use std::sync::Arc;
@@ -1275,65 +1153,5 @@ mod tests {
             .expect("pump state")
             .outstanding
             .contains(&7));
-    }
-
-    #[test]
-    fn event_validation_rejects_untracked_or_malformed_output() {
-        let pump = Pump::new(0, 1);
-        pump.state.lock().expect("pump state").sessions.insert(7);
-        let bytes = [1_u8];
-        let mut event = Event::empty(std::mem::size_of::<Event>() as u32);
-        event.kind = EVENT_OUTPUT;
-        event.session = 7;
-        event.token = 9;
-        event.data = bytes.as_ptr();
-        event.data_length = bytes.len() as u64;
-
-        assert!(event_is_valid(&pump, &event));
-
-        event.value = 1;
-        assert!(!event_is_valid(&pump, &event));
-
-        event.value = 0;
-        event.reserved[0] = 1;
-        assert!(!event_is_valid(&pump, &event));
-    }
-
-    #[test]
-    fn event_validation_accepts_close_failure_flags() {
-        let pump = Pump::new(0, 1);
-        pump.state.lock().expect("pump state").sessions.insert(7);
-        let mut event = Event::empty(std::mem::size_of::<Event>() as u32);
-        event.kind = EVENT_CLOSE_COMPLETE;
-        event.session = 7;
-        event.flags = EVENT_CLOSE_INPUT_FAILED;
-        event.error = Error::value(
-            c_api::ERROR_DOMAIN_RUNTIME,
-            c_api::ERROR_NATIVE_FAILURE,
-            c_api::OPERATION_RUNTIME_SHUTDOWN,
-            1,
-        );
-
-        assert!(event_is_valid(&pump, &event));
-
-        event.flags = 8;
-        assert!(!event_is_valid(&pump, &event));
-    }
-
-    #[test]
-    fn event_validation_accepts_session_infrastructure_failure() {
-        let pump = Pump::new(0, 1);
-        pump.state.lock().expect("pump state").sessions.insert(7);
-        let mut event = Event::empty(std::mem::size_of::<Event>() as u32);
-        event.kind = EVENT_INFRASTRUCTURE_FAILED;
-        event.session = 7;
-        event.error = Error::value(
-            c_api::ERROR_DOMAIN_RUNTIME,
-            c_api::ERROR_INFRASTRUCTURE_LOST,
-            c_api::OPERATION_OUTPUT,
-            0,
-        );
-
-        assert!(event_is_valid(&pump, &event));
     }
 }

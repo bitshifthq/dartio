@@ -24,7 +24,6 @@ static_assert(PTYX_EVENT_EXIT_FAILED == 12);
 static_assert(PTYX_MODE_CANONICAL == UINT32_C(1));
 static_assert(PTYX_MODE_ECHO == UINT32_C(2));
 static_assert(PTYX_MODE_SIGNALS == UINT32_C(4));
-static_assert(sizeof(ptyx_session_snapshot_t) == 96);
 static_assert(sizeof(ptyx_event_t) == 136);
 int main() {
   ptyx_runtime_t runtime = PTYX_INVALID_RUNTIME;

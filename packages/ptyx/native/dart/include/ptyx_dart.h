@@ -41,10 +41,9 @@ PTYX_EXPORT ptyx_status_t PTYX_CALL ptyd_initialize(void *api_data);
  * Each message is an eleven-element Dart array containing kind, session,
  * token, flags, value, error domain, error kind, error operation, native error
  * code, error flags, and nullable Uint8List data, in that order.
- * The adapter validates event-kind, session, token, payload, error, and close
- * invariants before posting. A malformed native event is converted to one
- * infrastructure-failure event and native cleanup. The Dart router retains
- * only a fixed message-shape guard for ABI safety.
+ * The adapter owns output-token registration and release. The Dart side keeps
+ * only a fixed message-shape guard for ABI safety; unknown or malformed port
+ * messages converge through the adapter abort operation.
  * Output remains bounded by each session's configured native output capacity.
  * Withholding an acknowledgement applies backpressure only to that session;
  * the shared runtime continues fairly delivering other sessions' events.

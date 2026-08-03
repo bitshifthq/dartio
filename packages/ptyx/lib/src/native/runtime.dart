@@ -8,22 +8,19 @@ const _guardianStartupTimeout = Duration(seconds: 30);
 const _guardianUnarmedLease = Duration(seconds: 5);
 
 int _createRuntime(int port) {
-  return using((arena) {
-    final runtime = arena<ptyx_runtime_t>();
-    final error = newError(arena);
-    final status = runtimeCreate(nullptr, runtime, error);
-    if (status != ptyx_status.PTYX_STATUS_OK) {
-      throw failureFromNative(status, error);
+  final runtime = runtimeCreate();
+  try {
+    return runtimeAttach(runtime, port);
+  } on NativeFailure {
+    try {
+      runtimeShutdown(runtime);
+      runtimeRelease(runtime);
+    } on NativeFailure {
+      // The original attach failure is the actionable result. Native cleanup
+      // is retried by the adapter when shutdown or release cannot converge.
     }
-    final adapter = arena<ptyd_adapter_t>();
-    final attachStatus = runtimeAttach(runtime.value, port, adapter, error);
-    if (attachStatus != ptyx_status.PTYX_STATUS_OK) {
-      runtimeShutdown(runtime.value, error);
-      runtimeRelease(runtime, error);
-      throw failureFromNative(attachStatus, error);
-    }
-    return adapter.value;
-  });
+    rethrow;
+  }
 }
 
 Future<void> _guardNativeOwner(SendPort ready) async {
@@ -60,19 +57,15 @@ Future<void> _guardNativeOwner(SendPort ready) async {
   } finally {
     unarmedLease.cancel();
     if (!isInvalidAdapter(adapter)) {
-      final remaining = using((arena) {
-        final handle = arena<ptyd_adapter_t>()..value = adapter;
-        runtimeDetach(handle, nullptr);
-        return handle.value;
-      });
-      if (!isInvalidAdapter(remaining)) {
-        runtimeFinalize(Pointer<Void>.fromAddress(remaining));
+      try {
+        runtimeDetach(adapter);
+      } on NativeFailure {
+        // The native cleanup worker retains failed ownership for retry.
       }
     }
   }
 }
 
-typedef _NativeSnapshot = PtyxSnapshot;
 typedef _NativeSpawnRequest = PtyxSpawnRequest;
 typedef _PendingSpawn = ({
   _NativeSession Function(int handle) onReady,
@@ -88,41 +81,39 @@ final class _NativeRuntime implements PtyxFinalizable {
   final RawReceivePort _port;
   final int _adapter;
   PtyCapabilities? _capabilities;
-  late final _NativeEventRouter _router;
+  final Map<int, _PendingSpawn> _pendingSpawns = {};
+  final Map<int, WeakReference<_NativeSession>> _sessions = {};
+  final List<Object> _terminalDeliveryTargets = [];
 
   _NativeRuntime._(this._port, int adapter) : _adapter = adapter {
-    _router = _NativeEventRouter(this);
     _finalizer.attach(this, Pointer<Void>.fromAddress(adapter), detach: this);
   }
 
   NativeFailure? abort() {
-    final status = runtimeAbort(_adapter, nativeError());
-    final failure = status == ptyx_status.PTYX_STATUS_OK
-        ? null
-        : failureFromNative(status, nativeError());
+    NativeFailure? failure;
+    try {
+      runtimeAbort(_adapter);
+    } on NativeFailure catch (error) {
+      failure = error;
+    }
     _updateLiveness();
     return failure;
   }
 
   void acknowledge(int token) {
-    final status = eventAcknowledge(_adapter, token, nativeError());
-    if (status != ptyx_status.PTYX_STATUS_OK) {
-      throw acknowledgementFailure(status);
-    }
+    eventAcknowledge(_adapter, token);
   }
 
   NativeFailure? releaseSession(int handle) {
-    final failure = using((arena) {
-      final session = arena<ptyx_session_t>()..value = handle;
-      final status = sessionRelease(_adapter, session, nativeError());
-      if (status == ptyx_status.PTYX_STATUS_OK ||
-          status == ptyx_status.PTYX_STATUS_STALE_HANDLE) {
-        return null;
-      }
-      return failureFromNative(status, nativeError());
-    });
+    NativeFailure? failure;
+    try {
+      sessionRelease(_adapter, handle);
+    } on NativeFailure catch (error) {
+      failure = error;
+    }
     if (failure == null) {
-      _router.remove(handle);
+      _pendingSpawns.remove(handle);
+      _sessions.remove(handle);
     }
     _updateLiveness();
     return failure;
@@ -135,31 +126,156 @@ final class _NativeRuntime implements PtyxFinalizable {
   }) {
     try {
       final handle = spawnStart(_adapter, request);
-      _router.addPendingSpawn(handle, onReady: onReady, onFailure: onFailure);
+      _pendingSpawns[handle] = (onReady: onReady, onFailure: onFailure);
     } finally {
       _updateLiveness();
     }
   }
 
-  void _onMessage(Object? message) => _router.onMessage(message);
+  void _onMessage(Object? message) {
+    final event = decodeEvent(message);
+    if (event == null) {
+      _abortProtocol();
+      return;
+    }
+    _dispatch(event);
+  }
 
-  void _updateLiveness() => _router.updateLiveness();
+  void _updateLiveness() {
+    _port.keepIsolateAlive =
+        _pendingSpawns.isNotEmpty ||
+        _sessions.isNotEmpty ||
+        _terminalDeliveryTargets.isNotEmpty;
+  }
 
   PtyCapabilities get capabilities {
     final cached = _capabilities;
     if (cached != null) return cached;
-    final bits = using((arena) {
-      final value = arena<Uint32>();
-      final status = adapterCapabilities(_adapter, value, nativeError());
-      if (status != ptyx_status.PTYX_STATUS_OK) {
-        throw exceptionFromFailure(
-          failureFromNative(status, nativeError()),
-          operation: 'capabilities',
+    return _capabilities = runtimeCapabilities(_adapter);
+  }
+
+  void _abortProtocol() {
+    final failure =
+        abort() ??
+        syntheticFailure(
+          operation: ptyx_operation.PTYX_OPERATION_OUTPUT,
+          kind: ptyx_error_kind.PTYX_ERROR_INFRASTRUCTURE_LOST,
         );
+    _handleInfrastructureFailure(failure);
+  }
+
+  void _dispatch(NativeEvent event) {
+    if (event.isGlobalInfrastructureFailure) {
+      _handleInfrastructureFailure(
+        event.failure ??
+            syntheticFailure(
+              operation: ptyx_operation.PTYX_OPERATION_RUNTIME_SHUTDOWN,
+              kind: ptyx_error_kind.PTYX_ERROR_INFRASTRUCTURE_LOST,
+            ),
+      );
+      return;
+    }
+    if (event.kind == .spawnReady) {
+      _handleSpawnReady(event.session);
+      return;
+    }
+    if (event.kind == .spawnFailed) {
+      _handleSpawnFailure(event.session, event.failure);
+      return;
+    }
+    final target = _sessions[event.session]?.target;
+    if (target == null) {
+      if (!isInvalidToken(event.token)) {
+        _ackOrRelease(event.session, event.token);
       }
-      return value.value;
+      final failure = releaseSession(event.session);
+      if (failure != null) _handleInfrastructureFailure(failure);
+      return;
+    }
+    if (event.kind == .output && event.data == null) {
+      _ackOrRelease(event.session, event.token);
+      return;
+    }
+    if (event.kind
+        case .outputFailed ||
+            .infrastructureFailed ||
+            .outputDone ||
+            .exit ||
+            .exitFailed ||
+            .closeComplete) {
+      _retainTerminalDeliveryTurn(target);
+    }
+    target._onNativeEvent(event);
+    if (event.kind == .closeComplete) {
+      _sessions.remove(event.session);
+      _updateLiveness();
+    }
+  }
+
+  void _handleInfrastructureFailure(NativeFailure failure) {
+    final pending = _pendingSpawns.values.toList(growable: false);
+    final sessions = [
+      for (final reference in _sessions.values)
+        if (reference.target case final _NativeSession target) target,
+    ];
+    if (pending.isNotEmpty || sessions.isNotEmpty) {
+      _retainTerminalDeliveryTurn((pending, sessions));
+    }
+    _pendingSpawns.clear();
+    _sessions.clear();
+    for (final spawn in pending) {
+      spawn.onFailure(failure);
+    }
+    for (final session in sessions) {
+      session._nativeInfrastructureFailed(failure);
+    }
+    _updateLiveness();
+  }
+
+  void _handleSpawnReady(int handle) {
+    final pending = _pendingSpawns.remove(handle);
+    if (pending == null) {
+      final failure = releaseSession(handle);
+      if (failure != null) _handleInfrastructureFailure(failure);
+      return;
+    }
+    final session = pending.onReady(handle);
+    _sessions[handle] = WeakReference(session);
+    _updateLiveness();
+  }
+
+  void _handleSpawnFailure(int handle, NativeFailure? failure) {
+    final pending = _pendingSpawns.remove(handle);
+    if (pending == null) {
+      _updateLiveness();
+      return;
+    }
+    _retainTerminalDeliveryTurn(pending);
+    pending.onFailure(
+      failure ??
+          syntheticFailure(
+            operation: ptyx_operation.PTYX_OPERATION_SPAWN,
+            kind: ptyx_error_kind.PTYX_ERROR_NATIVE_FAILURE,
+          ),
+    );
+    _updateLiveness();
+  }
+
+  void _ackOrRelease(int session, int token) {
+    try {
+      acknowledge(token);
+    } on NativeFailure {
+      final failure = releaseSession(session);
+      if (failure != null) _handleInfrastructureFailure(failure);
+    }
+  }
+
+  void _retainTerminalDeliveryTurn(Object target) {
+    _terminalDeliveryTargets.add(target);
+    Timer.run(() {
+      _terminalDeliveryTargets.remove(target);
+      _updateLiveness();
     });
-    return _capabilities = capabilitiesFromBits(bits);
   }
 
   static Future<_NativeRuntime> _create() async {
@@ -169,10 +285,7 @@ final class _NativeRuntime implements PtyxFinalizable {
         'ptyx C ABI mismatch: expected $PTYX_ABI_VERSION, found $version',
       );
     }
-    if (initializeApi(NativeApi.initializeApiDLData) !=
-        ptyx_status.PTYX_STATUS_OK) {
-      throw StateError('ptyx Dart adapter initialization failed');
-    }
+    initializeApi(NativeApi.initializeApiDLData.address);
 
     late final _NativeRuntime controller;
     final port = RawReceivePort();

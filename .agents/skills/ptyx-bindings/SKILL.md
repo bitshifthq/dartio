@@ -42,9 +42,11 @@ public Dart API -> Dart value/marshaling -> generated FFI -> C adapter -> Rust c
 - Native code owns OS handles, threads, queues, buffers, event tokens, and
   cleanup/retry policy. Dart owns public values, stream/future projection,
   argument validation, and exception conversion.
-- Decode native event messages once in the private router/decoder. Validate
-  shape, kind, session identity, flags, and payload lengths. Unknown numeric
-  kinds are infrastructure failures, not guessed events.
+- Decode native event messages once in the runtime-owned decoder. Validate only
+  the fixed message shape, byte payload representation, and known event kind;
+  native code owns output bounds and token ownership, while session routing
+  owns lifecycle-specific interpretation. Unknown numeric kinds are
+  infrastructure failures, not guessed events.
 - An owning output token is acknowledged or released exactly once. Duplicate,
   stale, or malformed messages converge through the native abort path; Dart
   must not clear maps and hope that a later event cleans up.

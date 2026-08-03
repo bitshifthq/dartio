@@ -1,5 +1,4 @@
 import 'dart:ffi';
-import 'dart:typed_data';
 
 typedef PtyxFinalizable = Finalizable;
 
@@ -36,14 +35,4 @@ typedef PtyxSpawnRequest = ({
   int inputCapacity,
   int outputCapacity,
   Duration gracefulCloseTimeout,
-});
-
-typedef PtyxSnapshot = ({
-  int? pid,
-  int rows,
-  int columns,
-  int pixelWidth,
-  int pixelHeight,
-  int? modes,
-  Uint8List? terminalName,
 });

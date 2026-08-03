@@ -72,7 +72,7 @@ abstract interface class PtySession {
   ///
   /// Returns `null` when terminal modes are not available on the current
   /// platform. Check [capabilities] to distinguish that case. Throws
-  /// [PtyModeException] when the native snapshot fails and
+  /// [PtyModeException] when the native query fails and
   /// [PtyClosedException] after [close].
   PtyTermMode? get mode;
 

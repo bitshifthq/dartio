@@ -146,8 +146,9 @@ part of the public capability object. `pid` is a direct-child identifier when
 the platform returns one. A missing terminal name or mode is interpreted with
 its corresponding capability, so it is not ambiguous.
 
-An on-demand mode query is a snapshot. Nullable fields mean that the platform
-did not report that field. Mode changes are a broadcast observation stream
+Each metadata getter is an independent native query; ptyx does not promise an
+atomic cross-field snapshot. Unsupported mode and terminal-name queries return
+`null` through the capability-aware Dart projection. Mode changes are a broadcast observation stream
 that starts native observation with the first listener and stops it with the
 last. It reports only distinct states observed by ptyx and does not promise
 lossless detection of arbitrarily short transitions.

@@ -42,9 +42,7 @@ use crate::engine::CopyWriteResult;
 use crate::engine::Failure;
 #[cfg(feature = "__private_adapter")]
 use crate::engine::WRITE_INFRASTRUCTURE_FAILURE;
-use crate::engine::{
-    CloseResult, Completion, GenerationRegistry, Notice, SessionSnapshot, WriteRejection,
-};
+use crate::engine::{CloseResult, Completion, GenerationRegistry, Notice, WriteRejection};
 use crate::error::{FailureKind, Operation, OperationError};
 
 const BYTE_QUANTUM: usize = 64 * 1024;
@@ -233,9 +231,21 @@ enum Command {
         handle: u64,
         reply: ReplySender<Result<(), OperationError>>,
     },
-    Snapshot {
+    Size {
         handle: u64,
-        reply: ReplySender<Result<SessionSnapshot, OperationError>>,
+        reply: ReplySender<Result<[u32; 4], OperationError>>,
+    },
+    ProcessId {
+        handle: u64,
+        reply: ReplySender<Result<i64, OperationError>>,
+    },
+    TerminalMode {
+        handle: u64,
+        reply: ReplySender<Result<[bool; 3], OperationError>>,
+    },
+    TerminalName {
+        handle: u64,
+        reply: ReplySender<Result<Vec<u8>, OperationError>>,
     },
     Resize {
         handle: u64,
@@ -1002,15 +1012,42 @@ impl IntegratedRuntime {
             })
     }
 
-    pub fn snapshot(&self, handle: u64) -> Result<SessionSnapshot, OperationError> {
-        self.request_result(|reply| Command::Snapshot { handle, reply })
+    pub fn size(&self, handle: u64) -> Result<[u32; 4], OperationError> {
+        self.request_result(|reply| Command::Size { handle, reply })
             .unwrap_or_else(|error| {
                 Err(OperationError::new(
-                    Operation::Metadata,
+                    Operation::Size,
                     FailureKind::InfrastructureLost,
                     error.raw_os_error(),
                 ))
             })
+    }
+
+    pub fn process_id(&self, handle: u64) -> Result<i64, OperationError> {
+        self.request_result(|reply| Command::ProcessId { handle, reply })
+            .unwrap_or_else(|error| {
+                Err(OperationError::new(
+                    Operation::ProcessId,
+                    FailureKind::InfrastructureLost,
+                    error.raw_os_error(),
+                ))
+            })
+    }
+
+    pub fn terminal_mode(&self, handle: u64) -> Result<[bool; 3], OperationError> {
+        Err(OperationError::new(
+            Operation::TerminalMode,
+            FailureKind::Unsupported,
+            None,
+        ))
+    }
+
+    pub fn terminal_name(&self, handle: u64) -> Result<Vec<u8>, OperationError> {
+        Err(OperationError::new(
+            Operation::TerminalName,
+            FailureKind::Unsupported,
+            None,
+        ))
     }
 
     pub fn resize(&self, handle: u64, size: [u32; 4]) -> Result<(), OperationError> {
@@ -1030,7 +1067,7 @@ impl IntegratedRuntime {
 
     pub fn observe_mode(&self, _handle: u64, _observe: bool) -> Result<(), OperationError> {
         Err(OperationError::new(
-            Operation::Metadata,
+            Operation::TerminalMode,
             FailureKind::Unsupported,
             None,
         ))
@@ -1604,19 +1641,37 @@ fn process_commands(
                 };
                 let _ = reply.send(found);
             }
-            Command::Snapshot { handle, reply } => {
-                let snapshot = sessions
+            Command::Size { handle, reply } => {
+                let result = sessions
                     .get(handle)
-                    .map(|session| SessionSnapshot {
-                        pid: i64::from(session.pid),
-                        size: session.size,
-                        mode: None,
-                        tty_name: None,
-                    })
+                    .map(|session| session.size)
                     .ok_or_else(|| {
-                        OperationError::new(Operation::Metadata, FailureKind::WrongState, None)
+                        OperationError::new(Operation::Size, FailureKind::WrongState, None)
                     });
-                let _ = reply.send(snapshot);
+                let _ = reply.send(result);
+            }
+            Command::ProcessId { handle, reply } => {
+                let result = sessions
+                    .get(handle)
+                    .map(|session| i64::from(session.pid))
+                    .ok_or_else(|| {
+                        OperationError::new(Operation::ProcessId, FailureKind::WrongState, None)
+                    });
+                let _ = reply.send(result);
+            }
+            Command::TerminalMode { handle: _, reply } => {
+                let _ = reply.send(Err(OperationError::new(
+                    Operation::TerminalMode,
+                    FailureKind::Unsupported,
+                    None,
+                )));
+            }
+            Command::TerminalName { handle: _, reply } => {
+                let _ = reply.send(Err(OperationError::new(
+                    Operation::TerminalName,
+                    FailureKind::Unsupported,
+                    None,
+                )));
             }
             Command::Resize {
                 handle,

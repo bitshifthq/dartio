@@ -11,7 +11,7 @@ use crate::engine::CopyWriteResult;
 use crate::engine::Failure;
 #[cfg(any(feature = "__private_adapter", test))]
 use crate::engine::WRITE_INFRASTRUCTURE_FAILURE;
-use crate::engine::{CloseResult, Completion, Notice, SessionSnapshot, WriteRejection};
+use crate::engine::{CloseResult, Completion, Notice, WriteRejection};
 use crate::error::{FailureKind, Operation, OperationError};
 use bytes::Bytes;
 use std::collections::{HashMap, VecDeque};
@@ -160,9 +160,21 @@ pub(crate) enum Command {
         handle: u64,
         reply: ReplySender<Result<(), OperationError>>,
     },
-    Snapshot {
+    Size {
         handle: u64,
-        reply: ReplySender<Result<SessionSnapshot, OperationError>>,
+        reply: ReplySender<Result<[u32; 4], OperationError>>,
+    },
+    ProcessId {
+        handle: u64,
+        reply: ReplySender<Result<i64, OperationError>>,
+    },
+    TerminalMode {
+        handle: u64,
+        reply: ReplySender<Result<[bool; 3], OperationError>>,
+    },
+    TerminalName {
+        handle: u64,
+        reply: ReplySender<Result<Vec<u8>, OperationError>>,
     },
     Resize {
         handle: u64,
@@ -538,8 +550,26 @@ impl IntegratedRuntime {
         })?
     }
 
-    pub fn snapshot(&self, handle: u64) -> Result<SessionSnapshot, OperationError> {
-        self.request_operation(Operation::Metadata, |reply| Command::Snapshot {
+    pub fn size(&self, handle: u64) -> Result<[u32; 4], OperationError> {
+        self.request_operation(Operation::Size, |reply| Command::Size { handle, reply })?
+    }
+
+    pub fn process_id(&self, handle: u64) -> Result<i64, OperationError> {
+        self.request_operation(Operation::ProcessId, |reply| Command::ProcessId {
+            handle,
+            reply,
+        })?
+    }
+
+    pub fn terminal_mode(&self, handle: u64) -> Result<[bool; 3], OperationError> {
+        self.request_operation(Operation::TerminalMode, |reply| Command::TerminalMode {
+            handle,
+            reply,
+        })?
+    }
+
+    pub fn terminal_name(&self, handle: u64) -> Result<Vec<u8>, OperationError> {
+        self.request_operation(Operation::TerminalName, |reply| Command::TerminalName {
             handle,
             reply,
         })?
@@ -554,7 +584,7 @@ impl IntegratedRuntime {
     }
 
     pub fn observe_mode(&self, handle: u64, observe: bool) -> Result<(), OperationError> {
-        self.request_operation(Operation::Metadata, |reply| Command::ObserveMode {
+        self.request_operation(Operation::TerminalMode, |reply| Command::ObserveMode {
             handle,
             observe,
             reply,
@@ -1083,21 +1113,41 @@ fn process_commands(
                 }
                 let _ = reply.send(found);
             }
-            Command::Snapshot { handle, reply } => {
-                let snapshot = sessions
+            Command::Size { handle, reply } => {
+                let result = sessions
                     .get(handle)
                     .ok_or_else(|| {
-                        OperationError::new(Operation::Metadata, FailureKind::WrongState, None)
+                        OperationError::new(Operation::Size, FailureKind::WrongState, None)
                     })
-                    .and_then(|session| {
-                        Ok(SessionSnapshot {
-                            pid: i64::from(session.pid),
-                            size: session_size(session)?,
-                            mode: Some(session_mode(session)?),
-                            tty_name: Some(session_tty_name(session)?),
-                        })
+                    .and_then(session_size);
+                let _ = reply.send(result);
+            }
+            Command::ProcessId { handle, reply } => {
+                let result = sessions
+                    .get(handle)
+                    .map(|session| i64::from(session.pid))
+                    .ok_or_else(|| {
+                        OperationError::new(Operation::ProcessId, FailureKind::WrongState, None)
                     });
-                let _ = reply.send(snapshot);
+                let _ = reply.send(result);
+            }
+            Command::TerminalMode { handle, reply } => {
+                let result = sessions
+                    .get(handle)
+                    .ok_or_else(|| {
+                        OperationError::new(Operation::TerminalMode, FailureKind::WrongState, None)
+                    })
+                    .and_then(session_mode);
+                let _ = reply.send(result);
+            }
+            Command::TerminalName { handle, reply } => {
+                let result = sessions
+                    .get(handle)
+                    .ok_or_else(|| {
+                        OperationError::new(Operation::TerminalName, FailureKind::WrongState, None)
+                    })
+                    .and_then(session_tty_name);
+                let _ = reply.send(result);
             }
             Command::Resize {
                 handle,
@@ -1151,7 +1201,7 @@ fn process_commands(
                     Ok(())
                 } else {
                     Err(OperationError::new(
-                        Operation::Metadata,
+                        Operation::TerminalMode,
                         FailureKind::WrongState,
                         None,
                     ))
@@ -2087,7 +2137,7 @@ fn session_size(session: &Session) -> Result<[u32; 4], OperationError> {
     } != 0
     {
         return Err(OperationError::from_io(
-            Operation::Metadata,
+            Operation::Size,
             &io::Error::last_os_error(),
         ));
     }
@@ -2101,9 +2151,12 @@ fn session_size(session: &Session) -> Result<[u32; 4], OperationError> {
 }
 
 fn session_mode(session: &Session) -> Result<[bool; 3], OperationError> {
-    let name = session_tty_name(session)?;
-    let name = CString::new(name)
-        .map_err(|_| OperationError::new(Operation::Metadata, FailureKind::NativeFailure, None))?;
+    let name = session_tty_name(session).map_err(|error| {
+        OperationError::new(Operation::TerminalMode, error.kind(), error.native_code())
+    })?;
+    let name = CString::new(name).map_err(|_| {
+        OperationError::new(Operation::TerminalMode, FailureKind::NativeFailure, None)
+    })?;
     let slave = unsafe {
         libc::open(
             name.as_ptr(),
@@ -2112,7 +2165,7 @@ fn session_mode(session: &Session) -> Result<[bool; 3], OperationError> {
     };
     if slave < 0 {
         return Err(OperationError::from_io(
-            Operation::Metadata,
+            Operation::TerminalMode,
             &io::Error::last_os_error(),
         ));
     }
@@ -2120,7 +2173,7 @@ fn session_mode(session: &Session) -> Result<[bool; 3], OperationError> {
     let mut mode = std::mem::MaybeUninit::<libc::termios>::uninit();
     if unsafe { libc::tcgetattr(slave.as_raw_fd(), mode.as_mut_ptr()) } != 0 {
         return Err(OperationError::from_io(
-            Operation::Metadata,
+            Operation::TerminalMode,
             &io::Error::last_os_error(),
         ));
     }
@@ -2137,13 +2190,13 @@ fn session_tty_name(session: &Session) -> Result<Vec<u8>, OperationError> {
     let status = unsafe { ptsname_r(session.master.as_raw_fd(), name.as_mut_ptr(), name.len()) };
     if status != 0 {
         return Err(OperationError::new(
-            Operation::Metadata,
+            Operation::TerminalName,
             FailureKind::NativeFailure,
             Some(status),
         ));
     }
     let length = name.iter().position(|byte| *byte == 0).ok_or_else(|| {
-        OperationError::new(Operation::Metadata, FailureKind::NativeFailure, None)
+        OperationError::new(Operation::TerminalName, FailureKind::NativeFailure, None)
     })?;
     Ok(name[..length]
         .iter()
@@ -2797,7 +2850,7 @@ mod tests {
         else {
             panic!("invalid controller must report mode failure");
         };
-        assert_eq!(failure.operation(), Operation::Metadata);
+        assert_eq!(failure.operation(), Operation::TerminalMode);
         assert_eq!(failure.kind(), FailureKind::NativeFailure);
         assert!(failure.native_code().is_some());
         assert!(sessions

@@ -104,7 +104,7 @@ fn rejected_write_accepts_no_partial_prefix() {
 }
 
 #[test]
-fn snapshot_captures_session_metadata_atomically() {
+fn independent_queries_return_session_metadata() {
     let runtime = Runtime::builder()
         .broker_path(broker_path())
         .build()
@@ -118,11 +118,12 @@ fn snapshot_captures_session_metadata_atomically() {
         .expect("spawn PTY child");
     let (session, _events) = spawned.into_parts();
 
-    let snapshot = session.snapshot().expect("capture session metadata");
-
-    assert_ne!(snapshot.process_id(), 0);
-    assert_eq!(snapshot.size(), Size::new(31, 97));
-    assert!(snapshot.terminal_name().is_some());
+    assert_ne!(session.process_id().expect("read process id"), 0);
+    assert_eq!(session.size().expect("read size"), Size::new(31, 97));
+    assert!(session
+        .terminal_name()
+        .expect("read terminal name")
+        .is_some());
 }
 
 #[test]

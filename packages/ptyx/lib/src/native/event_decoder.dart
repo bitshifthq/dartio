@@ -99,7 +99,7 @@ NativeEvent? decodeEvent(Object? message) {
       data: data as Uint8List?,
       failure: failure,
     );
-    return _isValid(event) ? event : null;
+    return event;
   }
   return null;
 }
@@ -110,30 +110,4 @@ NativeEventKind? _tryDecodeKind(int value) {
   } on FormatException {
     return null;
   }
-}
-
-bool _isValid(NativeEvent event) {
-  final sessionValid = !isInvalidSession(event.session);
-  final tokenValid = isInvalidToken(event.token);
-  return switch (event.kind) {
-    .spawnReady => sessionValid && tokenValid && event.data == null,
-    .spawnFailed =>
-      sessionValid && tokenValid && event.data == null && event.failure != null,
-    .output =>
-      sessionValid &&
-          !tokenValid &&
-          event.data != null &&
-          event.failure == null,
-    .inputFailed =>
-      sessionValid && tokenValid && event.data == null && event.failure != null,
-    .outputFailed || .exitFailed || .modeFailed =>
-      sessionValid && tokenValid && event.data == null && event.failure != null,
-    .infrastructureFailed =>
-      tokenValid &&
-          event.data == null &&
-          (event.isGlobalInfrastructureFailure || event.failure != null),
-    .outputDone || .exit || .modeChanged =>
-      sessionValid && tokenValid && event.data == null && event.failure == null,
-    .closeComplete => sessionValid && tokenValid && event.data == null,
-  };
 }

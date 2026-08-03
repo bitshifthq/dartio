@@ -1,6 +1,6 @@
 use crate::error::{
-    CloseError, ControlError, MetadataError, OperationError, RuntimeError, SpawnError, WriteError,
-    WriteErrorKind,
+    CloseError, ControlError, FailureKind, MetadataError, OperationError, RuntimeError, SpawnError,
+    WriteError, WriteErrorKind,
 };
 use crate::event::{CloseResult, Events, TerminalMode};
 use crate::options::{SpawnOptions, SpawnParts};
@@ -237,41 +237,6 @@ pub struct Session {
     control: Arc<SessionControl>,
 }
 
-/// One reactor-atomic view of stable session metadata.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SessionSnapshot {
-    process_id: u64,
-    size: Size,
-    terminal_mode: Option<TerminalMode>,
-    terminal_name: Option<OsString>,
-}
-
-impl SessionSnapshot {
-    /// Native identifier of the direct child process.
-    #[must_use]
-    pub const fn process_id(&self) -> u64 {
-        self.process_id
-    }
-
-    /// Terminal dimensions captured with the remaining metadata.
-    #[must_use]
-    pub const fn size(&self) -> Size {
-        self.size
-    }
-
-    /// Controller terminal mode when supported by the platform.
-    #[must_use]
-    pub const fn terminal_mode(&self) -> Option<TerminalMode> {
-        self.terminal_mode
-    }
-
-    /// Controller terminal name when supported by the platform.
-    #[must_use]
-    pub fn terminal_name(&self) -> Option<&OsStr> {
-        self.terminal_name.as_deref()
-    }
-}
-
 impl Session {
     /// Synchronously admits the complete buffer for ordered native delivery.
     ///
@@ -303,32 +268,68 @@ impl Session {
         }
     }
 
-    /// Captures session metadata in one native reactor operation.
-    pub fn snapshot(&self) -> Result<SessionSnapshot, MetadataError> {
-        let snapshot = self
+    /// Returns the current terminal dimensions.
+    pub fn size(&self) -> Result<Size, MetadataError> {
+        self.control
+            .runtime
+            .native
+            .size(self.control.handle)
+            .and_then(|size| {
+                Size::from_native(size).ok_or_else(|| {
+                    OperationError::new(
+                        crate::error::Operation::Size,
+                        FailureKind::NativeFailure,
+                        None,
+                    )
+                })
+            })
+            .map_err(MetadataError::new)
+    }
+
+    /// Returns the direct-child process identifier.
+    pub fn process_id(&self) -> Result<u64, MetadataError> {
+        self.control
+            .runtime
+            .native
+            .process_id(self.control.handle)
+            .and_then(|pid| {
+                u64::try_from(pid).map_err(|_| {
+                    OperationError::new(
+                        crate::error::Operation::ProcessId,
+                        FailureKind::NativeFailure,
+                        None,
+                    )
+                })
+            })
+            .map_err(MetadataError::new)
+    }
+
+    /// Returns terminal mode information when supported by the platform.
+    pub fn terminal_mode(&self) -> Result<Option<TerminalMode>, MetadataError> {
+        match self
             .control
             .runtime
             .native
-            .snapshot(self.control.handle)
-            .map_err(MetadataError::new)?;
-        Ok(SessionSnapshot {
-            process_id: u64::try_from(snapshot.pid).map_err(|_| {
-                MetadataError::new(OperationError::new(
-                    crate::error::Operation::Metadata,
-                    crate::error::FailureKind::NativeFailure,
-                    None,
-                ))
-            })?,
-            size: Size::from_native(snapshot.size).ok_or_else(|| {
-                MetadataError::new(OperationError::new(
-                    crate::error::Operation::Metadata,
-                    crate::error::FailureKind::NativeFailure,
-                    None,
-                ))
-            })?,
-            terminal_mode: snapshot.mode.map(TerminalMode::from_engine),
-            terminal_name: snapshot.tty_name.map(native_terminal_name),
-        })
+            .terminal_mode(self.control.handle)
+        {
+            Ok(mode) => Ok(Some(TerminalMode::from_engine(mode))),
+            Err(failure) if failure.kind() == FailureKind::Unsupported => Ok(None),
+            Err(failure) => Err(MetadataError::new(failure)),
+        }
+    }
+
+    /// Returns the controller terminal name when supported by the platform.
+    pub fn terminal_name(&self) -> Result<Option<OsString>, MetadataError> {
+        match self
+            .control
+            .runtime
+            .native
+            .terminal_name(self.control.handle)
+        {
+            Ok(name) => Ok(Some(native_terminal_name(name))),
+            Err(failure) if failure.kind() == FailureKind::Unsupported => Ok(None),
+            Err(failure) => Err(MetadataError::new(failure)),
+        }
     }
 
     /// Changes the terminal cell and optional pixel dimensions.
@@ -538,7 +539,7 @@ impl SessionControl {
         if self.closed.load(Ordering::Acquire) {
             return (!observe).then_some(()).ok_or_else(|| {
                 ControlError::new(OperationError::new(
-                    crate::error::Operation::Metadata,
+                    crate::error::Operation::TerminalMode,
                     crate::error::FailureKind::Closed,
                     None,
                 ))

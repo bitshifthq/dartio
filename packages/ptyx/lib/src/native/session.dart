@@ -83,8 +83,11 @@ final class _NativeSession implements PtyxFinalizable, PtySession {
   @override
   PtyTermMode? get mode {
     if (!capabilities.terminalModes) return null;
-    final modes = _snapshot('mode').modes;
-    return modes == null ? null : modeFromBits(modes);
+    try {
+      return sessionMode(_handle);
+    } on NativeFailure catch (failure) {
+      throw _operationFailure(failure, operation: 'mode');
+    }
   }
 
   @override
@@ -95,18 +98,20 @@ final class _NativeSession implements PtyxFinalizable, PtySession {
 
   @override
   int? get pid {
-    return _snapshot('pid').pid;
+    try {
+      return sessionPid(_handle);
+    } on NativeFailure catch (failure) {
+      throw _operationFailure(failure, operation: 'pid');
+    }
   }
 
   @override
   PtySize get size {
-    final snapshot = _snapshot('size');
-    return PtySize(
-      rows: snapshot.rows,
-      columns: snapshot.columns,
-      pixelWidth: snapshot.pixelWidth,
-      pixelHeight: snapshot.pixelHeight,
-    );
+    try {
+      return sessionSize(_handle);
+    } on NativeFailure catch (failure) {
+      throw _operationFailure(failure, operation: 'size');
+    }
   }
 
   @override
@@ -114,8 +119,11 @@ final class _NativeSession implements PtyxFinalizable, PtySession {
     if (!capabilities.terminalName) {
       return null;
     }
-    final bytes = _snapshot('ttyName').terminalName;
-    return bytes == null ? null : utf8.decode(bytes);
+    try {
+      return sessionTtyName(_handle);
+    } on NativeFailure catch (failure) {
+      throw _operationFailure(failure, operation: 'ttyName');
+    }
   }
 
   @override
@@ -301,6 +309,35 @@ final class _NativeSession implements PtyxFinalizable, PtySession {
     }
   }
 
+  void _onNativeEvent(NativeEvent event) {
+    switch (event.kind) {
+      case .output:
+        if (event.data case final bytes?) {
+          _nativeOutput(bytes, event.token);
+        }
+      case .inputFailed:
+        _nativeInputFailed(_eventFailure(event));
+      case .outputFailed:
+        _nativeOutputFailed(_eventFailure(event));
+      case .infrastructureFailed:
+        _nativeInfrastructureFailed(_eventFailure(event));
+      case .outputDone:
+        _nativeOutputDone();
+      case .exit:
+        _nativeExit(event.value);
+      case .exitFailed:
+        _nativeExitFailed(_eventFailure(event));
+      case .closeComplete:
+        _nativeCloseComplete(event.failure);
+      case .modeChanged:
+        _nativeModeChanged(event.value);
+      case .modeFailed:
+        _nativeModeFailed(_eventFailure(event));
+      case .spawnReady || .spawnFailed:
+        break;
+    }
+  }
+
   void _failReleasedSession(Object error, [StackTrace? stackTrace]) {
     _terminalFailure ??= error;
     if (!_exit.isCompleted) _exit.completeError(error, stackTrace);
@@ -315,14 +352,6 @@ final class _NativeSession implements PtyxFinalizable, PtySession {
     }
     _finalizer.detach(this);
     _controller.releaseSession(_handle);
-  }
-
-  _NativeSnapshot _snapshot(String operation) {
-    try {
-      return sessionSnapshot(_handle);
-    } on NativeFailure catch (failure) {
-      throw _operationFailure(failure, operation: operation);
-    }
   }
 
   void _cancelOutput() {
@@ -361,6 +390,21 @@ final class _NativeSession implements PtyxFinalizable, PtySession {
     return error;
   }
 }
+
+NativeFailure _eventFailure(NativeEvent event) =>
+    event.failure ??
+    syntheticFailure(
+      operation: switch (event.kind) {
+        .inputFailed => ptyx_operation.PTYX_OPERATION_WRITE,
+        .outputFailed => ptyx_operation.PTYX_OPERATION_OUTPUT,
+        .infrastructureFailed => ptyx_operation.PTYX_OPERATION_RUNTIME_SHUTDOWN,
+        .exitFailed => ptyx_operation.PTYX_OPERATION_EXIT,
+        .modeFailed => ptyx_operation.PTYX_OPERATION_TERMINAL_MODE,
+        _ => ptyx_operation.PTYX_OPERATION_NONE,
+      },
+      kind: ptyx_error_kind.PTYX_ERROR_INFRASTRUCTURE_LOST,
+      message: 'native event omitted its failure details',
+    );
 
 /// Projects the native output lease into Dart's single-subscription stream.
 ///

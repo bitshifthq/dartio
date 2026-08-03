@@ -39,7 +39,7 @@ extern "C" {
 /** ABI major version. */
 #define PTYX_ABI_VERSION_MAJOR UINT32_C(0)
 /** ABI minor version. */
-#define PTYX_ABI_VERSION_MINOR UINT32_C(3)
+#define PTYX_ABI_VERSION_MINOR UINT32_C(4)
 /** Packed ABI version returned by ptyx_abi_version(). */
 #define PTYX_ABI_VERSION                                                       \
   ((PTYX_ABI_VERSION_MAJOR << UINT32_C(16)) | PTYX_ABI_VERSION_MINOR)
@@ -105,7 +105,7 @@ typedef enum ptyx_status {
 #define PTYX_CAPABILITY_SIGNALS UINT32_C(1)
 /** Unix process-group ownership is available. */
 #define PTYX_CAPABILITY_PROCESS_GROUPS UINT32_C(2)
-/** Terminal-mode snapshot and observation are available. */
+/** Terminal-mode queries and observation are available. */
 #define PTYX_CAPABILITY_TERMINAL_MODES UINT32_C(4)
 /** The Windows ConPTY backend is active. */
 #define PTYX_CAPABILITY_CONPTY UINT32_C(8)
@@ -191,12 +191,18 @@ typedef enum ptyx_operation {
   PTYX_OPERATION_RESIZE = 6,
   /** Child termination. */
   PTYX_OPERATION_TERMINATE = 7,
-  /** Atomic session metadata snapshot or observation. */
-  PTYX_OPERATION_METADATA = 8,
+  /** Terminal size query. */
+  PTYX_OPERATION_SIZE = 8,
+  /** Direct-child process identifier query. */
+  PTYX_OPERATION_PROCESS_ID = 9,
+  /** Terminal mode query or observation. */
+  PTYX_OPERATION_TERMINAL_MODE = 10,
+  /** Controller terminal-name query. */
+  PTYX_OPERATION_TERMINAL_NAME = 11,
   /** Session cleanup. */
-  PTYX_OPERATION_CLOSE = 9,
+  PTYX_OPERATION_CLOSE = 12,
   /** Direct-child exit-status observation. */
-  PTYX_OPERATION_EXIT = 10,
+  PTYX_OPERATION_EXIT = 13,
   /** Reserved value that fixes the public enum representation at 32 bits. */
   PTYX_OPERATION_ENUM_FORCE_32_BIT = INT32_MAX
 } ptyx_operation_t;
@@ -365,10 +371,6 @@ ptyx_runtime_release(ptyx_runtime_t *runtime, ptyx_error_t *error);
 
 /** Inherit the parent environment; environment_count must be zero. */
 #define PTYX_SPAWN_INHERIT_ENVIRONMENT UINT32_C(1)
-/** Snapshot contains valid terminal-mode bits. */
-#define PTYX_SNAPSHOT_HAS_MODE UINT32_C(1)
-/** Snapshot contains a terminal name. */
-#define PTYX_SNAPSHOT_HAS_TTY_NAME UINT32_C(2)
 /** Terminal input uses canonical line buffering. */
 #define PTYX_MODE_CANONICAL UINT32_C(1)
 /** Terminal input is echoed. */
@@ -413,26 +415,6 @@ typedef struct ptyx_spawn_options {
   uint64_t graceful_close_timeout_us;   /**< Unix TERM-to-force interval. */
   uint64_t reserved[4];                 /**< Must be zero. */
 } ptyx_spawn_options_t;
-
-/**
- * @brief Reactor-atomic session metadata and terminal-name storage request.
- *
- * Initialize the structure to zero, set struct_size, and optionally set
- * tty_name and tty_name_capacity. On return, flags identifies supported
- * values and tty_name_required reports the terminal-name byte count.
- */
-typedef struct ptyx_session_snapshot {
-  uint32_t struct_size; /**< Caller-visible structure size. */
-  uint32_t flags;       /**< PTYX_SNAPSHOT_* result bits. */
-  int64_t pid;          /**< Direct child process ID, or -1. */
-  ptyx_size_t size;     /**< Reactor-atomic terminal size. */
-  uint32_t modes;       /**< PTYX_MODE_* bits. */
-  uint32_t reserved0;   /**< Must be zero. */
-  uint8_t *tty_name;    /**< Optional caller-owned terminal-name storage. */
-  uint64_t tty_name_capacity; /**< Writable bytes at tty_name. */
-  uint64_t tty_name_required; /**< Required terminal-name byte count. */
-  uint64_t reserved[4];       /**< Must be zero. */
-} ptyx_session_snapshot_t;
 
 /**
  * @brief Starts asynchronous PTY session creation.
@@ -526,22 +508,58 @@ ptyx_session_terminate(ptyx_session_t session, int32_t signal,
                        uint32_t *delivered, ptyx_error_t *error);
 
 /**
- * @brief Captures process, size, mode, and terminal-name metadata atomically.
+ * @brief Returns the current terminal dimensions.
  *
  * @param[in] session Live session handle.
- * @param[in,out] snapshot Initialized snapshot and optional terminal-name
- * storage. Fixed fields and tty_name_required are populated even when the
- * terminal-name buffer is too small.
+ * @param[out] size Receives cell and pixel dimensions.
  * @param[out] error Optional initialized error destination.
- * @return PTYX_STATUS_OK, PTYX_STATUS_BUFFER_TOO_SMALL, or a typed failure.
- *
- * PTYX_SNAPSHOT_HAS_MODE makes PTYX_MODE_* bits valid.
- * PTYX_SNAPSHOT_HAS_TTY_NAME makes the terminal-name fields valid. A second
- * call after a size query is a new atomic snapshot.
+ * @return PTYX_STATUS_OK or a typed query failure.
  */
-PTYX_EXPORT ptyx_status_t PTYX_CALL
-ptyx_session_snapshot(ptyx_session_t session, ptyx_session_snapshot_t *snapshot,
-                      ptyx_error_t *error);
+PTYX_EXPORT ptyx_status_t PTYX_CALL ptyx_session_get_size(
+    ptyx_session_t session, ptyx_size_t *size, ptyx_error_t *error);
+
+/**
+ * @brief Returns the direct-child process identifier.
+ *
+ * @param[in] session Live session handle.
+ * @param[out] pid Receives the identifier, or -1 when the backend has no
+ * direct-child identifier.
+ * @param[out] error Optional initialized error destination.
+ * @return PTYX_STATUS_OK or a typed query failure.
+ */
+PTYX_EXPORT ptyx_status_t PTYX_CALL ptyx_session_get_child_pid(
+    ptyx_session_t session, int64_t *pid, ptyx_error_t *error);
+
+/**
+ * @brief Returns terminal mode bits.
+ *
+ * @param[in] session Live session handle.
+ * @param[out] mode Receives PTYX_MODE_* bits.
+ * @param[out] error Optional initialized error destination.
+ * @return PTYX_STATUS_OK, PTYX_STATUS_UNSUPPORTED when terminal modes are not
+ * available, or a typed query failure.
+ */
+PTYX_EXPORT ptyx_status_t PTYX_CALL ptyx_session_get_term_mode(
+    ptyx_session_t session, uint32_t *mode, ptyx_error_t *error);
+
+/**
+ * @brief Returns the controller terminal name in caller-owned storage.
+ *
+ * @param[in] session Live session handle.
+ * @param[out] name Destination bytes, or NULL when capacity is zero.
+ * @param[in] capacity Writable bytes at name.
+ * @param[out] required Receives the byte count excluding a NUL terminator.
+ * @param[out] error Optional initialized error destination.
+ * @return PTYX_STATUS_OK, PTYX_STATUS_BUFFER_TOO_SMALL after writing required,
+ * PTYX_STATUS_UNSUPPORTED when no stable terminal name exists, or a typed
+ * query failure.
+ *
+ * Passing a null name with zero capacity performs a size query. The returned
+ * bytes are not NUL terminated.
+ */
+PTYX_EXPORT ptyx_status_t PTYX_CALL ptyx_session_get_tty_name(
+    ptyx_session_t session, uint8_t *name, uint64_t capacity,
+    uint64_t *required, ptyx_error_t *error);
 
 /**
  * @brief Enables or disables terminal mode-change observation.

@@ -69,10 +69,9 @@ external int ptyd_runtime_abort(
 /// Each message is an eleven-element Dart array containing kind, session,
 /// token, flags, value, error domain, error kind, error operation, native error
 /// code, error flags, and nullable Uint8List data, in that order.
-/// The adapter validates event-kind, session, token, payload, error, and close
-/// invariants before posting. A malformed native event is converted to one
-/// infrastructure-failure event and native cleanup. The Dart router retains
-/// only a fixed message-shape guard for ABI safety.
+/// The adapter owns output-token registration and release. The Dart side keeps
+/// only a fixed message-shape guard for ABI safety; unknown or malformed port
+/// messages converge through the adapter abort operation.
 /// Output remains bounded by each session's configured native output capacity.
 /// Withholding an acknowledgement applies backpressure only to that session;
 /// the shared runtime continues fairly delivering other sessions' events.
@@ -414,6 +413,95 @@ external int ptyx_session_cancel_output(
 >()
 external int ptyx_session_close(int session, ffi.Pointer<ptyx_error_t> error);
 
+/// @brief Returns the direct-child process identifier.
+///
+/// @param[in] session Live session handle.
+/// @param[out] pid Receives the identifier, or -1 when the backend has no
+/// direct-child identifier.
+/// @param[out] error Optional initialized error destination.
+/// @return PTYX_STATUS_OK or a typed query failure.
+@ffi.Native<
+  ffi.UnsignedInt Function(
+    ptyx_session_t,
+    ffi.Pointer<ffi.Int64>,
+    ffi.Pointer<ptyx_error_t>,
+  )
+>()
+external int ptyx_session_get_child_pid(
+  int session,
+  ffi.Pointer<ffi.Int64> pid,
+  ffi.Pointer<ptyx_error_t> error,
+);
+
+/// @brief Returns the current terminal dimensions.
+///
+/// @param[in] session Live session handle.
+/// @param[out] size Receives cell and pixel dimensions.
+/// @param[out] error Optional initialized error destination.
+/// @return PTYX_STATUS_OK or a typed query failure.
+@ffi.Native<
+  ffi.UnsignedInt Function(
+    ptyx_session_t,
+    ffi.Pointer<ptyx_size_t>,
+    ffi.Pointer<ptyx_error_t>,
+  )
+>()
+external int ptyx_session_get_size(
+  int session,
+  ffi.Pointer<ptyx_size_t> size,
+  ffi.Pointer<ptyx_error_t> error,
+);
+
+/// @brief Returns terminal mode bits.
+///
+/// @param[in] session Live session handle.
+/// @param[out] mode Receives PTYX_MODE_* bits.
+/// @param[out] error Optional initialized error destination.
+/// @return PTYX_STATUS_OK, PTYX_STATUS_UNSUPPORTED when terminal modes are not
+/// available, or a typed query failure.
+@ffi.Native<
+  ffi.UnsignedInt Function(
+    ptyx_session_t,
+    ffi.Pointer<ffi.Uint32>,
+    ffi.Pointer<ptyx_error_t>,
+  )
+>()
+external int ptyx_session_get_term_mode(
+  int session,
+  ffi.Pointer<ffi.Uint32> mode,
+  ffi.Pointer<ptyx_error_t> error,
+);
+
+/// @brief Returns the controller terminal name in caller-owned storage.
+///
+/// @param[in] session Live session handle.
+/// @param[out] name Destination bytes, or NULL when capacity is zero.
+/// @param[in] capacity Writable bytes at name.
+/// @param[out] required Receives the byte count excluding a NUL terminator.
+/// @param[out] error Optional initialized error destination.
+/// @return PTYX_STATUS_OK, PTYX_STATUS_BUFFER_TOO_SMALL after writing required,
+/// PTYX_STATUS_UNSUPPORTED when no stable terminal name exists, or a typed
+/// query failure.
+///
+/// Passing a null name with zero capacity performs a size query. The returned
+/// bytes are not NUL terminated.
+@ffi.Native<
+  ffi.UnsignedInt Function(
+    ptyx_session_t,
+    ffi.Pointer<ffi.Uint8>,
+    ffi.Uint64,
+    ffi.Pointer<ffi.Uint64>,
+    ffi.Pointer<ptyx_error_t>,
+  )
+>()
+external int ptyx_session_get_tty_name(
+  int session,
+  ffi.Pointer<ffi.Uint8> name,
+  int capacity,
+  ffi.Pointer<ffi.Uint64> required,
+  ffi.Pointer<ptyx_error_t> error,
+);
+
 /// @brief Enables or disables terminal mode-change observation.
 ///
 /// @param[in] session Live session handle.
@@ -474,31 +562,6 @@ external int ptyx_session_release(
 external int ptyx_session_resize(
   int session,
   ffi.Pointer<ptyx_size_t> size,
-  ffi.Pointer<ptyx_error_t> error,
-);
-
-/// @brief Captures process, size, mode, and terminal-name metadata atomically.
-///
-/// @param[in] session Live session handle.
-/// @param[in,out] snapshot Initialized snapshot and optional terminal-name
-/// storage. Fixed fields and tty_name_required are populated even when the
-/// terminal-name buffer is too small.
-/// @param[out] error Optional initialized error destination.
-/// @return PTYX_STATUS_OK, PTYX_STATUS_BUFFER_TOO_SMALL, or a typed failure.
-///
-/// PTYX_SNAPSHOT_HAS_MODE makes PTYX_MODE_* bits valid.
-/// PTYX_SNAPSHOT_HAS_TTY_NAME makes the terminal-name fields valid. A second
-/// call after a size query is a new atomic snapshot.
-@ffi.Native<
-  ffi.UnsignedInt Function(
-    ptyx_session_t,
-    ffi.Pointer<ptyx_session_snapshot_t>,
-    ffi.Pointer<ptyx_error_t>,
-  )
->()
-external int ptyx_session_snapshot(
-  int session,
-  ffi.Pointer<ptyx_session_snapshot_t> snapshot,
   ffi.Pointer<ptyx_error_t> error,
 );
 
@@ -595,11 +658,11 @@ external int ptyx_session_write(
 
 const int PTYD_INVALID_ADAPTER = 0;
 
-const int PTYX_ABI_VERSION = 3;
+const int PTYX_ABI_VERSION = 4;
 
 const int PTYX_ABI_VERSION_MAJOR = 0;
 
-const int PTYX_ABI_VERSION_MINOR = 3;
+const int PTYX_ABI_VERSION_MINOR = 4;
 
 const int PTYX_CAPABILITY_CONPTY = 8;
 
@@ -628,10 +691,6 @@ const int PTYX_MODE_CANONICAL = 1;
 const int PTYX_MODE_ECHO = 2;
 
 const int PTYX_MODE_SIGNALS = 4;
-
-const int PTYX_SNAPSHOT_HAS_MODE = 1;
-
-const int PTYX_SNAPSHOT_HAS_TTY_NAME = 2;
 
 const int PTYX_SPAWN_INHERIT_ENVIRONMENT = 1;
 
@@ -903,14 +962,23 @@ sealed class ptyx_operation {
   /// Child termination.
   static const PTYX_OPERATION_TERMINATE = 7;
 
-  /// Atomic session metadata snapshot or observation.
-  static const PTYX_OPERATION_METADATA = 8;
+  /// Terminal size query.
+  static const PTYX_OPERATION_SIZE = 8;
+
+  /// Direct-child process identifier query.
+  static const PTYX_OPERATION_PROCESS_ID = 9;
+
+  /// Terminal mode query or observation.
+  static const PTYX_OPERATION_TERMINAL_MODE = 10;
+
+  /// Controller terminal-name query.
+  static const PTYX_OPERATION_TERMINAL_NAME = 11;
 
   /// Session cleanup.
-  static const PTYX_OPERATION_CLOSE = 9;
+  static const PTYX_OPERATION_CLOSE = 12;
 
   /// Direct-child exit-status observation.
-  static const PTYX_OPERATION_EXIT = 10;
+  static const PTYX_OPERATION_EXIT = 13;
 
   /// Reserved value that fixes the public enum representation at 32 bits.
   static const PTYX_OPERATION_ENUM_FORCE_32_BIT = 2147483647;
@@ -956,53 +1024,6 @@ typedef ptyx_runtime_options_t = ptyx_runtime_options;
 /// /** Generation-checked runtime identity.
 typedef ptyx_runtime_t = ffi.Uint64;
 typedef Dartptyx_runtime_t = int;
-
-/// @brief Reactor-atomic session metadata and terminal-name storage request.
-///
-/// Initialize the structure to zero, set struct_size, and optionally set
-/// tty_name and tty_name_capacity. On return, flags identifies supported
-/// values and tty_name_required reports the terminal-name byte count.
-final class ptyx_session_snapshot$1 extends ffi.Struct {
-  /// < Caller-visible structure size.
-  @ffi.Uint32()
-  external int struct_size;
-
-  /// < PTYX_SNAPSHOT_* result bits.
-  @ffi.Uint32()
-  external int flags;
-
-  /// < Direct child process ID, or -1.
-  @ffi.Int64()
-  external int pid;
-
-  /// < Reactor-atomic terminal size.
-  external ptyx_size_t size;
-
-  /// < PTYX_MODE_* bits.
-  @ffi.Uint32()
-  external int modes;
-
-  /// < Must be zero.
-  @ffi.Uint32()
-  external int reserved0;
-
-  /// < Optional caller-owned terminal-name storage.
-  external ffi.Pointer<ffi.Uint8> tty_name;
-
-  /// < Writable bytes at tty_name.
-  @ffi.Uint64()
-  external int tty_name_capacity;
-
-  /// < Required terminal-name byte count.
-  @ffi.Uint64()
-  external int tty_name_required;
-
-  /// < Must be zero.
-  @ffi.Array.multi([4])
-  external ffi.Array<ffi.Uint64> reserved;
-}
-
-typedef ptyx_session_snapshot_t = ptyx_session_snapshot$1;
 
 /// Generation-checked session identity.
 typedef ptyx_session_t = ffi.Uint64;
