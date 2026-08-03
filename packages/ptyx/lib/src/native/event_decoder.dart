@@ -1,4 +1,8 @@
+import 'dart:typed_data';
+
 import '../ffi/ptyx.g.dart';
+import 'errors.dart';
+import 'types.dart';
 
 enum NativeEventKind {
   spawnReady,
@@ -36,3 +40,100 @@ bool isInvalidSession(int value) => value == PTYX_INVALID_SESSION;
 bool isInvalidToken(int value) => value == PTYX_INVALID_EVENT_TOKEN;
 
 bool isInvalidAdapter(int value) => value == PTYD_INVALID_ADAPTER;
+
+final class NativeEvent {
+  final NativeEventKind kind;
+  final int session;
+  final int token;
+  final int flags;
+  final int value;
+  final Uint8List? data;
+  final NativeFailure? failure;
+
+  const NativeEvent({
+    required this.kind,
+    required this.session,
+    required this.token,
+    required this.flags,
+    required this.value,
+    required this.data,
+    required this.failure,
+  });
+
+  bool get isGlobalInfrastructureFailure =>
+      isInvalidSession(session) && kind == .infrastructureFailed;
+}
+
+NativeEvent? decodeEvent(Object? message) {
+  if (message case [
+    final int rawKind,
+    final int session,
+    final int token,
+    final int flags,
+    final int value,
+    final int errorDomain,
+    final int errorKind,
+    final int errorOperation,
+    final int errorNativeCode,
+    final int errorFlags,
+    final Object? data,
+  ]) {
+    if (data != null && data is! Uint8List) return null;
+    final kind = _tryDecodeKind(rawKind);
+    if (kind == null) return null;
+    final failure = errorKind == ptyx_error_kind.PTYX_ERROR_NONE
+        ? null
+        : failureFromEvent(
+            domain: errorDomain,
+            kind: errorKind,
+            operation: errorOperation,
+            nativeCode: errorNativeCode,
+            flags: errorFlags,
+          );
+    final event = NativeEvent(
+      kind: kind,
+      session: session,
+      token: token,
+      flags: flags,
+      value: value,
+      data: data as Uint8List?,
+      failure: failure,
+    );
+    return _isValid(event) ? event : null;
+  }
+  return null;
+}
+
+NativeEventKind? _tryDecodeKind(int value) {
+  try {
+    return decodeEventKind(value);
+  } on FormatException {
+    return null;
+  }
+}
+
+bool _isValid(NativeEvent event) {
+  final sessionValid = !isInvalidSession(event.session);
+  final tokenValid = isInvalidToken(event.token);
+  return switch (event.kind) {
+    .spawnReady => sessionValid && tokenValid && event.data == null,
+    .spawnFailed =>
+      sessionValid && tokenValid && event.data == null && event.failure != null,
+    .output =>
+      sessionValid &&
+          !tokenValid &&
+          event.data != null &&
+          event.failure == null,
+    .inputFailed =>
+      sessionValid && tokenValid && event.data == null && event.failure != null,
+    .outputFailed || .exitFailed || .modeFailed =>
+      sessionValid && tokenValid && event.data == null && event.failure != null,
+    .infrastructureFailed =>
+      tokenValid &&
+          event.data == null &&
+          (event.isGlobalInfrastructureFailure || event.failure != null),
+    .outputDone || .exit || .modeChanged =>
+      sessionValid && tokenValid && event.data == null && event.failure == null,
+    .closeComplete => sessionValid && tokenValid && event.data == null,
+  };
+}

@@ -93,6 +93,25 @@ external int ptyd_runtime_attach(
   ffi.Pointer<ptyx_error_t> error,
 );
 
+/// @brief Returns capabilities for an attached Dart runtime adapter.
+///
+/// @param[in] adapter Attached runtime adapter.
+/// @param[out] capabilities Receives PTYX_CAPABILITY_* bits.
+/// @param[out] error Optional initialized error destination.
+/// @return PTYX_STATUS_OK, PTYX_STATUS_STALE_HANDLE, or a typed failure.
+@ffi.Native<
+  ffi.UnsignedInt Function(
+    ptyd_adapter_t,
+    ffi.Pointer<ffi.Uint32>,
+    ffi.Pointer<ptyx_error_t>,
+  )
+>()
+external int ptyd_runtime_capabilities(
+  int adapter,
+  ffi.Pointer<ffi.Uint32> capabilities,
+  ffi.Pointer<ptyx_error_t> error,
+);
+
 /// @brief Stops the pump and releases every resource transferred to it.
 ///
 /// Shutdown wakes the blocked event read. The function joins the pump, releases

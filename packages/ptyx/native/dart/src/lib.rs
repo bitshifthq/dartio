@@ -274,11 +274,6 @@ pub unsafe extern "C" fn ptyd_runtime_attach(
                 OPERATION_RUNTIME_CREATE,
             );
         }
-        let mut capabilities = 0;
-        let status = c_api::ptyx_runtime_capabilities(runtime, &mut capabilities, error);
-        if status != STATUS_OK {
-            return status;
-        }
         let value = Arc::new(Pump::new(runtime, port));
         let handle = {
             let Ok(mut registry) = pumps().lock() else {
@@ -328,6 +323,41 @@ pub unsafe extern "C" fn ptyd_runtime_attach(
             ERROR_INFRASTRUCTURE_LOST,
             OPERATION_RUNTIME_CREATE,
         )
+    })
+}
+
+#[no_mangle]
+/// Returns capabilities for an attached Dart runtime adapter.
+///
+/// # Safety
+///
+/// `capabilities` must be writable and `error`, when non-null, must identify
+/// initialized compatible error storage.
+pub unsafe extern "C" fn ptyd_runtime_capabilities(
+    adapter: u64,
+    capabilities: *mut u32,
+    error: *mut Error,
+) -> u32 {
+    guarded(error, OPERATION_RUNTIME_CREATE, || {
+        if capabilities.is_null() {
+            return fail(
+                error,
+                STATUS_INVALID_ARGUMENT,
+                ERROR_DOMAIN_ARGUMENT,
+                ERROR_INVALID_ARGUMENT,
+                OPERATION_RUNTIME_CREATE,
+            );
+        }
+        let Some(pump) = pump(adapter) else {
+            return fail(
+                error,
+                STATUS_STALE_HANDLE,
+                ERROR_DOMAIN_RUNTIME,
+                ERROR_STALE_HANDLE,
+                OPERATION_RUNTIME_CREATE,
+            );
+        };
+        c_api::ptyx_runtime_capabilities(pump.runtime, capabilities, error)
     })
 }
 

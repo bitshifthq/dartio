@@ -29,11 +29,11 @@ int runtimeCreate(
   Pointer<ptyx_error_t> error,
 ) => ptyx_runtime_create(options ?? nullptr, runtime, error);
 
-int runtimeCapabilities(
-  int runtime,
+int adapterCapabilities(
+  int adapter,
   Pointer<Uint32> capabilities,
   Pointer<ptyx_error_t> error,
-) => ptyx_runtime_capabilities(runtime, capabilities, error);
+) => ptyd_runtime_capabilities(adapter, capabilities, error);
 
 int runtimeAttach(
   int runtime,
@@ -95,7 +95,7 @@ int spawnStart(int adapter, PtyxSpawnRequest request) {
       nativeError(),
     );
     if (status != ptyx_status.PTYX_STATUS_OK) {
-      throw ptyxFailureFromNative(status, nativeError());
+      throw failureFromNative(status, nativeError());
     }
     return session.value;
   });
@@ -109,7 +109,7 @@ void sessionWrite(int session, Uint8List data) {
     nativeError(),
   );
   if (status != ptyx_status.PTYX_STATUS_OK) {
-    throw ptyxFailureFromNative(status, nativeError());
+    throw failureFromNative(status, nativeError());
   }
 }
 
@@ -127,7 +127,7 @@ void sessionResize(int session, PtySize size) {
     );
     final status = ptyx_session_resize(session, nativeSize, nativeError());
     if (status != ptyx_status.PTYX_STATUS_OK) {
-      throw ptyxFailureFromNative(status, nativeError());
+      throw failureFromNative(status, nativeError());
     }
   });
 }
@@ -142,7 +142,7 @@ bool sessionTerminate(int session, int signal) {
       nativeError(),
     );
     if (status != ptyx_status.PTYX_STATUS_OK) {
-      throw ptyxFailureFromNative(status, nativeError());
+      throw failureFromNative(status, nativeError());
     }
     return delivered.value != 0;
   });
@@ -162,7 +162,7 @@ PtyxSnapshot sessionSnapshot(int session) {
       status = ptyx_session_snapshot(session, snapshot, nativeError());
     }
     if (status != ptyx_status.PTYX_STATUS_OK) {
-      throw ptyxFailureFromNative(status, nativeError());
+      throw failureFromNative(status, nativeError());
     }
     final flags = snapshot.ref.flags;
     final nameLength = snapshot.ref.tty_name_required;
@@ -206,7 +206,7 @@ int sessionRelease(
 void _sessionCall(int Function(Pointer<ptyx_error_t>) operation) {
   final status = operation(nativeError());
   if (status != ptyx_status.PTYX_STATUS_OK) {
-    throw ptyxFailureFromNative(status, nativeError());
+    throw failureFromNative(status, nativeError());
   }
 }
 

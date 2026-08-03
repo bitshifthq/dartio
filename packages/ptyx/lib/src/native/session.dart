@@ -9,9 +9,8 @@ final class _NativeSession implements PtyxFinalizable, PtySession {
   final _NativeRuntime _controller;
   final int _handle;
   final int _inputCapacity;
-  late final _NativeOutput _output;
+  late final _OutputLease _output;
   late final StreamController<PtyTermMode> _modeController;
-  final PtyCapabilities _capabilities;
   final _exit = Completer<int>();
   Completer<void>? _close;
   PtyInputException? _inputFailure;
@@ -19,9 +18,8 @@ final class _NativeSession implements PtyxFinalizable, PtySession {
   PtyTermMode? _lastMode;
 
   _NativeSession._(_NativeRuntime controller, this._handle, this._inputCapacity)
-    : _controller = controller,
-      _capabilities = ptyxCapabilitiesFromBits(controller.capabilityBits) {
-    _output = _NativeOutput(
+    : _controller = controller {
+    _output = _OutputLease(
       onCancel: _cancelOutput,
       onNativeCancel: () => sessionCancelOutput(_handle),
       onAcknowledge: controller.acknowledge,
@@ -59,17 +57,19 @@ final class _NativeSession implements PtyxFinalizable, PtySession {
           return session;
         },
         onFailure: (failure) {
-          completion.completeError(ptyxException(failure, operation: 'spawn'));
+          completion.completeError(
+            exceptionFromFailure(failure, operation: 'spawn'),
+          );
         },
       );
-    } on _NativeFailure catch (failure) {
-      throw ptyxException(failure, operation: 'spawn');
+    } on NativeFailure catch (failure) {
+      throw exceptionFromFailure(failure, operation: 'spawn');
     }
     return completion.future;
   }
 
   @override
-  PtyCapabilities get capabilities => _capabilities;
+  PtyCapabilities get capabilities => _controller.capabilities;
 
   @override
   Future<int> get exitCode => _exit.future;
@@ -84,7 +84,7 @@ final class _NativeSession implements PtyxFinalizable, PtySession {
   PtyTermMode? get mode {
     if (!capabilities.terminalModes) return null;
     final modes = _snapshot('mode').modes;
-    return modes == null ? null : ptyxModeFromBits(modes);
+    return modes == null ? null : modeFromBits(modes);
   }
 
   @override
@@ -123,7 +123,7 @@ final class _NativeSession implements PtyxFinalizable, PtySession {
     const operation = 'write';
     final inputFailure = _inputFailure;
     if (inputFailure != null) {
-      throw ptyxInputErrorForOperation(operation, inputFailure);
+      throw inputException(previous: inputFailure, operation: operation);
     }
     if (data.isEmpty) {
       throw const PtyInvalidArgumentException(
@@ -147,11 +147,11 @@ final class _NativeSession implements PtyxFinalizable, PtySession {
     }
     try {
       sessionWrite(_handle, data);
-    } on _NativeFailure catch (failure) {
-      final error = ptyxException(failure, operation: operation);
+    } on NativeFailure catch (failure) {
+      final error = exceptionFromFailure(failure, operation: operation);
       if (error is PtyInputException) {
         _inputFailure ??= error;
-        throw ptyxInputErrorForOperation(operation, _inputFailure!);
+        throw inputException(previous: _inputFailure, operation: operation);
       }
       if (error is PtyInfrastructureException) {
         _nativeInfrastructureFailed(failure);
@@ -167,7 +167,7 @@ final class _NativeSession implements PtyxFinalizable, PtySession {
     }
     try {
       return sessionTerminate(_handle, signal.signalNumber);
-    } on _NativeFailure catch (failure) {
+    } on NativeFailure catch (failure) {
       throw _operationFailure(failure, operation: 'kill');
     }
   }
@@ -176,7 +176,7 @@ final class _NativeSession implements PtyxFinalizable, PtySession {
   void resize(PtySize size) {
     try {
       sessionResize(_handle, size);
-    } on _NativeFailure catch (failure) {
+    } on NativeFailure catch (failure) {
       throw _operationFailure(failure, operation: 'resize');
     }
   }
@@ -201,11 +201,10 @@ final class _NativeSession implements PtyxFinalizable, PtySession {
       if (completion.isCompleted) {
         return completion.future;
       }
-      final publicError = error is _NativeFailure
-          ? ptyxException(error, operation: 'close')
+      final publicError = error is NativeFailure
+          ? exceptionFromFailure(error, operation: 'close')
           : error;
-      if (error is _NativeFailure &&
-          publicError is PtyInfrastructureException) {
+      if (error is NativeFailure && publicError is PtyInfrastructureException) {
         _nativeInfrastructureFailed(error);
         return completion.future;
       }
@@ -218,8 +217,8 @@ final class _NativeSession implements PtyxFinalizable, PtySession {
     _output.deliver(bytes, token);
   }
 
-  void _nativeInputFailed(_NativeFailure failure) {
-    final error = ptyxException(failure);
+  void _nativeInputFailed(NativeFailure failure) {
+    final error = exceptionFromFailure(failure);
     if (error is PtyInputException) {
       _inputFailure ??= error;
       return;
@@ -227,12 +226,12 @@ final class _NativeSession implements PtyxFinalizable, PtySession {
     _nativeInfrastructureFailed(failure);
   }
 
-  void _nativeOutputFailed(_NativeFailure failure) {
-    _output.fail(ptyxException(failure));
+  void _nativeOutputFailed(NativeFailure failure) {
+    _output.fail(exceptionFromFailure(failure));
   }
 
-  void _nativeInfrastructureFailed(_NativeFailure failure) {
-    final error = ptyxException(failure);
+  void _nativeInfrastructureFailed(NativeFailure failure) {
+    final error = exceptionFromFailure(failure);
     if (_terminalFailure != null) {
       return;
     }
@@ -250,13 +249,13 @@ final class _NativeSession implements PtyxFinalizable, PtySession {
     }
   }
 
-  void _nativeExitFailed(_NativeFailure failure) {
+  void _nativeExitFailed(NativeFailure failure) {
     if (!_exit.isCompleted) {
-      _exit.completeError(ptyxException(failure));
+      _exit.completeError(exceptionFromFailure(failure));
     }
   }
 
-  void _nativeCloseComplete(_NativeFailure? failure) {
+  void _nativeCloseComplete(NativeFailure? failure) {
     _finalizer.detach(this);
     _output.close();
     if (!_modeController.isClosed) {
@@ -280,24 +279,24 @@ final class _NativeSession implements PtyxFinalizable, PtySession {
       return;
     }
     if (failure != null) {
-      close.completeError(ptyxException(failure, operation: 'close'));
+      close.completeError(exceptionFromFailure(failure, operation: 'close'));
       return;
     }
     close.complete();
   }
 
   void _nativeModeChanged(int modes) {
-    final mode = ptyxModeFromBits(modes);
+    final mode = modeFromBits(modes);
     if (mode != _lastMode && !_modeController.isClosed) {
       _lastMode = mode;
       _modeController.add(mode);
     }
   }
 
-  void _nativeModeFailed(_NativeFailure failure) {
+  void _nativeModeFailed(NativeFailure failure) {
     if (!_modeController.isClosed) {
       _modeController.addError(
-        ptyxException(failure, operation: 'modeChanges.observe'),
+        exceptionFromFailure(failure, operation: 'modeChanges.observe'),
       );
     }
   }
@@ -321,7 +320,7 @@ final class _NativeSession implements PtyxFinalizable, PtySession {
   _NativeSnapshot _snapshot(String operation) {
     try {
       return sessionSnapshot(_handle);
-    } on _NativeFailure catch (failure) {
+    } on NativeFailure catch (failure) {
       throw _operationFailure(failure, operation: operation);
     }
   }
@@ -329,7 +328,7 @@ final class _NativeSession implements PtyxFinalizable, PtySession {
   void _cancelOutput() {
     try {
       _output.cancel();
-    } on _NativeFailure catch (failure, stackTrace) {
+    } on NativeFailure catch (failure, stackTrace) {
       Error.throwWithStackTrace(
         _operationFailure(failure, operation: 'output.cancel'),
         stackTrace,
@@ -343,7 +342,7 @@ final class _NativeSession implements PtyxFinalizable, PtySession {
     }
     try {
       sessionObserveMode(_handle, enabled: enabled);
-    } on _NativeFailure catch (failure, stackTrace) {
+    } on NativeFailure catch (failure, stackTrace) {
       final error = _operationFailure(failure, operation: operation);
       if (!_modeController.isClosed) {
         _modeController.addError(error, stackTrace);
@@ -352,10 +351,10 @@ final class _NativeSession implements PtyxFinalizable, PtySession {
   }
 
   PtyException _operationFailure(
-    _NativeFailure failure, {
+    NativeFailure failure, {
     required String operation,
   }) {
-    final error = ptyxException(failure, operation: operation);
+    final error = exceptionFromFailure(failure, operation: operation);
     if (error is PtyInfrastructureException) {
       _nativeInfrastructureFailed(failure);
     }
@@ -368,21 +367,21 @@ final class _NativeSession implements PtyxFinalizable, PtySession {
 /// Native owns the queue and output credit. This class owns only the one
 /// delivery lease needed to bridge native backpressure to StreamController
 /// pause, resume, cancellation, and terminal delivery.
-final class _NativeOutput {
+final class _OutputLease {
   final void Function() _onNativeCancel;
   final void Function(int token) _onAcknowledge;
-  final void Function(_NativeFailure failure) _onInfrastructureFailure;
+  final void Function(NativeFailure failure) _onInfrastructureFailure;
   late final StreamController<Uint8List> _controllerStream;
   ({Uint8List bytes, int token})? _pending;
   ({Object? error, StackTrace? stackTrace})? _termination;
   var _paused = true;
   var _cancelled = false;
 
-  _NativeOutput({
+  _OutputLease({
     required void Function() onCancel,
     required void Function() onNativeCancel,
     required void Function(int token) onAcknowledge,
-    required void Function(_NativeFailure failure) onInfrastructureFailure,
+    required void Function(NativeFailure failure) onInfrastructureFailure,
   }) : _onNativeCancel = onNativeCancel,
        _onAcknowledge = onAcknowledge,
        _onInfrastructureFailure = onInfrastructureFailure {
@@ -406,7 +405,9 @@ final class _NativeOutput {
       if (_pending != null) {
         _acknowledge(token);
         _onInfrastructureFailure(
-          ptyxOutputInfrastructureFailure(
+          syntheticFailure(
+            operation: ptyx_operation.PTYX_OPERATION_OUTPUT,
+            kind: ptyx_error_kind.PTYX_ERROR_INFRASTRUCTURE_LOST,
             message: 'native output exceeded the one-event delivery lease',
           ),
         );
@@ -459,7 +460,7 @@ final class _NativeOutput {
     if (token == 0) return;
     try {
       _onAcknowledge(token);
-    } on _NativeFailure catch (failure) {
+    } on NativeFailure catch (failure) {
       _onInfrastructureFailure(failure);
     }
   }

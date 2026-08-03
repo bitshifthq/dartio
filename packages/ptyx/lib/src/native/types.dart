@@ -3,7 +3,7 @@ import 'dart:typed_data';
 
 typedef PtyxFinalizable = Finalizable;
 
-final class PtyxFailure implements Exception {
+final class NativeFailure implements Exception {
   final int status;
   final int domain;
   final int kind;
@@ -12,7 +12,7 @@ final class PtyxFailure implements Exception {
   final int flags;
   final String message;
 
-  const PtyxFailure({
+  const NativeFailure({
     required this.status,
     required this.domain,
     required this.kind,

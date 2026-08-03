@@ -7,7 +7,7 @@ import '../api/api.dart';
 import '../ffi/ptyx.g.dart';
 import 'types.dart';
 
-PtyxFailure ptyxAcknowledgementFailure(int status) => PtyxFailure(
+NativeFailure acknowledgementFailure(int status) => NativeFailure(
   status: status,
   domain: ptyx_error_domain.PTYX_ERROR_DOMAIN_RUNTIME,
   kind: ptyx_error_kind.PTYX_ERROR_INFRASTRUCTURE_LOST,
@@ -17,14 +17,14 @@ PtyxFailure ptyxAcknowledgementFailure(int status) => PtyxFailure(
   message: 'native output acknowledgement failed',
 );
 
-PtyCapabilities ptyxCapabilitiesFromBits(int bits) => PtyCapabilities(
+PtyCapabilities capabilitiesFromBits(int bits) => PtyCapabilities(
   signals: bits & PTYX_CAPABILITY_SIGNALS != 0,
   processGroups: bits & PTYX_CAPABILITY_PROCESS_GROUPS != 0,
   terminalModes: bits & PTYX_CAPABILITY_TERMINAL_MODES != 0,
   terminalName: bits & PTYX_CAPABILITY_TERMINAL_NAME != 0,
 );
 
-PtyException ptyxException(PtyxFailure failure, {String? operation}) {
+PtyException exceptionFromFailure(NativeFailure failure, {String? operation}) {
   final publicOperation = operation ?? _operationName(failure.operation);
   final nativeCode = failure.nativeCode == 0 ? null : failure.nativeCode;
   if (publicOperation == 'mode' || publicOperation.startsWith('modeChanges.')) {
@@ -77,7 +77,7 @@ PtyException ptyxException(PtyxFailure failure, {String? operation}) {
   }
   if (failure.domain == ptyx_error_domain.PTYX_ERROR_DOMAIN_INPUT ||
       failure.operation == ptyx_operation.PTYX_OPERATION_WRITE) {
-    return ptyxInputError(failure, operation: publicOperation);
+    return inputException(failure: failure, operation: publicOperation);
   }
   if (failure.domain == ptyx_error_domain.PTYX_ERROR_DOMAIN_OUTPUT ||
       failure.operation == ptyx_operation.PTYX_OPERATION_OUTPUT) {
@@ -135,13 +135,13 @@ PtyException ptyxException(PtyxFailure failure, {String? operation}) {
   };
 }
 
-PtyxFailure ptyxFailureFromEvent({
+NativeFailure failureFromEvent({
   required int domain,
   required int kind,
   required int operation,
   required int nativeCode,
   required int flags,
-}) => PtyxFailure(
+}) => NativeFailure(
   status: ptyx_status.PTYX_STATUS_INTERNAL,
   domain: domain,
   kind: kind,
@@ -151,9 +151,9 @@ PtyxFailure ptyxFailureFromEvent({
   message: 'native PTY operation failed',
 );
 
-PtyxFailure ptyxFailureFromNative(int status, Pointer<ptyx_error_t> error) {
+NativeFailure failureFromNative(int status, Pointer<ptyx_error_t> error) {
   final value = error.ref;
-  return PtyxFailure(
+  return NativeFailure(
     status: status,
     domain: value.domain,
     kind: value.kind,
@@ -164,70 +164,46 @@ PtyxFailure ptyxFailureFromNative(int status, Pointer<ptyx_error_t> error) {
   );
 }
 
-PtyxFailure ptyxInfrastructureFailure({
+NativeFailure syntheticFailure({
   required int operation,
+  required int kind,
   String message = 'native PTY operation failed',
-}) => PtyxFailure(
+}) => NativeFailure(
   status: ptyx_status.PTYX_STATUS_INTERNAL,
   domain: ptyx_error_domain.PTYX_ERROR_DOMAIN_RUNTIME,
-  kind: ptyx_error_kind.PTYX_ERROR_INFRASTRUCTURE_LOST,
+  kind: kind,
   operation: operation,
   nativeCode: 0,
   flags: 0,
   message: message,
 );
 
-PtyInputException ptyxInputError(
-  PtyxFailure failure, {
+PtyInputException inputException({
   required String operation,
-}) => PtyInputException(
-  failure.message,
-  operation: operation,
-  nativeCode: failure.nativeCode == 0 ? null : failure.nativeCode,
-);
+  NativeFailure? failure,
+  PtyInputException? previous,
+}) {
+  if (previous case final error?) {
+    return PtyInputException(
+      error.message,
+      operation: operation,
+      nativeCode: error.nativeCode,
+      context: error.context,
+    );
+  }
+  final error = failure!;
+  return PtyInputException(
+    error.message,
+    operation: operation,
+    nativeCode: error.nativeCode == 0 ? null : error.nativeCode,
+  );
+}
 
-PtyInputException ptyxInputErrorForOperation(
-  String operation,
-  PtyInputException failure,
-) => PtyInputException(
-  failure.message,
-  operation: operation,
-  nativeCode: failure.nativeCode,
-  context: failure.context,
-);
-
-PtyTermMode ptyxModeFromBits(int bits) => PtyTermMode(
+PtyTermMode modeFromBits(int bits) => PtyTermMode(
   canonical: bits & PTYX_MODE_CANONICAL != 0,
   echo: bits & PTYX_MODE_ECHO != 0,
   signals: bits & PTYX_MODE_SIGNALS != 0,
 );
-
-PtyxFailure ptyxNativeFailure({
-  required int operation,
-  String message = 'native PTY operation failed',
-}) => PtyxFailure(
-  status: ptyx_status.PTYX_STATUS_INTERNAL,
-  domain: ptyx_error_domain.PTYX_ERROR_DOMAIN_RUNTIME,
-  kind: ptyx_error_kind.PTYX_ERROR_NATIVE_FAILURE,
-  operation: operation,
-  nativeCode: 0,
-  flags: 0,
-  message: message,
-);
-
-PtyxFailure ptyxOutputInfrastructureFailure({
-  String message = 'native PTY operation failed',
-}) => ptyxInfrastructureFailure(
-  operation: ptyx_operation.PTYX_OPERATION_OUTPUT,
-  message: message,
-);
-
-PtyxFailure ptyxRuntimeShutdownFailure() => ptyxInfrastructureFailure(
-  operation: ptyx_operation.PTYX_OPERATION_RUNTIME_SHUTDOWN,
-);
-
-PtyxFailure ptyxSpawnFailure() =>
-    ptyxNativeFailure(operation: ptyx_operation.PTYX_OPERATION_SPAWN);
 
 String _formatError(Pointer<ptyx_error_t> error) {
   return using((arena) {

@@ -7,33 +7,22 @@ const _guardianOwnerExit = 3;
 const _guardianStartupTimeout = Duration(seconds: 30);
 const _guardianUnarmedLease = Duration(seconds: 5);
 
-({int adapter, int capabilities}) _createRuntime(int port) {
+int _createRuntime(int port) {
   return using((arena) {
     final runtime = arena<ptyx_runtime_t>();
     final error = newError(arena);
     final status = runtimeCreate(nullptr, runtime, error);
     if (status != ptyx_status.PTYX_STATUS_OK) {
-      throw ptyxFailureFromNative(status, error);
-    }
-    final capabilities = arena<Uint32>();
-    final capabilityStatus = runtimeCapabilities(
-      runtime.value,
-      capabilities,
-      error,
-    );
-    if (capabilityStatus != ptyx_status.PTYX_STATUS_OK) {
-      runtimeShutdown(runtime.value, error);
-      runtimeRelease(runtime, error);
-      throw ptyxFailureFromNative(capabilityStatus, error);
+      throw failureFromNative(status, error);
     }
     final adapter = arena<ptyd_adapter_t>();
     final attachStatus = runtimeAttach(runtime.value, port, adapter, error);
     if (attachStatus != ptyx_status.PTYX_STATUS_OK) {
       runtimeShutdown(runtime.value, error);
       runtimeRelease(runtime, error);
-      throw ptyxFailureFromNative(attachStatus, error);
+      throw failureFromNative(attachStatus, error);
     }
-    return (adapter: adapter.value, capabilities: capabilities.value);
+    return adapter.value;
   });
 }
 
@@ -49,10 +38,9 @@ Future<void> _guardNativeOwner(SendPort ready) async {
             when isInvalidAdapter(adapter):
           unarmedLease.cancel();
           try {
-            final created = _createRuntime(port);
-            adapter = created.adapter;
-            reply.send([_guardianCreated, adapter, created.capabilities]);
-          } on _NativeFailure catch (failure) {
+            adapter = _createRuntime(port);
+            reply.send([_guardianCreated, adapter]);
+          } on NativeFailure catch (failure) {
             reply.send([
               _guardianCreateFailed,
               failure.status,
@@ -84,12 +72,11 @@ Future<void> _guardNativeOwner(SendPort ready) async {
   }
 }
 
-typedef _NativeFailure = PtyxFailure;
 typedef _NativeSnapshot = PtyxSnapshot;
 typedef _NativeSpawnRequest = PtyxSpawnRequest;
 typedef _PendingSpawn = ({
   _NativeSession Function(int handle) onReady,
-  void Function(_NativeFailure failure) onFailure,
+  void Function(NativeFailure failure) onFailure,
 });
 
 final class _NativeRuntime implements PtyxFinalizable {
@@ -100,20 +87,19 @@ final class _NativeRuntime implements PtyxFinalizable {
 
   final RawReceivePort _port;
   final int _adapter;
-  final int capabilityBits;
+  PtyCapabilities? _capabilities;
   late final _NativeEventRouter _router;
 
-  _NativeRuntime._(this._port, int adapter, this.capabilityBits)
-    : _adapter = adapter {
+  _NativeRuntime._(this._port, int adapter) : _adapter = adapter {
     _router = _NativeEventRouter(this);
     _finalizer.attach(this, Pointer<Void>.fromAddress(adapter), detach: this);
   }
 
-  _NativeFailure? abort() {
+  NativeFailure? abort() {
     final status = runtimeAbort(_adapter, nativeError());
     final failure = status == ptyx_status.PTYX_STATUS_OK
         ? null
-        : ptyxFailureFromNative(status, nativeError());
+        : failureFromNative(status, nativeError());
     _updateLiveness();
     return failure;
   }
@@ -121,11 +107,11 @@ final class _NativeRuntime implements PtyxFinalizable {
   void acknowledge(int token) {
     final status = eventAcknowledge(_adapter, token, nativeError());
     if (status != ptyx_status.PTYX_STATUS_OK) {
-      throw ptyxAcknowledgementFailure(status);
+      throw acknowledgementFailure(status);
     }
   }
 
-  _NativeFailure? releaseSession(int handle) {
+  NativeFailure? releaseSession(int handle) {
     final failure = using((arena) {
       final session = arena<ptyx_session_t>()..value = handle;
       final status = sessionRelease(_adapter, session, nativeError());
@@ -133,7 +119,7 @@ final class _NativeRuntime implements PtyxFinalizable {
           status == ptyx_status.PTYX_STATUS_STALE_HANDLE) {
         return null;
       }
-      return ptyxFailureFromNative(status, nativeError());
+      return failureFromNative(status, nativeError());
     });
     if (failure == null) {
       _router.remove(handle);
@@ -145,7 +131,7 @@ final class _NativeRuntime implements PtyxFinalizable {
   void startSpawn(
     _NativeSpawnRequest request, {
     required _NativeSession Function(int handle) onReady,
-    required void Function(_NativeFailure failure) onFailure,
+    required void Function(NativeFailure failure) onFailure,
   }) {
     try {
       final handle = spawnStart(_adapter, request);
@@ -158,6 +144,23 @@ final class _NativeRuntime implements PtyxFinalizable {
   void _onMessage(Object? message) => _router.onMessage(message);
 
   void _updateLiveness() => _router.updateLiveness();
+
+  PtyCapabilities get capabilities {
+    final cached = _capabilities;
+    if (cached != null) return cached;
+    final bits = using((arena) {
+      final value = arena<Uint32>();
+      final status = adapterCapabilities(_adapter, value, nativeError());
+      if (status != ptyx_status.PTYX_STATUS_OK) {
+        throw exceptionFromFailure(
+          failureFromNative(status, nativeError()),
+          operation: 'capabilities',
+        );
+      }
+      return value.value;
+    });
+    return _capabilities = capabilitiesFromBits(bits);
+  }
 
   static Future<_NativeRuntime> _create() async {
     final version = abiVersion();
@@ -191,8 +194,8 @@ final class _NativeRuntime implements PtyxFinalizable {
       final response =
           await created.first.timeout(_guardianStartupTimeout) as List<Object?>;
       switch (response) {
-        case [_guardianCreated, final int adapter, final int capabilities]:
-          controller = _NativeRuntime._(port, adapter, capabilities);
+        case [_guardianCreated, final int adapter]:
+          controller = _NativeRuntime._(port, adapter);
         case [
           _guardianCreateFailed,
           final int status,
@@ -203,7 +206,7 @@ final class _NativeRuntime implements PtyxFinalizable {
           final int flags,
           final String message,
         ]:
-          throw _NativeFailure(
+          throw NativeFailure(
             status: status,
             domain: domain,
             kind: kind,

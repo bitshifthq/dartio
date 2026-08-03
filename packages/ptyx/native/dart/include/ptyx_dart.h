@@ -57,6 +57,17 @@ PTYX_EXPORT ptyx_status_t PTYX_CALL ptyd_runtime_attach(ptyx_runtime_t runtime,
                                                         ptyx_error_t *error);
 
 /**
+ * @brief Returns capabilities for an attached Dart runtime adapter.
+ *
+ * @param[in] adapter Attached runtime adapter.
+ * @param[out] capabilities Receives PTYX_CAPABILITY_* bits.
+ * @param[out] error Optional initialized error destination.
+ * @return PTYX_STATUS_OK, PTYX_STATUS_STALE_HANDLE, or a typed failure.
+ */
+PTYX_EXPORT ptyx_status_t PTYX_CALL ptyd_runtime_capabilities(
+    ptyd_adapter_t adapter, uint32_t *capabilities, ptyx_error_t *error);
+
+/**
  * @brief Atomically admits and transfers a session spawn to the adapter.
  *
  * The pump cannot process SPAWN_READY or SPAWN_FAILED before it owns the
