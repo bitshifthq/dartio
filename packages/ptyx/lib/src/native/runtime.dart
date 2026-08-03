@@ -207,7 +207,7 @@ final class _NativeRuntime implements PtyxFinalizable {
       spawn.onFailure(error);
     }
     for (final session in sessions) {
-      session._nativeInfrastructureFailed(error);
+      session._failInfrastructure(error);
     }
     _updateLiveness();
   }

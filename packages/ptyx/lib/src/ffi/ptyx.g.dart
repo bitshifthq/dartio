@@ -18,16 +18,12 @@ import 'dart:ffi' as ffi;
 /// @param[out] error Optional initialized error destination.
 /// @return PTYX_STATUS_OK or a typed failure.
 @ffi.Native<
-  ffi.UnsignedInt Function(
-    ptyd_adapter_t,
-    ptyx_event_token_t,
-    ffi.Pointer<ptyx_error_t>,
-  )
+  ffi.UnsignedInt Function(PtydAdapter, PtyxEventToken, ffi.Pointer<PtyxError>)
 >()
 external int ptyd_event_ack(
   int adapter,
   int token,
-  ffi.Pointer<ptyx_error_t> error,
+  ffi.Pointer<PtyxError> error,
 );
 
 /// @brief Initializes Dart API-DL for the current library artifact.
@@ -48,14 +44,11 @@ external int ptyd_initialize(ffi.Pointer<ffi.Void> api_data);
 /// @param[out] error Optional initialized error destination.
 /// @return PTYX_STATUS_OK or a typed failure.
 @ffi.Native<
-  ffi.UnsignedInt Function(
-    ffi.Pointer<ptyd_adapter_t>,
-    ffi.Pointer<ptyx_error_t>,
-  )
+  ffi.UnsignedInt Function(ffi.Pointer<PtydAdapter>, ffi.Pointer<PtyxError>)
 >()
 external int ptyd_runtime_abort(
-  ffi.Pointer<ptyd_adapter_t> adapter,
-  ffi.Pointer<ptyx_error_t> error,
+  ffi.Pointer<PtydAdapter> adapter,
+  ffi.Pointer<PtyxError> error,
 );
 
 /// @brief Attaches the sole event pump and cleanup owner to a runtime.
@@ -79,17 +72,17 @@ external int ptyd_runtime_abort(
 /// After success, detach or finalization owns runtime shutdown and release.
 @ffi.Native<
   ffi.UnsignedInt Function(
-    ptyx_runtime_t,
+    PtyxRuntime,
     ffi.Int64,
-    ffi.Pointer<ptyd_adapter_t>,
-    ffi.Pointer<ptyx_error_t>,
+    ffi.Pointer<PtydAdapter>,
+    ffi.Pointer<PtyxError>,
   )
 >()
 external int ptyd_runtime_attach(
   int runtime,
   int port,
-  ffi.Pointer<ptyd_adapter_t> adapter,
-  ffi.Pointer<ptyx_error_t> error,
+  ffi.Pointer<PtydAdapter> adapter,
+  ffi.Pointer<PtyxError> error,
 );
 
 /// @brief Returns capabilities for an attached Dart runtime adapter.
@@ -100,15 +93,15 @@ external int ptyd_runtime_attach(
 /// @return PTYX_STATUS_OK, PTYX_STATUS_STALE_HANDLE, or a typed failure.
 @ffi.Native<
   ffi.UnsignedInt Function(
-    ptyd_adapter_t,
+    PtydAdapter,
     ffi.Pointer<ffi.Uint32>,
-    ffi.Pointer<ptyx_error_t>,
+    ffi.Pointer<PtyxError>,
   )
 >()
 external int ptyd_runtime_capabilities(
   int adapter,
   ffi.Pointer<ffi.Uint32> capabilities,
-  ffi.Pointer<ptyx_error_t> error,
+  ffi.Pointer<PtyxError> error,
 );
 
 /// @brief Stops the pump and releases every resource transferred to it.
@@ -122,14 +115,11 @@ external int ptyd_runtime_capabilities(
 /// @return PTYX_STATUS_OK or a typed failure. A failure leaves the adapter
 /// registered so the caller can retry cleanup.
 @ffi.Native<
-  ffi.UnsignedInt Function(
-    ffi.Pointer<ptyd_adapter_t>,
-    ffi.Pointer<ptyx_error_t>,
-  )
+  ffi.UnsignedInt Function(ffi.Pointer<PtydAdapter>, ffi.Pointer<PtyxError>)
 >()
 external int ptyd_runtime_detach(
-  ffi.Pointer<ptyd_adapter_t> adapter,
-  ffi.Pointer<ptyx_error_t> error,
+  ffi.Pointer<PtydAdapter> adapter,
+  ffi.Pointer<PtyxError> error,
 );
 
 /// @brief Native finalizer for an adapter handle encoded as a pointer address.
@@ -167,15 +157,15 @@ external void ptyd_session_finalize(ffi.Pointer<ffi.Void> token);
 /// worker can retry it.
 @ffi.Native<
   ffi.UnsignedInt Function(
-    ptyd_adapter_t,
-    ffi.Pointer<ptyx_session_t>,
-    ffi.Pointer<ptyx_error_t>,
+    PtydAdapter,
+    ffi.Pointer<PtyxSession>,
+    ffi.Pointer<PtyxError>,
   )
 >()
 external int ptyd_session_release(
   int adapter,
-  ffi.Pointer<ptyx_session_t> session,
-  ffi.Pointer<ptyx_error_t> error,
+  ffi.Pointer<PtyxSession> session,
+  ffi.Pointer<PtyxError> error,
 );
 
 /// @brief Atomically admits and transfers a session spawn to the adapter.
@@ -191,17 +181,17 @@ external int ptyd_session_release(
 /// @return PTYX_STATUS_OK or a typed failure.
 @ffi.Native<
   ffi.UnsignedInt Function(
-    ptyd_adapter_t,
-    ffi.Pointer<ptyx_spawn_options_t>,
-    ffi.Pointer<ptyx_session_t>,
-    ffi.Pointer<ptyx_error_t>,
+    PtydAdapter,
+    ffi.Pointer<PtyxSpawnOptions>,
+    ffi.Pointer<PtyxSession>,
+    ffi.Pointer<PtyxError>,
   )
 >()
 external int ptyd_session_spawn_start(
   int adapter,
-  ffi.Pointer<ptyx_spawn_options_t> options,
-  ffi.Pointer<ptyx_session_t> session,
-  ffi.Pointer<ptyx_error_t> error,
+  ffi.Pointer<PtyxSpawnOptions> options,
+  ffi.Pointer<PtyxSession> session,
+  ffi.Pointer<PtyxError> error,
 );
 
 /// @brief Returns the packed ABI major and minor version.
@@ -231,14 +221,14 @@ external int ptyx_abi_version();
 /// Safe to call concurrently.
 @ffi.Native<
   ffi.UnsignedInt Function(
-    ffi.Pointer<ptyx_error_t>,
+    ffi.Pointer<PtyxError>,
     ffi.Pointer<ffi.Uint8>,
     ffi.Uint64,
     ffi.Pointer<ffi.Uint64>,
   )
 >()
 external int ptyx_error_format(
-  ffi.Pointer<ptyx_error_t> error,
+  ffi.Pointer<PtyxError> error,
   ffi.Pointer<ffi.Uint8> target,
   int capacity,
   ffi.Pointer<ffi.Uint64> required,
@@ -256,11 +246,11 @@ external int ptyx_error_format(
 /// @par Thread safety
 /// Safe to call from a different thread than event receipt.
 @ffi.Native<
-  ffi.UnsignedInt Function(ffi.Pointer<ptyx_event_t>, ffi.Pointer<ptyx_error_t>)
+  ffi.UnsignedInt Function(ffi.Pointer<PtyxEvent>, ffi.Pointer<PtyxError>)
 >()
 external int ptyx_event_release(
-  ffi.Pointer<ptyx_event_t> event,
-  ffi.Pointer<ptyx_error_t> error,
+  ffi.Pointer<PtyxEvent> event,
+  ffi.Pointer<PtyxError> error,
 );
 
 /// @brief Returns capabilities implemented by a runtime.
@@ -274,15 +264,15 @@ external int ptyx_event_release(
 /// Safe to call concurrently.
 @ffi.Native<
   ffi.UnsignedInt Function(
-    ptyx_runtime_t,
+    PtyxRuntime,
     ffi.Pointer<ffi.Uint32>,
-    ffi.Pointer<ptyx_error_t>,
+    ffi.Pointer<PtyxError>,
   )
 >()
 external int ptyx_runtime_capabilities(
   int runtime,
   ffi.Pointer<ffi.Uint32> capabilities,
-  ffi.Pointer<ptyx_error_t> error,
+  ffi.Pointer<PtyxError> error,
 );
 
 /// @brief Creates an isolated PTY runtime.
@@ -301,15 +291,15 @@ external int ptyx_runtime_capabilities(
 /// Safe to call concurrently.
 @ffi.Native<
   ffi.UnsignedInt Function(
-    ffi.Pointer<ptyx_runtime_options_t>,
-    ffi.Pointer<ptyx_runtime_t>,
-    ffi.Pointer<ptyx_error_t>,
+    ffi.Pointer<PtyxRuntimeOptions>,
+    ffi.Pointer<PtyxRuntime>,
+    ffi.Pointer<PtyxError>,
   )
 >()
 external int ptyx_runtime_create(
-  ffi.Pointer<ptyx_runtime_options_t> options,
-  ffi.Pointer<ptyx_runtime_t> runtime,
-  ffi.Pointer<ptyx_error_t> error,
+  ffi.Pointer<PtyxRuntimeOptions> options,
+  ffi.Pointer<PtyxRuntime> runtime,
+  ffi.Pointer<PtyxError> error,
 );
 
 /// @brief Waits for and transfers ownership of the next fair runtime event.
@@ -331,15 +321,15 @@ external int ptyx_runtime_create(
 /// Other runtime and session functions may run concurrently.
 @ffi.Native<
   ffi.UnsignedInt Function(
-    ptyx_runtime_t,
-    ffi.Pointer<ptyx_event>,
-    ffi.Pointer<ptyx_error_t>,
+    PtyxRuntime,
+    ffi.Pointer<PtyxEvent>,
+    ffi.Pointer<PtyxError>,
   )
 >()
 external int ptyx_runtime_next_event(
   int runtime,
-  ffi.Pointer<ptyx_event> event,
-  ffi.Pointer<ptyx_error_t> error,
+  ffi.Pointer<PtyxEvent> event,
+  ffi.Pointer<PtyxError> error,
 );
 
 /// @brief Releases a shut-down runtime handle.
@@ -355,14 +345,11 @@ external int ptyx_runtime_next_event(
 /// @par Thread safety
 /// Do not race release with any operation using this runtime.
 @ffi.Native<
-  ffi.UnsignedInt Function(
-    ffi.Pointer<ptyx_runtime_t>,
-    ffi.Pointer<ptyx_error_t>,
-  )
+  ffi.UnsignedInt Function(ffi.Pointer<PtyxRuntime>, ffi.Pointer<PtyxError>)
 >()
 external int ptyx_runtime_release(
-  ffi.Pointer<ptyx_runtime_t> runtime,
-  ffi.Pointer<ptyx_error_t> error,
+  ffi.Pointer<PtyxRuntime> runtime,
+  ffi.Pointer<PtyxError> error,
 );
 
 /// @brief Starts deterministic shutdown and wakes the event consumer.
@@ -375,13 +362,8 @@ external int ptyx_runtime_release(
 /// May wait for native owners and the Unix broker to terminate.
 /// @par Thread safety
 /// Do not race this function with another shutdown or release.
-@ffi.Native<
-  ffi.UnsignedInt Function(ptyx_runtime_t, ffi.Pointer<ptyx_error_t>)
->()
-external int ptyx_runtime_shutdown(
-  int runtime,
-  ffi.Pointer<ptyx_error_t> error,
-);
+@ffi.Native<ffi.UnsignedInt Function(PtyxRuntime, ffi.Pointer<PtyxError>)>()
+external int ptyx_runtime_shutdown(int runtime, ffi.Pointer<PtyxError> error);
 
 /// @brief Commits drain-and-discard for buffered and future output.
 ///
@@ -392,12 +374,10 @@ external int ptyx_runtime_shutdown(
 /// This operation does not release output events already transferred to the
 /// caller. Repeating a successful cancellation for the same live session
 /// succeeds without changing state.
-@ffi.Native<
-  ffi.UnsignedInt Function(ptyx_session_t, ffi.Pointer<ptyx_error_t>)
->()
+@ffi.Native<ffi.UnsignedInt Function(PtyxSession, ffi.Pointer<PtyxError>)>()
 external int ptyx_session_cancel_output(
   int session,
-  ffi.Pointer<ptyx_error_t> error,
+  ffi.Pointer<PtyxError> error,
 );
 
 /// @brief Starts or joins session close.
@@ -408,10 +388,8 @@ external int ptyx_session_cancel_output(
 ///
 /// Exactly one PTYX_EVENT_CLOSE_COMPLETE event reports whether every accepted
 /// input byte and native owner reached a known terminal state.
-@ffi.Native<
-  ffi.UnsignedInt Function(ptyx_session_t, ffi.Pointer<ptyx_error_t>)
->()
-external int ptyx_session_close(int session, ffi.Pointer<ptyx_error_t> error);
+@ffi.Native<ffi.UnsignedInt Function(PtyxSession, ffi.Pointer<PtyxError>)>()
+external int ptyx_session_close(int session, ffi.Pointer<PtyxError> error);
 
 /// @brief Returns the direct-child process identifier.
 ///
@@ -422,15 +400,15 @@ external int ptyx_session_close(int session, ffi.Pointer<ptyx_error_t> error);
 /// @return PTYX_STATUS_OK or a typed query failure.
 @ffi.Native<
   ffi.UnsignedInt Function(
-    ptyx_session_t,
+    PtyxSession,
     ffi.Pointer<ffi.Int64>,
-    ffi.Pointer<ptyx_error_t>,
+    ffi.Pointer<PtyxError>,
   )
 >()
 external int ptyx_session_get_child_pid(
   int session,
   ffi.Pointer<ffi.Int64> pid,
-  ffi.Pointer<ptyx_error_t> error,
+  ffi.Pointer<PtyxError> error,
 );
 
 /// @brief Returns the current terminal dimensions.
@@ -441,15 +419,15 @@ external int ptyx_session_get_child_pid(
 /// @return PTYX_STATUS_OK or a typed query failure.
 @ffi.Native<
   ffi.UnsignedInt Function(
-    ptyx_session_t,
-    ffi.Pointer<ptyx_size_t>,
-    ffi.Pointer<ptyx_error_t>,
+    PtyxSession,
+    ffi.Pointer<PtyxSize>,
+    ffi.Pointer<PtyxError>,
   )
 >()
 external int ptyx_session_get_size(
   int session,
-  ffi.Pointer<ptyx_size_t> size,
-  ffi.Pointer<ptyx_error_t> error,
+  ffi.Pointer<PtyxSize> size,
+  ffi.Pointer<PtyxError> error,
 );
 
 /// @brief Returns terminal mode bits.
@@ -461,15 +439,15 @@ external int ptyx_session_get_size(
 /// available, or a typed query failure.
 @ffi.Native<
   ffi.UnsignedInt Function(
-    ptyx_session_t,
+    PtyxSession,
     ffi.Pointer<ffi.Uint32>,
-    ffi.Pointer<ptyx_error_t>,
+    ffi.Pointer<PtyxError>,
   )
 >()
 external int ptyx_session_get_term_mode(
   int session,
   ffi.Pointer<ffi.Uint32> mode,
-  ffi.Pointer<ptyx_error_t> error,
+  ffi.Pointer<PtyxError> error,
 );
 
 /// @brief Returns the controller terminal name in caller-owned storage.
@@ -487,11 +465,11 @@ external int ptyx_session_get_term_mode(
 /// bytes are not NUL terminated.
 @ffi.Native<
   ffi.UnsignedInt Function(
-    ptyx_session_t,
+    PtyxSession,
     ffi.Pointer<ffi.Uint8>,
     ffi.Uint64,
     ffi.Pointer<ffi.Uint64>,
-    ffi.Pointer<ptyx_error_t>,
+    ffi.Pointer<PtyxError>,
   )
 >()
 external int ptyx_session_get_tty_name(
@@ -499,7 +477,7 @@ external int ptyx_session_get_tty_name(
   ffi.Pointer<ffi.Uint8> name,
   int capacity,
   ffi.Pointer<ffi.Uint64> required,
-  ffi.Pointer<ptyx_error_t> error,
+  ffi.Pointer<PtyxError> error,
 );
 
 /// @brief Enables or disables terminal mode-change observation.
@@ -513,16 +491,12 @@ external int ptyx_session_get_tty_name(
 /// PTYX_EVENT_MODE_CHANGED events. Disabling it stops native polling and does
 /// not remove an event already transferred to the caller.
 @ffi.Native<
-  ffi.UnsignedInt Function(
-    ptyx_session_t,
-    ffi.Uint32,
-    ffi.Pointer<ptyx_error_t>,
-  )
+  ffi.UnsignedInt Function(PtyxSession, ffi.Uint32, ffi.Pointer<PtyxError>)
 >()
 external int ptyx_session_observe_mode(
   int session,
   int enabled,
-  ffi.Pointer<ptyx_error_t> error,
+  ffi.Pointer<PtyxError> error,
 );
 
 /// @brief Releases or abandons a session handle.
@@ -536,14 +510,11 @@ external int ptyx_session_observe_mode(
 /// Release is nonblocking. If deterministic close has not converged, native
 /// ownership continues cleanup independently.
 @ffi.Native<
-  ffi.UnsignedInt Function(
-    ffi.Pointer<ptyx_session_t>,
-    ffi.Pointer<ptyx_error_t>,
-  )
+  ffi.UnsignedInt Function(ffi.Pointer<PtyxSession>, ffi.Pointer<PtyxError>)
 >()
 external int ptyx_session_release(
-  ffi.Pointer<ptyx_session_t> session,
-  ffi.Pointer<ptyx_error_t> error,
+  ffi.Pointer<PtyxSession> session,
+  ffi.Pointer<PtyxError> error,
 );
 
 /// @brief Resizes a live PTY.
@@ -554,15 +525,15 @@ external int ptyx_session_release(
 /// @return PTYX_STATUS_OK or a typed failure status.
 @ffi.Native<
   ffi.UnsignedInt Function(
-    ptyx_session_t,
-    ffi.Pointer<ptyx_size_t>,
-    ffi.Pointer<ptyx_error_t>,
+    PtyxSession,
+    ffi.Pointer<PtyxSize>,
+    ffi.Pointer<PtyxError>,
   )
 >()
 external int ptyx_session_resize(
   int session,
-  ffi.Pointer<ptyx_size_t> size,
-  ffi.Pointer<ptyx_error_t> error,
+  ffi.Pointer<PtyxSize> size,
+  ffi.Pointer<PtyxError> error,
 );
 
 /// @brief Starts asynchronous PTY session creation.
@@ -585,17 +556,17 @@ external int ptyx_session_resize(
 /// Safe to call concurrently.
 @ffi.Native<
   ffi.UnsignedInt Function(
-    ptyx_runtime_t,
-    ffi.Pointer<ptyx_spawn_options_t>,
-    ffi.Pointer<ptyx_session_t>,
-    ffi.Pointer<ptyx_error_t>,
+    PtyxRuntime,
+    ffi.Pointer<PtyxSpawnOptions>,
+    ffi.Pointer<PtyxSession>,
+    ffi.Pointer<PtyxError>,
   )
 >()
 external int ptyx_session_spawn_start(
   int runtime,
-  ffi.Pointer<ptyx_spawn_options_t> options,
-  ffi.Pointer<ptyx_session_t> session,
-  ffi.Pointer<ptyx_error_t> error,
+  ffi.Pointer<PtyxSpawnOptions> options,
+  ffi.Pointer<PtyxSession> session,
+  ffi.Pointer<PtyxError> error,
 );
 
 /// @brief Requests termination of the owned terminal job.
@@ -609,17 +580,17 @@ external int ptyx_session_spawn_start(
 /// @return PTYX_STATUS_OK, PTYX_STATUS_UNSUPPORTED, or a typed failure.
 @ffi.Native<
   ffi.UnsignedInt Function(
-    ptyx_session_t,
+    PtyxSession,
     ffi.Int32,
     ffi.Pointer<ffi.Uint32>,
-    ffi.Pointer<ptyx_error_t>,
+    ffi.Pointer<PtyxError>,
   )
 >()
 external int ptyx_session_terminate(
   int session,
   int signal,
   ffi.Pointer<ffi.Uint32> delivered,
-  ffi.Pointer<ptyx_error_t> error,
+  ffi.Pointer<PtyxError> error,
 );
 
 /// @brief Accepts a complete input buffer or none of it.
@@ -643,17 +614,17 @@ external int ptyx_session_terminate(
 /// admission linearization order.
 @ffi.Native<
   ffi.UnsignedInt Function(
-    ptyx_session_t,
+    PtyxSession,
     ffi.Pointer<ffi.Uint8>,
     ffi.Uint64,
-    ffi.Pointer<ptyx_error_t>,
+    ffi.Pointer<PtyxError>,
   )
 >(isLeaf: true)
 external int ptyx_session_write(
   int session,
   ffi.Pointer<ffi.Uint8> bytes,
   int length,
-  ffi.Pointer<ptyx_error_t> error,
+  ffi.Pointer<PtyxError> error,
 );
 
 const int PTYD_INVALID_ADAPTER = 0;
@@ -695,11 +666,11 @@ const int PTYX_MODE_SIGNALS = 4;
 const int PTYX_SPAWN_INHERIT_ENVIRONMENT = 1;
 
 /// Generation-checked identity of one Dart event-pump adapter.
-typedef ptyd_adapter_t = ffi.Uint64;
-typedef Dartptyd_adapter_t = int;
+typedef PtydAdapter = ffi.Uint64;
+typedef DartPtydAdapter = int;
 
 /// @brief Immutable borrowed byte sequence.
-final class ptyx_bytes_view extends ffi.Struct {
+final class PtyxBytesView extends ffi.Struct {
   /// < Borrowed bytes, or NULL when length is zero.
   external ffi.Pointer<ffi.Uint8> data;
 
@@ -707,16 +678,14 @@ final class ptyx_bytes_view extends ffi.Struct {
   @ffi.Uint64()
   external int length;
 
-  static ffi.Pointer<ptyx_bytes_view> $allocate(
+  static ffi.Pointer<PtyxBytesView> $allocate(
     ffi.Allocator $allocator, {
     required ffi.Pointer<ffi.Uint8> data,
     required int length,
-  }) => $allocator<ptyx_bytes_view>()
+  }) => $allocator<PtyxBytesView>()
     ..ref.data = data
     ..ref.length = length;
 }
-
-typedef ptyx_bytes_view_t = ptyx_bytes_view;
 
 /// @brief Stable value describing one failure.
 ///
@@ -725,7 +694,7 @@ typedef ptyx_bytes_view_t = ptyx_bytes_view;
 /// This structure owns no pointers. Unknown trailing fields are reserved for
 /// compatible ABI growth. Initialize the complete structure to zero and set
 /// struct_size before passing it to ptyx.
-final class ptyx_error extends ffi.Struct {
+final class PtyxError extends ffi.Struct {
   /// < Caller-visible structure size.
   @ffi.Uint32()
   external int struct_size;
@@ -742,13 +711,13 @@ final class ptyx_error extends ffi.Struct {
   @ffi.Int32()
   external int native_code;
 
-  static ffi.Pointer<ptyx_error> $allocate(
+  static ffi.Pointer<PtyxError> $allocate(
     ffi.Allocator $allocator, {
     required int struct_size,
     required int domain,
     required int kind,
     required int native_code,
-  }) => $allocator<ptyx_error>()
+  }) => $allocator<PtyxError>()
     ..ref.struct_size = struct_size
     ..ref.domain = domain
     ..ref.kind = kind
@@ -756,7 +725,7 @@ final class ptyx_error extends ffi.Struct {
 }
 
 /// Stable subsystem that reported an error.
-sealed class ptyx_error_domain {
+sealed class PtyxErrorDomain {
   /// No error domain.
   static const PTYX_ERROR_DOMAIN_NONE = 0;
 
@@ -786,7 +755,7 @@ sealed class ptyx_error_domain {
 }
 
 /// Stable category of an error.
-sealed class ptyx_error_kind {
+sealed class PtyxErrorKind {
   /// No error kind.
   static const PTYX_ERROR_NONE = 0;
 
@@ -818,8 +787,6 @@ sealed class ptyx_error_kind {
   static const PTYX_ERROR_KIND_ENUM_FORCE_32_BIT = 2147483647;
 }
 
-typedef ptyx_error_t = ptyx_error;
-
 /// @brief One event transferred from a runtime.
 ///
 /// The kind determines which fields carry values:
@@ -842,7 +809,7 @@ typedef ptyx_error_t = ptyx_error;
 /// Every successful next_event result must be released exactly once, including
 /// events with an invalid token. Copying and releasing an owning event twice is
 /// invalid.
-final class ptyx_event extends ffi.Struct {
+final class PtyxEvent extends ffi.Struct {
   /// < Caller-visible structure size.
   @ffi.Uint32()
   external int struct_size;
@@ -860,11 +827,11 @@ final class ptyx_event extends ffi.Struct {
   external int reserved0;
 
   /// < Originating session or spawn request.
-  @ptyx_session_t()
+  @PtyxSession()
   external int session;
 
   /// < Owning output token, or zero.
-  @ptyx_event_token_t()
+  @PtyxEventToken()
   external int token;
 
   /// < Immutable output bytes until release.
@@ -879,7 +846,7 @@ final class ptyx_event extends ffi.Struct {
   external int value;
 
   /// < Kind-specific value error.
-  external ptyx_error_t error;
+  external PtyxError error;
 
   /// < Must be zero.
   @ffi.Array.multi([2])
@@ -887,7 +854,7 @@ final class ptyx_event extends ffi.Struct {
 }
 
 /// Stable kind of an event transferred from a runtime.
-sealed class ptyx_event_kind {
+sealed class PtyxEventKind {
   /// Spawn committed and the session is ready for operations.
   static const PTYX_EVENT_SPAWN_READY = 1;
 
@@ -928,36 +895,9 @@ sealed class ptyx_event_kind {
   static const PTYX_EVENT_KIND_ENUM_FORCE_32_BIT = 2147483647;
 }
 
-typedef ptyx_event_t = ptyx_event;
-
 /// Generation-checked owning event identity.
-typedef ptyx_event_token_t = ffi.Uint64;
-typedef Dartptyx_event_token_t = int;
-
-/// @brief Runtime creation options.
-///
-/// On Unix, an empty broker_path selects the integrity-checked broker bundled
-/// with this library artifact. A nonempty path must name an executable broker
-/// compatible with the library. Windows ignores broker_path. Set flags and
-/// reserved fields to zero.
-final class ptyx_runtime_options extends ffi.Struct {
-  /// < Caller-visible structure size.
-  @ffi.Uint32()
-  external int struct_size;
-
-  /// < Must be zero.
-  @ffi.Uint32()
-  external int flags;
-
-  /// < Optional absolute Unix broker path.
-  external ptyx_bytes_view_t broker_path;
-
-  /// < Must be zero.
-  @ffi.Array.multi([4])
-  external ffi.Array<ffi.Uint64> reserved;
-}
-
-typedef ptyx_runtime_options_t = ptyx_runtime_options;
+typedef PtyxEventToken = ffi.Uint64;
+typedef DartPtyxEventToken = int;
 
 /// While the ABI major is zero, callers must require the exact packed version;
 /// development releases may replace layouts without a compatibility shim.
@@ -972,15 +912,38 @@ typedef ptyx_runtime_options_t = ptyx_runtime_options;
 /// required before declaring ABI 1.0.
 /// /
 /// /** Generation-checked runtime identity.
-typedef ptyx_runtime_t = ffi.Uint64;
-typedef Dartptyx_runtime_t = int;
+typedef PtyxRuntime = ffi.Uint64;
+typedef DartPtyxRuntime = int;
+
+/// @brief Runtime creation options.
+///
+/// On Unix, an empty broker_path selects the integrity-checked broker bundled
+/// with this library artifact. A nonempty path must name an executable broker
+/// compatible with the library. Windows ignores broker_path. Set flags and
+/// reserved fields to zero.
+final class PtyxRuntimeOptions extends ffi.Struct {
+  /// < Caller-visible structure size.
+  @ffi.Uint32()
+  external int struct_size;
+
+  /// < Must be zero.
+  @ffi.Uint32()
+  external int flags;
+
+  /// < Optional absolute Unix broker path.
+  external PtyxBytesView broker_path;
+
+  /// < Must be zero.
+  @ffi.Array.multi([4])
+  external ffi.Array<ffi.Uint64> reserved;
+}
 
 /// Generation-checked session identity.
-typedef ptyx_session_t = ffi.Uint64;
-typedef Dartptyx_session_t = int;
+typedef PtyxSession = ffi.Uint64;
+typedef DartPtyxSession = int;
 
 /// @brief PTY size in cells and optional pixels.
-final class ptyx_size extends ffi.Struct {
+final class PtyxSize extends ffi.Struct {
   /// < Terminal rows in the range 1..=32767.
   @ffi.Uint32()
   external int rows;
@@ -997,20 +960,18 @@ final class ptyx_size extends ffi.Struct {
   @ffi.Uint32()
   external int pixel_height;
 
-  static ffi.Pointer<ptyx_size> $allocate(
+  static ffi.Pointer<PtyxSize> $allocate(
     ffi.Allocator $allocator, {
     required int rows,
     required int columns,
     required int pixel_width,
     required int pixel_height,
-  }) => $allocator<ptyx_size>()
+  }) => $allocator<PtyxSize>()
     ..ref.rows = rows
     ..ref.columns = columns
     ..ref.pixel_width = pixel_width
     ..ref.pixel_height = pixel_height;
 }
-
-typedef ptyx_size_t = ptyx_size;
 
 /// @brief Spawn configuration.
 ///
@@ -1024,7 +985,7 @@ typedef ptyx_size_t = ptyx_size;
 /// graceful_close_timeout_us controls Unix graceful-close escalation and must
 /// not exceed 60000000. Windows accepts the value but begins Job Object
 /// termination immediately because it has no portable graceful request.
-final class ptyx_spawn_options extends ffi.Struct {
+final class PtyxSpawnOptions extends ffi.Struct {
   /// < Caller-visible structure size.
   @ffi.Uint32()
   external int struct_size;
@@ -1034,27 +995,27 @@ final class ptyx_spawn_options extends ffi.Struct {
   external int flags;
 
   /// < Executable path or lookup name.
-  external ptyx_bytes_view_t executable;
+  external PtyxBytesView executable;
 
   /// < Borrowed argument array.
-  external ffi.Pointer<ptyx_bytes_view_t> arguments;
+  external ffi.Pointer<PtyxBytesView> arguments;
 
   /// < Number of argument views.
   @ffi.Uint64()
   external int argument_count;
 
   /// < Borrowed NAME=VALUE array.
-  external ffi.Pointer<ptyx_bytes_view_t> environment;
+  external ffi.Pointer<PtyxBytesView> environment;
 
   /// < Number of environment views.
   @ffi.Uint64()
   external int environment_count;
 
   /// < Directory, or empty for current.
-  external ptyx_bytes_view_t working_directory;
+  external PtyxBytesView working_directory;
 
   /// < Initial terminal size.
-  external ptyx_size_t size;
+  external PtyxSize size;
 
   /// < Bounded accepted input bytes.
   @ffi.Uint64()
@@ -1073,10 +1034,8 @@ final class ptyx_spawn_options extends ffi.Struct {
   external ffi.Array<ffi.Uint64> reserved;
 }
 
-typedef ptyx_spawn_options_t = ptyx_spawn_options;
-
 /// Stable result of a ptyx operation.
-sealed class ptyx_status {
+sealed class PtyxStatus {
   /// Operation completed successfully.
   static const PTYX_STATUS_OK = 0;
 
@@ -1116,3 +1075,33 @@ sealed class ptyx_status {
   /// Reserved value that fixes the public enum representation at 32 bits.
   static const PTYX_STATUS_ENUM_FORCE_32_BIT = 2147483647;
 }
+
+/// @deprecated Use PtydAdapter.
+typedef ptyd_adapter_t = PtydAdapter;
+
+/// @deprecated Use PtyxBytesView.
+typedef ptyx_bytes_view_t = PtyxBytesView;
+
+/// @deprecated Use PtyxError.
+typedef ptyx_error_t = PtyxError;
+
+/// @deprecated Use PtyxEvent.
+typedef ptyx_event_t = PtyxEvent;
+
+/// @deprecated Use PtyxEventToken.
+typedef ptyx_event_token_t = PtyxEventToken;
+
+/// @deprecated Use PtyxRuntimeOptions.
+typedef ptyx_runtime_options_t = PtyxRuntimeOptions;
+
+/// @deprecated Use PtyxRuntime.
+typedef ptyx_runtime_t = PtyxRuntime;
+
+/// @deprecated Use PtyxSession.
+typedef ptyx_session_t = PtyxSession;
+
+/// @deprecated Use PtyxSize.
+typedef ptyx_size_t = PtyxSize;
+
+/// @deprecated Use PtyxSpawnOptions.
+typedef ptyx_spawn_options_t = PtyxSpawnOptions;

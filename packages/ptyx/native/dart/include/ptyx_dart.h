@@ -16,7 +16,9 @@ extern "C" {
 #endif
 
 /** Generation-checked identity of one Dart event-pump adapter. */
-typedef uint64_t ptyd_adapter_t;
+typedef uint64_t PtydAdapter;
+/** @deprecated Use PtydAdapter. */
+typedef PtydAdapter ptyd_adapter_t;
 
 /** Invalid or empty Dart adapter handle. */
 #define PTYD_INVALID_ADAPTER UINT64_C(0)
@@ -27,7 +29,7 @@ typedef uint64_t ptyd_adapter_t;
  * @param[in] api_data Dart NativeApi.initializeApiDLData.
  * @return PTYX_STATUS_OK or PTYX_STATUS_INVALID_ARGUMENT.
  */
-PTYX_EXPORT ptyx_status_t PTYX_CALL ptyd_initialize(void *api_data);
+PTYX_EXPORT PtyxStatus PTYX_CALL ptyd_initialize(void *api_data);
 
 /**
  * @brief Attaches the sole event pump and cleanup owner to a runtime.
@@ -50,10 +52,10 @@ PTYX_EXPORT ptyx_status_t PTYX_CALL ptyd_initialize(void *api_data);
  *
  * After success, detach or finalization owns runtime shutdown and release.
  */
-PTYX_EXPORT ptyx_status_t PTYX_CALL ptyd_runtime_attach(ptyx_runtime_t runtime,
-                                                        int64_t port,
-                                                        ptyd_adapter_t *adapter,
-                                                        ptyx_error_t *error);
+PTYX_EXPORT PtyxStatus PTYX_CALL ptyd_runtime_attach(PtyxRuntime runtime,
+                                                     int64_t port,
+                                                     PtydAdapter *adapter,
+                                                     PtyxError *error);
 
 /**
  * @brief Returns capabilities for an attached Dart runtime adapter.
@@ -63,8 +65,8 @@ PTYX_EXPORT ptyx_status_t PTYX_CALL ptyd_runtime_attach(ptyx_runtime_t runtime,
  * @param[out] error Optional initialized error destination.
  * @return PTYX_STATUS_OK, PTYX_STATUS_STALE_HANDLE, or a typed failure.
  */
-PTYX_EXPORT ptyx_status_t PTYX_CALL ptyd_runtime_capabilities(
-    ptyd_adapter_t adapter, uint32_t *capabilities, ptyx_error_t *error);
+PTYX_EXPORT PtyxStatus PTYX_CALL ptyd_runtime_capabilities(
+    PtydAdapter adapter, uint32_t *capabilities, PtyxError *error);
 
 /**
  * @brief Atomically admits and transfers a session spawn to the adapter.
@@ -79,9 +81,9 @@ PTYX_EXPORT ptyx_status_t PTYX_CALL ptyd_runtime_capabilities(
  * @param[out] error Optional initialized error destination.
  * @return PTYX_STATUS_OK or a typed failure.
  */
-PTYX_EXPORT ptyx_status_t PTYX_CALL ptyd_session_spawn_start(
-    ptyd_adapter_t adapter, const ptyx_spawn_options_t *options,
-    ptyx_session_t *session, ptyx_error_t *error);
+PTYX_EXPORT PtyxStatus PTYX_CALL ptyd_session_spawn_start(
+    PtydAdapter adapter, const PtyxSpawnOptions *options,
+    PtyxSession *session, PtyxError *error);
 
 /**
  * @brief Explicitly abandons and releases a tracked session.
@@ -96,8 +98,8 @@ PTYX_EXPORT ptyx_status_t PTYX_CALL ptyd_session_spawn_start(
  * A busy or internal result leaves ownership tracked so the native cleanup
  * worker can retry it.
  */
-PTYX_EXPORT ptyx_status_t PTYX_CALL ptyd_session_release(
-    ptyd_adapter_t adapter, ptyx_session_t *session, ptyx_error_t *error);
+PTYX_EXPORT PtyxStatus PTYX_CALL ptyd_session_release(
+    PtydAdapter adapter, PtyxSession *session, PtyxError *error);
 
 /**
  * @brief Acknowledges one output event after Dart consumes its copied bytes.
@@ -110,9 +112,9 @@ PTYX_EXPORT ptyx_status_t PTYX_CALL ptyd_session_release(
  * @param[out] error Optional initialized error destination.
  * @return PTYX_STATUS_OK or a typed failure.
  */
-PTYX_EXPORT ptyx_status_t PTYX_CALL ptyd_event_ack(ptyd_adapter_t adapter,
-                                                   ptyx_event_token_t token,
-                                                   ptyx_error_t *error);
+PTYX_EXPORT PtyxStatus PTYX_CALL ptyd_event_ack(PtydAdapter adapter,
+                                                PtyxEventToken token,
+                                                PtyxError *error);
 
 /**
  * @brief Stops the pump and releases every resource transferred to it.
@@ -126,8 +128,8 @@ PTYX_EXPORT ptyx_status_t PTYX_CALL ptyd_event_ack(ptyd_adapter_t adapter,
  * @return PTYX_STATUS_OK or a typed failure. A failure leaves the adapter
  * registered so the caller can retry cleanup.
  */
-PTYX_EXPORT ptyx_status_t PTYX_CALL ptyd_runtime_detach(ptyd_adapter_t *adapter,
-                                                        ptyx_error_t *error);
+PTYX_EXPORT PtyxStatus PTYX_CALL ptyd_runtime_detach(PtydAdapter *adapter,
+                                                     PtyxError *error);
 
 /**
  * @brief Aborts a Dart adapter after a protocol or infrastructure failure.
@@ -141,8 +143,8 @@ PTYX_EXPORT ptyx_status_t PTYX_CALL ptyd_runtime_detach(ptyd_adapter_t *adapter,
  * @param[out] error Optional initialized error destination.
  * @return PTYX_STATUS_OK or a typed failure.
  */
-PTYX_EXPORT ptyx_status_t PTYX_CALL ptyd_runtime_abort(ptyd_adapter_t *adapter,
-                                                       ptyx_error_t *error);
+PTYX_EXPORT PtyxStatus PTYX_CALL ptyd_runtime_abort(PtydAdapter *adapter,
+                                                    PtyxError *error);
 
 /**
  * @brief Native finalizer for an adapter handle encoded as a pointer address.

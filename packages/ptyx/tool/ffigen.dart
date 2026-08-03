@@ -71,7 +71,9 @@ FfiGenerator _generator() => FfiGenerator(
 
 bool _includeType(Declaration declaration) =>
     declaration.originalName.startsWith('ptyx_') ||
-    declaration.originalName.startsWith('ptyd_');
+    declaration.originalName.startsWith('ptyd_') ||
+    declaration.originalName.startsWith('Ptyx') ||
+    declaration.originalName.startsWith('Ptyd');
 
 FfiGenerator _testGenerator() => FfiGenerator(
   output: Output(

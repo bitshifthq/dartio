@@ -58,11 +58,17 @@ extern "C" {
  * required before declaring ABI 1.0.
  */
 /** Generation-checked runtime identity. */
-typedef uint64_t ptyx_runtime_t;
+typedef uint64_t PtyxRuntime;
+/** @deprecated Use PtyxRuntime. */
+typedef PtyxRuntime ptyx_runtime_t;
 /** Generation-checked session identity. */
-typedef uint64_t ptyx_session_t;
+typedef uint64_t PtyxSession;
+/** @deprecated Use PtyxSession. */
+typedef PtyxSession ptyx_session_t;
 /** Generation-checked owning event identity. */
-typedef uint64_t ptyx_event_token_t;
+typedef uint64_t PtyxEventToken;
+/** @deprecated Use PtyxEventToken. */
+typedef PtyxEventToken ptyx_event_token_t;
 
 /** Invalid or empty runtime handle. */
 #define PTYX_INVALID_RUNTIME UINT64_C(0)
@@ -72,7 +78,7 @@ typedef uint64_t ptyx_event_token_t;
 #define PTYX_INVALID_EVENT_TOKEN UINT64_C(0)
 
 /** Stable result of a ptyx operation. */
-typedef enum ptyx_status {
+typedef enum PtyxStatus {
   /** Operation completed successfully. */
   PTYX_STATUS_OK = 0,
   /** An argument or caller-sized structure is invalid. */
@@ -99,7 +105,9 @@ typedef enum ptyx_status {
   PTYX_STATUS_BUFFER_TOO_SMALL = 11,
   /** Reserved value that fixes the public enum representation at 32 bits. */
   PTYX_STATUS_ENUM_FORCE_32_BIT = INT32_MAX
-} ptyx_status_t;
+} PtyxStatus;
+/** @deprecated Use PtyxStatus. */
+typedef PtyxStatus ptyx_status_t;
 
 /** Unix signal delivery is available. */
 #define PTYX_CAPABILITY_SIGNALS UINT32_C(1)
@@ -128,7 +136,7 @@ PTYX_EXPORT uint32_t PTYX_CALL ptyx_abi_version(void);
 /** @{ */
 
 /** Stable subsystem that reported an error. */
-typedef enum ptyx_error_domain {
+typedef enum PtyxErrorDomain {
   /** No error domain. */
   PTYX_ERROR_DOMAIN_NONE = 0,
   /** Caller input validation failure. */
@@ -147,10 +155,12 @@ typedef enum ptyx_error_domain {
   PTYX_ERROR_DOMAIN_OS = 7,
   /** Reserved value that fixes the public enum representation at 32 bits. */
   PTYX_ERROR_DOMAIN_ENUM_FORCE_32_BIT = INT32_MAX
-} ptyx_error_domain_t;
+} PtyxErrorDomain;
+/** @deprecated Use PtyxErrorDomain. */
+typedef PtyxErrorDomain ptyx_error_domain_t;
 
 /** Stable category of an error. */
-typedef enum ptyx_error_kind {
+typedef enum PtyxErrorKind {
   /** No error kind. */
   PTYX_ERROR_NONE = 0,
   /** Invalid caller value or layout. */
@@ -171,7 +181,9 @@ typedef enum ptyx_error_kind {
   PTYX_ERROR_INFRASTRUCTURE_LOST = 8,
   /** Reserved value that fixes the public enum representation at 32 bits. */
   PTYX_ERROR_KIND_ENUM_FORCE_32_BIT = INT32_MAX
-} ptyx_error_kind_t;
+} PtyxErrorKind;
+/** @deprecated Use PtyxErrorKind. */
+typedef PtyxErrorKind ptyx_error_kind_t;
 
 /**
  * @brief Stable value describing one failure.
@@ -182,12 +194,14 @@ typedef enum ptyx_error_kind {
  * compatible ABI growth. Initialize the complete structure to zero and set
  * struct_size before passing it to ptyx.
  */
-typedef struct ptyx_error {
+typedef struct PtyxError {
   uint32_t struct_size;       /**< Caller-visible structure size. */
-  ptyx_error_domain_t domain; /**< PTYX_ERROR_DOMAIN_* value. */
-  ptyx_error_kind_t kind;     /**< PTYX_ERROR_* value. */
+  PtyxErrorDomain domain; /**< PTYX_ERROR_DOMAIN_* value. */
+  PtyxErrorKind kind;     /**< PTYX_ERROR_* value. */
   int32_t native_code;        /**< Optional errno or Win32 status, or zero. */
-} ptyx_error_t;
+} PtyxError;
+/** @deprecated Use PtyxError. */
+typedef PtyxError ptyx_error_t;
 
 /**
  * @brief Formats an error into caller-owned UTF-8 storage.
@@ -207,7 +221,7 @@ typedef struct ptyx_error {
  * @par Thread safety
  * Safe to call concurrently.
  */
-PTYX_EXPORT ptyx_status_t PTYX_CALL ptyx_error_format(const ptyx_error_t *error,
+PTYX_EXPORT PtyxStatus PTYX_CALL ptyx_error_format(const PtyxError *error,
                                                       uint8_t *target,
                                                       uint64_t capacity,
                                                       uint64_t *required);
@@ -218,10 +232,12 @@ PTYX_EXPORT ptyx_status_t PTYX_CALL ptyx_error_format(const ptyx_error_t *error,
 /** @{ */
 
 /** @brief Immutable borrowed byte sequence. */
-typedef struct ptyx_bytes_view {
+typedef struct PtyxBytesView {
   const uint8_t *data; /**< Borrowed bytes, or NULL when length is zero. */
   uint64_t length;     /**< Number of readable bytes at data. */
-} ptyx_bytes_view_t;
+} PtyxBytesView;
+/** @deprecated Use PtyxBytesView. */
+typedef PtyxBytesView ptyx_bytes_view_t;
 
 /**
  * @brief Runtime creation options.
@@ -231,12 +247,14 @@ typedef struct ptyx_bytes_view {
  * compatible with the library. Windows ignores broker_path. Set flags and
  * reserved fields to zero.
  */
-typedef struct ptyx_runtime_options {
+typedef struct PtyxRuntimeOptions {
   uint32_t struct_size;          /**< Caller-visible structure size. */
   uint32_t flags;                /**< Must be zero. */
-  ptyx_bytes_view_t broker_path; /**< Optional absolute Unix broker path. */
+  PtyxBytesView broker_path; /**< Optional absolute Unix broker path. */
   uint64_t reserved[4];          /**< Must be zero. */
-} ptyx_runtime_options_t;
+} PtyxRuntimeOptions;
+/** @deprecated Use PtyxRuntimeOptions. */
+typedef PtyxRuntimeOptions ptyx_runtime_options_t;
 
 /**
  * @brief Creates an isolated PTY runtime.
@@ -254,9 +272,9 @@ typedef struct ptyx_runtime_options {
  * @par Thread safety
  * Safe to call concurrently.
  */
-PTYX_EXPORT ptyx_status_t PTYX_CALL
-ptyx_runtime_create(const ptyx_runtime_options_t *options,
-                    ptyx_runtime_t *runtime, ptyx_error_t *error);
+PTYX_EXPORT PtyxStatus PTYX_CALL
+ptyx_runtime_create(const PtyxRuntimeOptions *options,
+                    PtyxRuntime *runtime, PtyxError *error);
 
 /**
  * @brief Returns capabilities implemented by a runtime.
@@ -269,10 +287,10 @@ ptyx_runtime_create(const ptyx_runtime_options_t *options,
  * @par Thread safety
  * Safe to call concurrently.
  */
-PTYX_EXPORT ptyx_status_t PTYX_CALL ptyx_runtime_capabilities(
-    ptyx_runtime_t runtime, uint32_t *capabilities, ptyx_error_t *error);
+PTYX_EXPORT PtyxStatus PTYX_CALL ptyx_runtime_capabilities(
+    PtyxRuntime runtime, uint32_t *capabilities, PtyxError *error);
 
-struct ptyx_event;
+struct PtyxEvent;
 
 /**
  * @brief Waits for and transfers ownership of the next fair runtime event.
@@ -293,8 +311,8 @@ struct ptyx_event;
  * @par Thread safety
  * Other runtime and session functions may run concurrently.
  */
-PTYX_EXPORT ptyx_status_t PTYX_CALL ptyx_runtime_next_event(
-    ptyx_runtime_t runtime, struct ptyx_event *event, ptyx_error_t *error);
+PTYX_EXPORT PtyxStatus PTYX_CALL ptyx_runtime_next_event(
+    PtyxRuntime runtime, struct PtyxEvent *event, PtyxError *error);
 
 /**
  * @brief Starts deterministic shutdown and wakes the event consumer.
@@ -308,8 +326,8 @@ PTYX_EXPORT ptyx_status_t PTYX_CALL ptyx_runtime_next_event(
  * @par Thread safety
  * Do not race this function with another shutdown or release.
  */
-PTYX_EXPORT ptyx_status_t PTYX_CALL
-ptyx_runtime_shutdown(ptyx_runtime_t runtime, ptyx_error_t *error);
+PTYX_EXPORT PtyxStatus PTYX_CALL
+ptyx_runtime_shutdown(PtyxRuntime runtime, PtyxError *error);
 
 /**
  * @brief Releases a shut-down runtime handle.
@@ -325,8 +343,8 @@ ptyx_runtime_shutdown(ptyx_runtime_t runtime, ptyx_error_t *error);
  * @par Thread safety
  * Do not race release with any operation using this runtime.
  */
-PTYX_EXPORT ptyx_status_t PTYX_CALL
-ptyx_runtime_release(ptyx_runtime_t *runtime, ptyx_error_t *error);
+PTYX_EXPORT PtyxStatus PTYX_CALL
+ptyx_runtime_release(PtyxRuntime *runtime, PtyxError *error);
 
 /** @} */
 
@@ -343,12 +361,14 @@ ptyx_runtime_release(ptyx_runtime_t *runtime, ptyx_error_t *error);
 #define PTYX_MODE_SIGNALS UINT32_C(4)
 
 /** @brief PTY size in cells and optional pixels. */
-typedef struct ptyx_size {
+typedef struct PtyxSize {
   uint32_t rows;         /**< Terminal rows in the range 1..=32767. */
   uint32_t columns;      /**< Terminal columns in the range 1..=32767. */
   uint32_t pixel_width;  /**< Optional pixel width in 0..=65535. */
   uint32_t pixel_height; /**< Optional pixel height in 0..=65535. */
-} ptyx_size_t;
+} PtyxSize;
+/** @deprecated Use PtyxSize. */
+typedef PtyxSize ptyx_size_t;
 
 /**
  * @brief Spawn configuration.
@@ -364,21 +384,23 @@ typedef struct ptyx_size {
  * not exceed 60000000. Windows accepts the value but begins Job Object
  * termination immediately because it has no portable graceful request.
  */
-typedef struct ptyx_spawn_options {
+typedef struct PtyxSpawnOptions {
   uint32_t struct_size;                 /**< Caller-visible structure size. */
   uint32_t flags;                       /**< PTYX_SPAWN_* bits. */
-  ptyx_bytes_view_t executable;         /**< Executable path or lookup name. */
-  const ptyx_bytes_view_t *arguments;   /**< Borrowed argument array. */
+  PtyxBytesView executable;         /**< Executable path or lookup name. */
+  const PtyxBytesView *arguments;   /**< Borrowed argument array. */
   uint64_t argument_count;              /**< Number of argument views. */
-  const ptyx_bytes_view_t *environment; /**< Borrowed NAME=VALUE array. */
+  const PtyxBytesView *environment; /**< Borrowed NAME=VALUE array. */
   uint64_t environment_count;           /**< Number of environment views. */
-  ptyx_bytes_view_t working_directory;  /**< Directory, or empty for current. */
-  ptyx_size_t size;                     /**< Initial terminal size. */
+  PtyxBytesView working_directory;  /**< Directory, or empty for current. */
+  PtyxSize size;                     /**< Initial terminal size. */
   uint64_t input_capacity;              /**< Bounded accepted input bytes. */
   uint64_t output_capacity;             /**< Bounded retained output bytes. */
   uint64_t graceful_close_timeout_us;   /**< Unix TERM-to-force interval. */
   uint64_t reserved[4];                 /**< Must be zero. */
-} ptyx_spawn_options_t;
+} PtyxSpawnOptions;
+/** @deprecated Use PtyxSpawnOptions. */
+typedef PtyxSpawnOptions ptyx_spawn_options_t;
 
 /**
  * @brief Starts asynchronous PTY session creation.
@@ -400,9 +422,9 @@ typedef struct ptyx_spawn_options {
  * @par Thread safety
  * Safe to call concurrently.
  */
-PTYX_EXPORT ptyx_status_t PTYX_CALL ptyx_session_spawn_start(
-    ptyx_runtime_t runtime, const ptyx_spawn_options_t *options,
-    ptyx_session_t *session, ptyx_error_t *error);
+PTYX_EXPORT PtyxStatus PTYX_CALL ptyx_session_spawn_start(
+    PtyxRuntime runtime, const PtyxSpawnOptions *options,
+    PtyxSession *session, PtyxError *error);
 
 /**
  * @brief Accepts a complete input buffer or none of it.
@@ -425,10 +447,10 @@ PTYX_EXPORT ptyx_status_t PTYX_CALL ptyx_session_spawn_start(
  * Safe to call concurrently. Accepted writes are FIFO by successful
  * admission linearization order.
  */
-PTYX_EXPORT ptyx_status_t PTYX_CALL ptyx_session_write(ptyx_session_t session,
+PTYX_EXPORT PtyxStatus PTYX_CALL ptyx_session_write(PtyxSession session,
                                                        const uint8_t *bytes,
                                                        uint64_t length,
-                                                       ptyx_error_t *error);
+                                                       PtyxError *error);
 
 /**
  * @brief Commits drain-and-discard for buffered and future output.
@@ -441,8 +463,8 @@ PTYX_EXPORT ptyx_status_t PTYX_CALL ptyx_session_write(ptyx_session_t session,
  * caller. Repeating a successful cancellation for the same live session
  * succeeds without changing state.
  */
-PTYX_EXPORT ptyx_status_t PTYX_CALL
-ptyx_session_cancel_output(ptyx_session_t session, ptyx_error_t *error);
+PTYX_EXPORT PtyxStatus PTYX_CALL
+ptyx_session_cancel_output(PtyxSession session, PtyxError *error);
 
 /**
  * @brief Resizes a live PTY.
@@ -452,9 +474,9 @@ ptyx_session_cancel_output(ptyx_session_t session, ptyx_error_t *error);
  * @param[out] error Optional initialized error destination.
  * @return PTYX_STATUS_OK or a typed failure status.
  */
-PTYX_EXPORT ptyx_status_t PTYX_CALL ptyx_session_resize(ptyx_session_t session,
-                                                        const ptyx_size_t *size,
-                                                        ptyx_error_t *error);
+PTYX_EXPORT PtyxStatus PTYX_CALL ptyx_session_resize(PtyxSession session,
+                                                     const PtyxSize *size,
+                                                     PtyxError *error);
 
 /**
  * @brief Requests termination of the owned terminal job.
@@ -467,9 +489,9 @@ PTYX_EXPORT ptyx_status_t PTYX_CALL ptyx_session_resize(ptyx_session_t session,
  * @param[out] error Optional initialized error destination.
  * @return PTYX_STATUS_OK, PTYX_STATUS_UNSUPPORTED, or a typed failure.
  */
-PTYX_EXPORT ptyx_status_t PTYX_CALL
-ptyx_session_terminate(ptyx_session_t session, int32_t signal,
-                       uint32_t *delivered, ptyx_error_t *error);
+PTYX_EXPORT PtyxStatus PTYX_CALL
+ptyx_session_terminate(PtyxSession session, int32_t signal,
+                       uint32_t *delivered, PtyxError *error);
 
 /**
  * @brief Returns the current terminal dimensions.
@@ -479,8 +501,8 @@ ptyx_session_terminate(ptyx_session_t session, int32_t signal,
  * @param[out] error Optional initialized error destination.
  * @return PTYX_STATUS_OK or a typed query failure.
  */
-PTYX_EXPORT ptyx_status_t PTYX_CALL ptyx_session_get_size(
-    ptyx_session_t session, ptyx_size_t *size, ptyx_error_t *error);
+PTYX_EXPORT PtyxStatus PTYX_CALL ptyx_session_get_size(
+    PtyxSession session, PtyxSize *size, PtyxError *error);
 
 /**
  * @brief Returns the direct-child process identifier.
@@ -491,8 +513,8 @@ PTYX_EXPORT ptyx_status_t PTYX_CALL ptyx_session_get_size(
  * @param[out] error Optional initialized error destination.
  * @return PTYX_STATUS_OK or a typed query failure.
  */
-PTYX_EXPORT ptyx_status_t PTYX_CALL ptyx_session_get_child_pid(
-    ptyx_session_t session, int64_t *pid, ptyx_error_t *error);
+PTYX_EXPORT PtyxStatus PTYX_CALL ptyx_session_get_child_pid(
+    PtyxSession session, int64_t *pid, PtyxError *error);
 
 /**
  * @brief Returns terminal mode bits.
@@ -503,8 +525,8 @@ PTYX_EXPORT ptyx_status_t PTYX_CALL ptyx_session_get_child_pid(
  * @return PTYX_STATUS_OK, PTYX_STATUS_UNSUPPORTED when terminal modes are not
  * available, or a typed query failure.
  */
-PTYX_EXPORT ptyx_status_t PTYX_CALL ptyx_session_get_term_mode(
-    ptyx_session_t session, uint32_t *mode, ptyx_error_t *error);
+PTYX_EXPORT PtyxStatus PTYX_CALL ptyx_session_get_term_mode(
+    PtyxSession session, uint32_t *mode, PtyxError *error);
 
 /**
  * @brief Returns the controller terminal name in caller-owned storage.
@@ -521,9 +543,9 @@ PTYX_EXPORT ptyx_status_t PTYX_CALL ptyx_session_get_term_mode(
  * Passing a null name with zero capacity performs a size query. The returned
  * bytes are not NUL terminated.
  */
-PTYX_EXPORT ptyx_status_t PTYX_CALL ptyx_session_get_tty_name(
-    ptyx_session_t session, uint8_t *name, uint64_t capacity,
-    uint64_t *required, ptyx_error_t *error);
+PTYX_EXPORT PtyxStatus PTYX_CALL ptyx_session_get_tty_name(
+    PtyxSession session, uint8_t *name, uint64_t capacity,
+    uint64_t *required, PtyxError *error);
 
 /**
  * @brief Enables or disables terminal mode-change observation.
@@ -537,8 +559,8 @@ PTYX_EXPORT ptyx_status_t PTYX_CALL ptyx_session_get_tty_name(
  * PTYX_EVENT_MODE_CHANGED events. Disabling it stops native polling and does
  * not remove an event already transferred to the caller.
  */
-PTYX_EXPORT ptyx_status_t PTYX_CALL ptyx_session_observe_mode(
-    ptyx_session_t session, uint32_t enabled, ptyx_error_t *error);
+PTYX_EXPORT PtyxStatus PTYX_CALL ptyx_session_observe_mode(
+    PtyxSession session, uint32_t enabled, PtyxError *error);
 
 /**
  * @brief Starts or joins session close.
@@ -550,8 +572,8 @@ PTYX_EXPORT ptyx_status_t PTYX_CALL ptyx_session_observe_mode(
  * Exactly one PTYX_EVENT_CLOSE_COMPLETE event reports whether every accepted
  * input byte and native owner reached a known terminal state.
  */
-PTYX_EXPORT ptyx_status_t PTYX_CALL ptyx_session_close(ptyx_session_t session,
-                                                       ptyx_error_t *error);
+PTYX_EXPORT PtyxStatus PTYX_CALL ptyx_session_close(PtyxSession session,
+                                                    PtyxError *error);
 
 /**
  * @brief Releases or abandons a session handle.
@@ -565,8 +587,8 @@ PTYX_EXPORT ptyx_status_t PTYX_CALL ptyx_session_close(ptyx_session_t session,
  * Release is nonblocking. If deterministic close has not converged, native
  * ownership continues cleanup independently.
  */
-PTYX_EXPORT ptyx_status_t PTYX_CALL
-ptyx_session_release(ptyx_session_t *session, ptyx_error_t *error);
+PTYX_EXPORT PtyxStatus PTYX_CALL
+ptyx_session_release(PtyxSession *session, PtyxError *error);
 
 /** @} */
 
@@ -574,7 +596,7 @@ ptyx_session_release(ptyx_session_t *session, ptyx_error_t *error);
 /** @{ */
 
 /** Stable kind of an event transferred from a runtime. */
-typedef enum ptyx_event_kind {
+typedef enum PtyxEventKind {
   /** Spawn committed and the session is ready for operations. */
   PTYX_EVENT_SPAWN_READY = 1,
   /** Spawn failed and its attempted ownership was reclaimed. */
@@ -601,7 +623,9 @@ typedef enum ptyx_event_kind {
   PTYX_EVENT_EXIT_FAILED = 12,
   /** Reserved value that fixes the public enum representation at 32 bits. */
   PTYX_EVENT_KIND_ENUM_FORCE_32_BIT = INT32_MAX
-} ptyx_event_kind_t;
+} PtyxEventKind;
+/** @deprecated Use PtyxEventKind. */
+typedef PtyxEventKind ptyx_event_kind_t;
 
 /** Close lost accepted input. */
 #define PTYX_EVENT_CLOSE_INPUT_FAILED UINT32_C(1)
@@ -634,19 +658,21 @@ typedef enum ptyx_event_kind {
  * events with an invalid token. Copying and releasing an owning event twice is
  * invalid.
  */
-typedef struct ptyx_event {
+typedef struct PtyxEvent {
   uint32_t struct_size;     /**< Caller-visible structure size. */
-  ptyx_event_kind_t kind;   /**< PTYX_EVENT_* value. */
+  PtyxEventKind kind;   /**< PTYX_EVENT_* value. */
   uint32_t flags;           /**< Kind-specific PTYX_EVENT_* bits. */
   uint32_t reserved0;       /**< Must be zero. */
-  ptyx_session_t session;   /**< Originating session or spawn request. */
-  ptyx_event_token_t token; /**< Owning output token, or zero. */
+  PtyxSession session;   /**< Originating session or spawn request. */
+  PtyxEventToken token; /**< Owning output token, or zero. */
   const uint8_t *data;      /**< Immutable output bytes until release. */
   uint64_t data_length;     /**< Number of readable bytes at data. */
   int64_t value;            /**< Kind-specific signed value. */
-  ptyx_error_t error;       /**< Kind-specific value error. */
+  PtyxError error;       /**< Kind-specific value error. */
   uint64_t reserved[2];     /**< Must be zero. */
-} ptyx_event_t;
+} PtyxEvent;
+/** @deprecated Use PtyxEvent. */
+typedef PtyxEvent ptyx_event_t;
 
 /**
  * @brief Releases one transferred event and its output credit.
@@ -661,8 +687,8 @@ typedef struct ptyx_event {
  * @par Thread safety
  * Safe to call from a different thread than event receipt.
  */
-PTYX_EXPORT ptyx_status_t PTYX_CALL ptyx_event_release(ptyx_event_t *event,
-                                                       ptyx_error_t *error);
+PTYX_EXPORT PtyxStatus PTYX_CALL ptyx_event_release(PtyxEvent *event,
+                                                    PtyxError *error);
 
 /** @} */
 

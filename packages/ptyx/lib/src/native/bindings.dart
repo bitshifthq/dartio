@@ -13,7 +13,7 @@ int abiVersion() => ptyx_abi_version();
 
 void initializeApi(int apiData) {
   final status = ptyd_initialize(Pointer.fromAddress(apiData));
-  if (status != ptyx_status.PTYX_STATUS_OK) {
+  if (status != PtyxStatus.PTYX_STATUS_OK) {
     throw exceptionFromStatus(status, operation: 'initialize');
   }
 }
@@ -22,7 +22,7 @@ int runtimeCreate() {
   return _call(
     'runtime',
     (error, check) => using((arena) {
-      final runtime = arena<ptyx_runtime_t>();
+      final runtime = arena<PtyxRuntime>();
       final status = ptyx_runtime_create(nullptr, runtime, error);
       check(status);
       return runtime.value;
@@ -34,7 +34,7 @@ int runtimeAttach(int runtime, int port) {
   return _call(
     'controller',
     (error, check) => using((arena) {
-      final adapter = arena<ptyd_adapter_t>();
+      final adapter = arena<PtydAdapter>();
       final status = ptyd_runtime_attach(runtime, port, adapter, error);
       check(status);
       return adapter.value;
@@ -62,7 +62,7 @@ void runtimeShutdown(int runtime) => _call(
 void runtimeRelease(int runtime) => _call(
   'close',
   (error, check) => using((arena) {
-    final handle = arena<ptyx_runtime_t>()..value = runtime;
+    final handle = arena<PtyxRuntime>()..value = runtime;
     check(ptyx_runtime_release(handle, error));
   }),
 );
@@ -70,7 +70,7 @@ void runtimeRelease(int runtime) => _call(
 void runtimeDetach(int adapter) => _call(
   'close',
   (error, check) => using((arena) {
-    final handle = arena<ptyd_adapter_t>()..value = adapter;
+    final handle = arena<PtydAdapter>()..value = adapter;
     check(ptyd_runtime_detach(handle, error));
   }),
 );
@@ -78,9 +78,9 @@ void runtimeDetach(int adapter) => _call(
 int spawnStart(int adapter, SpawnRequest request) {
   return _call('spawn', (error, check) {
     return using((arena) {
-      final options = arena<ptyx_spawn_options_t>();
+      final options = arena<PtyxSpawnOptions>();
       options.ref
-        ..struct_size = sizeOf<ptyx_spawn_options_t>()
+        ..struct_size = sizeOf<PtyxSpawnOptions>()
         ..flags = request.inheritEnvironment
             ? PTYX_SPAWN_INHERIT_ENVIRONMENT
             : 0
@@ -98,16 +98,14 @@ int spawnStart(int adapter, SpawnRequest request) {
       );
       options.ref.arguments = _views(arena, request.arguments);
       options.ref.environment = _views(arena, request.environment);
-      options.ref.size = ptyx_size
-          .$allocate(
-            arena,
-            rows: request.size.rows,
-            columns: request.size.columns,
-            pixel_width: request.size.pixelWidth,
-            pixel_height: request.size.pixelHeight,
-          )
-          .ref;
-      final session = arena<ptyx_session_t>();
+      options.ref.size = PtyxSize.$allocate(
+        arena,
+        rows: request.size.rows,
+        columns: request.size.columns,
+        pixel_width: request.size.pixelWidth,
+        pixel_height: request.size.pixelHeight,
+      ).ref;
+      final session = arena<PtyxSession>();
       final status = ptyd_session_spawn_start(adapter, options, session, error);
       check(status);
       return session.value;
@@ -117,15 +115,14 @@ int spawnStart(int adapter, SpawnRequest request) {
 
 void sessionWrite(int session, Uint8List data) {
   using((arena) {
-    final error = arena<ptyx_error_t>()
-      ..ref.struct_size = sizeOf<ptyx_error_t>();
+    final error = arena<PtyxError>()..ref.struct_size = sizeOf<PtyxError>();
     final status = ptyx_session_write(
       session,
       data.address,
       data.length,
       error,
     );
-    if (status != ptyx_status.PTYX_STATUS_OK) {
+    if (status != PtyxStatus.PTYX_STATUS_OK) {
       throw exceptionFromNative(status, error, operation: 'write');
     }
   });
@@ -139,7 +136,7 @@ void sessionCancelOutput(int session) => _call(
 void sessionResize(int session, PtySize size) =>
     _call('resize', (error, check) {
       using((arena) {
-        final nativeSize = ptyx_size.$allocate(
+        final nativeSize = PtyxSize.$allocate(
           arena,
           rows: size.rows,
           columns: size.columns,
@@ -163,7 +160,7 @@ bool sessionTerminate(int session, int signal) {
 PtySize sessionSize(int session) {
   return _call('size', (error, check) {
     return using((arena) {
-      final size = arena<ptyx_size_t>();
+      final size = arena<PtyxSize>();
       check(ptyx_session_get_size(session, size, error));
       return PtySize(
         rows: size.ref.rows,
@@ -206,10 +203,10 @@ String? sessionTtyName(int session) {
         required,
         error,
       );
-      if (status == ptyx_status.PTYX_STATUS_OK && required.value == 0) {
+      if (status == PtyxStatus.PTYX_STATUS_OK && required.value == 0) {
         return null;
       }
-      if (status != ptyx_status.PTYX_STATUS_BUFFER_TOO_SMALL) {
+      if (status != PtyxStatus.PTYX_STATUS_BUFFER_TOO_SMALL) {
         check(status);
       }
       final bytes = arena<Uint8>(required.value);
@@ -237,7 +234,7 @@ void sessionClose(int session) =>
 
 void runtimeAbort(int adapter) => _call('controller', (error, check) {
   using((arena) {
-    final handle = arena<ptyd_adapter_t>()..value = adapter;
+    final handle = arena<PtydAdapter>()..value = adapter;
     check(ptyd_runtime_abort(handle, error));
   });
 });
@@ -251,9 +248,9 @@ void sessionRelease(int adapter, int session) {
   _call(
     'close',
     (error, check) => using((arena) {
-      final handle = arena<ptyx_session_t>()..value = session;
+      final handle = arena<PtyxSession>()..value = session;
       final status = ptyd_session_release(adapter, handle, error);
-      if (status != ptyx_status.PTYX_STATUS_STALE_HANDLE) {
+      if (status != PtyxStatus.PTYX_STATUS_STALE_HANDLE) {
         check(status);
       }
     }),
@@ -262,13 +259,12 @@ void sessionRelease(int adapter, int session) {
 
 T _call<T>(
   String operation,
-  T Function(Pointer<ptyx_error_t>, void Function(int status)) body,
+  T Function(Pointer<PtyxError>, void Function(int status)) body,
 ) {
   return using((arena) {
-    final error = arena<ptyx_error_t>()
-      ..ref.struct_size = sizeOf<ptyx_error_t>();
+    final error = arena<PtyxError>()..ref.struct_size = sizeOf<PtyxError>();
     void check(int status) {
-      if (status != ptyx_status.PTYX_STATUS_OK) {
+      if (status != PtyxStatus.PTYX_STATUS_OK) {
         throw exceptionFromNative(status, error, operation: operation);
       }
     }
@@ -277,7 +273,7 @@ T _call<T>(
   });
 }
 
-void _setView(Arena arena, ptyx_bytes_view_t view, List<int> bytes) {
+void _setView(Arena arena, PtyxBytesView view, List<int> bytes) {
   if (bytes.isEmpty) {
     view
       ..data = nullptr
@@ -291,9 +287,9 @@ void _setView(Arena arena, ptyx_bytes_view_t view, List<int> bytes) {
     ..length = bytes.length;
 }
 
-Pointer<ptyx_bytes_view_t> _views(Arena arena, List<String> values) {
+Pointer<PtyxBytesView> _views(Arena arena, List<String> values) {
   if (values.isEmpty) return nullptr;
-  final views = arena<ptyx_bytes_view_t>(values.length);
+  final views = arena<PtyxBytesView>(values.length);
   for (var index = 0; index < values.length; index++) {
     _setView(arena, views[index], utf8.encode(values[index]));
   }

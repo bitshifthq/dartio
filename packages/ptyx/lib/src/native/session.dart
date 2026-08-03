@@ -52,10 +52,10 @@ final class _NativeSession implements PtyxFinalizable, PtySession {
   _NativeSession._(_NativeRuntime controller, this._handle, this._inputCapacity)
     : _controller = controller {
     _output = _OutputLease(
-      onCancel: _cancelOutput,
+      onCancel: () => _output.cancel(),
       onNativeCancel: () => sessionCancelOutput(_handle),
       onAcknowledge: controller.acknowledge,
-      onInfrastructureFailure: _nativeInfrastructureFailed,
+      onInfrastructureFailure: _failInfrastructure,
     );
     _modeController = StreamController<PtyTermMode>.broadcast(
       sync: true,
@@ -96,28 +96,22 @@ final class _NativeSession implements PtyxFinalizable, PtySession {
   Stream<Uint8List> get output => _output.stream;
 
   @override
-  int? get pid {
-    return sessionPid(_handle);
-  }
+  int? get pid => sessionPid(_handle);
 
   @override
-  PtySize get size {
-    return sessionSize(_handle);
-  }
+  PtySize get size => sessionSize(_handle);
 
   @override
   String? get ttyName {
     if (!capabilities.terminalName) return null;
-
     return sessionTtyName(_handle);
   }
 
   @override
   Future<void> close() {
     final existing = _close;
-    if (existing != null) {
-      return existing.future;
-    }
+    if (existing != null) return existing.future;
+
     final completion = Completer<void>();
     _close = completion;
     final terminalFailure = _terminalFailure;
@@ -126,14 +120,12 @@ final class _NativeSession implements PtyxFinalizable, PtySession {
       return completion.future;
     }
     try {
-      _cancelOutput();
+      _output.cancel();
       sessionClose(_handle);
     } on PtyException catch (error, stackTrace) {
-      if (completion.isCompleted) {
-        return completion.future;
-      }
+      if (completion.isCompleted) return completion.future;
       if (error is PtyInfraException) {
-        _nativeInfrastructureFailed(error);
+        _failInfrastructure(error);
         return completion.future;
       }
       _failReleasedSession(error, stackTrace);
@@ -144,21 +136,16 @@ final class _NativeSession implements PtyxFinalizable, PtySession {
   @override
   bool kill([ProcessSignal signal = .sigterm]) {
     if (_close != null || _exit.isCompleted) return false;
-
     return sessionTerminate(_handle, signal.signalNumber);
   }
 
   @override
-  void resize(PtySize size) {
-    sessionResize(_handle, size);
-  }
+  void resize(PtySize size) => sessionResize(_handle, size);
 
   @override
   void write(Uint8List data) {
     final inputFailure = _inputFailure;
-    if (inputFailure != null) {
-      throw inputFailure;
-    }
+    if (inputFailure != null) throw inputFailure;
     if (data.isEmpty) {
       throw ArgumentError.value(data, 'data', 'input data must not be empty');
     }
@@ -182,13 +169,9 @@ final class _NativeSession implements PtyxFinalizable, PtySession {
       _inputFailure ??= error;
       throw _inputFailure!;
     } on PtyInfraException catch (error) {
-      _nativeInfrastructureFailed(error);
+      _failInfrastructure(error);
       rethrow;
     }
-  }
-
-  void _cancelOutput() {
-    _output.cancel();
   }
 
   void _failReleasedSession(PtyException error, [StackTrace? stackTrace]) {
@@ -207,7 +190,7 @@ final class _NativeSession implements PtyxFinalizable, PtySession {
     _controller.releaseSession(_handle);
   }
 
-  void _nativeCloseComplete(PtyException? error) {
+  void _completeClose(PtyException? error) {
     _finalizer.detach(this);
     _output.close();
     if (!_modeController.isClosed) unawaited(_modeController.close());
@@ -237,30 +220,13 @@ final class _NativeSession implements PtyxFinalizable, PtySession {
     close.complete();
   }
 
-  void _nativeExit(int status) {
-    if (!_exit.isCompleted) _exit.complete(status);
-  }
-
-  void _nativeExitFailed(PtyException error) {
-    if (!_exit.isCompleted) _exit.completeError(error);
-  }
-
-  void _nativeInfrastructureFailed(PtyException error) {
+  void _failInfrastructure(PtyException error) {
     if (_terminalFailure != null) return;
-
     _terminalFailure = error;
     _failReleasedSession(error);
   }
 
-  void _nativeInputFailed(PtyException error) {
-    if (error is PtyInputException) {
-      _inputFailure ??= error;
-      return;
-    }
-    _nativeInfrastructureFailed(error);
-  }
-
-  void _nativeModeChanged(int modes) {
+  void _updateMode(int modes) {
     final mode = modeFromBits(modes);
     if (mode != _lastMode && !_modeController.isClosed) {
       _lastMode = mode;
@@ -268,30 +234,13 @@ final class _NativeSession implements PtyxFinalizable, PtySession {
     }
   }
 
-  void _nativeModeFailed(PtyException error) {
-    if (!_modeController.isClosed) {
-      _modeController.addError(error);
-    }
-  }
-
-  void _nativeOutput(Uint8List bytes, int token) {
-    _output.deliver(bytes, token);
-  }
-
-  void _nativeOutputDone() => _output.complete(_inputFailure);
-
-  void _nativeOutputFailed(PtyException error) {
-    _output.fail(error);
-  }
-
   void _observeModes(bool enabled) {
-    if (!capabilities.terminalModes || _close != null) {
-      return;
-    }
+    if (!capabilities.terminalModes || _close != null) return;
+
     try {
       sessionObserveMode(_handle, enabled: enabled);
     } on PtyException catch (error, stackTrace) {
-      if (error is PtyInfraException) _nativeInfrastructureFailed(error);
+      if (error is PtyInfraException) _failInfrastructure(error);
       if (!_modeController.isClosed) {
         _modeController.addError(error, stackTrace);
       }
@@ -302,26 +251,33 @@ final class _NativeSession implements PtyxFinalizable, PtySession {
     switch (event.kind) {
       case .output:
         if (event.data case final bytes?) {
-          _nativeOutput(bytes, event.token);
+          _output.deliver(bytes, event.token);
         }
       case .inputFailed:
-        _nativeInputFailed(_eventError(event));
+        final error = _eventError(event);
+        if (error is PtyInputException) {
+          _inputFailure ??= error;
+        } else {
+          _failInfrastructure(error);
+        }
       case .outputFailed:
-        _nativeOutputFailed(_eventError(event));
+        _output.fail(_eventError(event));
       case .infrastructureFailed:
-        _nativeInfrastructureFailed(_eventError(event));
+        _failInfrastructure(_eventError(event));
       case .outputDone:
-        _nativeOutputDone();
+        _output.complete(_inputFailure);
       case .exit:
-        _nativeExit(event.value);
+        if (!_exit.isCompleted) _exit.complete(event.value);
       case .exitFailed:
-        _nativeExitFailed(_eventError(event));
+        if (!_exit.isCompleted) _exit.completeError(_eventError(event));
       case .closeComplete:
-        _nativeCloseComplete(event.error);
+        _completeClose(event.error);
       case .modeChanged:
-        _nativeModeChanged(event.value);
+        _updateMode(event.value);
       case .modeFailed:
-        _nativeModeFailed(_eventError(event));
+        if (!_modeController.isClosed) {
+          _modeController.addError(_eventError(event));
+        }
       case .spawnReady || .spawnFailed:
         break;
     }

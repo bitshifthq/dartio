@@ -4,36 +4,78 @@ import '../api/api.dart';
 import '../ffi/ptyx.g.dart';
 import 'errors.dart';
 
-enum NativeEventKind {
-  spawnReady,
-  spawnFailed,
-  output,
-  inputFailed,
-  outputFailed,
-  infrastructureFailed,
-  outputDone,
-  exit,
-  exitFailed,
-  closeComplete,
-  modeChanged,
-  modeFailed,
+NativeEvent? decodeEvent(Object? message) {
+  if (message case [
+    final int rawKind,
+    final int session,
+    final int token,
+    final int flags,
+    final int value,
+    final int errorDomain,
+    final int errorKind,
+    final int errorNativeCode,
+    final Object? data,
+  ]) {
+    if (data != null && data is! Uint8List) return null;
+    final kind = _tryDecodeKind(rawKind);
+    if (kind == null) return null;
+    final error = errorKind == PtyxErrorKind.PTYX_ERROR_NONE
+        ? null
+        : exceptionFromEvent(
+            domain: errorDomain,
+            kind: errorKind,
+            nativeCode: errorNativeCode,
+            operation: _operation(kind),
+          );
+    final event = NativeEvent(
+      kind: kind,
+      session: session,
+      token: token,
+      flags: flags,
+      value: value,
+      data: data as Uint8List?,
+      error: error,
+    );
+    return event;
+  }
+  return null;
 }
 
 NativeEventKind decodeEventKind(int value) => switch (value) {
-  ptyx_event_kind.PTYX_EVENT_SPAWN_READY => .spawnReady,
-  ptyx_event_kind.PTYX_EVENT_SPAWN_FAILED => .spawnFailed,
-  ptyx_event_kind.PTYX_EVENT_OUTPUT => .output,
-  ptyx_event_kind.PTYX_EVENT_INPUT_FAILED => .inputFailed,
-  ptyx_event_kind.PTYX_EVENT_OUTPUT_FAILED => .outputFailed,
-  ptyx_event_kind.PTYX_EVENT_INFRASTRUCTURE_FAILED => .infrastructureFailed,
-  ptyx_event_kind.PTYX_EVENT_OUTPUT_DONE => .outputDone,
-  ptyx_event_kind.PTYX_EVENT_EXIT => .exit,
-  ptyx_event_kind.PTYX_EVENT_EXIT_FAILED => .exitFailed,
-  ptyx_event_kind.PTYX_EVENT_CLOSE_COMPLETE => .closeComplete,
-  ptyx_event_kind.PTYX_EVENT_MODE_CHANGED => .modeChanged,
-  ptyx_event_kind.PTYX_EVENT_MODE_FAILED => .modeFailed,
+  PtyxEventKind.PTYX_EVENT_SPAWN_READY => .spawnReady,
+  PtyxEventKind.PTYX_EVENT_SPAWN_FAILED => .spawnFailed,
+  PtyxEventKind.PTYX_EVENT_OUTPUT => .output,
+  PtyxEventKind.PTYX_EVENT_INPUT_FAILED => .inputFailed,
+  PtyxEventKind.PTYX_EVENT_OUTPUT_FAILED => .outputFailed,
+  PtyxEventKind.PTYX_EVENT_INFRASTRUCTURE_FAILED => .infrastructureFailed,
+  PtyxEventKind.PTYX_EVENT_OUTPUT_DONE => .outputDone,
+  PtyxEventKind.PTYX_EVENT_EXIT => .exit,
+  PtyxEventKind.PTYX_EVENT_EXIT_FAILED => .exitFailed,
+  PtyxEventKind.PTYX_EVENT_CLOSE_COMPLETE => .closeComplete,
+  PtyxEventKind.PTYX_EVENT_MODE_CHANGED => .modeChanged,
+  PtyxEventKind.PTYX_EVENT_MODE_FAILED => .modeFailed,
   _ => throw FormatException('unknown native event kind: $value'),
 };
+
+String _operation(NativeEventKind kind) => switch (kind) {
+  .spawnFailed => 'spawn',
+  .output => 'output',
+  .inputFailed => 'write',
+  .outputFailed => 'output',
+  .infrastructureFailed => 'controller',
+  .exitFailed => 'exit',
+  .closeComplete => 'close',
+  .modeFailed => 'modeChanges.observe',
+  _ => 'controller',
+};
+
+NativeEventKind? _tryDecodeKind(int value) {
+  try {
+    return decodeEventKind(value);
+  } on FormatException {
+    return null;
+  }
+}
 
 final class NativeEvent {
   final NativeEventKind kind;
@@ -58,59 +100,17 @@ final class NativeEvent {
       session == PTYX_INVALID_SESSION && kind == .infrastructureFailed;
 }
 
-NativeEvent? decodeEvent(Object? message) {
-  if (message case [
-    final int rawKind,
-    final int session,
-    final int token,
-    final int flags,
-    final int value,
-    final int errorDomain,
-    final int errorKind,
-    final int errorNativeCode,
-    final Object? data,
-  ]) {
-    if (data != null && data is! Uint8List) return null;
-    final kind = _tryDecodeKind(rawKind);
-    if (kind == null) return null;
-    final error = errorKind == ptyx_error_kind.PTYX_ERROR_NONE
-        ? null
-        : exceptionFromEvent(
-            domain: errorDomain,
-            kind: errorKind,
-            nativeCode: errorNativeCode,
-            operation: _operation(kind),
-          );
-    final event = NativeEvent(
-      kind: kind,
-      session: session,
-      token: token,
-      flags: flags,
-      value: value,
-      data: data as Uint8List?,
-      error: error,
-    );
-    return event;
-  }
-  return null;
-}
-
-String _operation(NativeEventKind kind) => switch (kind) {
-  .spawnFailed => 'spawn',
-  .output => 'output',
-  .inputFailed => 'write',
-  .outputFailed => 'output',
-  .infrastructureFailed => 'controller',
-  .exitFailed => 'exit',
-  .closeComplete => 'close',
-  .modeFailed => 'modeChanges.observe',
-  _ => 'controller',
-};
-
-NativeEventKind? _tryDecodeKind(int value) {
-  try {
-    return decodeEventKind(value);
-  } on FormatException {
-    return null;
-  }
+enum NativeEventKind {
+  spawnReady,
+  spawnFailed,
+  output,
+  inputFailed,
+  outputFailed,
+  infrastructureFailed,
+  outputDone,
+  exit,
+  exitFailed,
+  closeComplete,
+  modeChanged,
+  modeFailed,
 }
