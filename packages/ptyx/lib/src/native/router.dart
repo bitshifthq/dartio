@@ -1,5 +1,59 @@
 part of 'native.dart';
 
+final class _NativeEvent {
+  final int kind;
+  final int session;
+  final int token;
+  final int flags;
+  final int value;
+  final Uint8List? data;
+  final _NativeFailure? failure;
+
+  const _NativeEvent({
+    required this.kind,
+    required this.session,
+    required this.token,
+    required this.flags,
+    required this.value,
+    required this.data,
+    required this.failure,
+  });
+
+  factory _NativeEvent.fromMessage({
+    required int kind,
+    required int session,
+    required int token,
+    required int flags,
+    required int value,
+    required int errorDomain,
+    required int errorKind,
+    required int errorOperation,
+    required int errorNativeCode,
+    required int errorFlags,
+    required Object? data,
+  }) => _NativeEvent(
+    kind: kind,
+    session: session,
+    token: token,
+    flags: flags,
+    value: value,
+    data: data as Uint8List?,
+    failure: errorKind == ptyx_error_kind.PTYX_ERROR_NONE
+        ? null
+        : _NativeRuntime._failureFromValues(
+            domain: errorDomain,
+            kind: errorKind,
+            operation: errorOperation,
+            nativeCode: errorNativeCode,
+            flags: errorFlags,
+          ),
+  );
+
+  bool get isGlobalInfrastructureFailure =>
+      session == PTYX_INVALID_SESSION &&
+      kind == ptyx_event_kind.PTYX_EVENT_INFRASTRUCTURE_FAILED;
+}
+
 final class _NativeEventRouter {
   final _NativeRuntime _runtime;
   final Map<int, _PendingSpawn> _pendingSpawns = {};
@@ -37,17 +91,19 @@ final class _NativeEventRouter {
     ]) {
       if (data == null || data is Uint8List) {
         _dispatch(
-          kind,
-          session,
-          token,
-          flags,
-          value,
-          errorDomain,
-          errorKind,
-          errorOperation,
-          errorNativeCode,
-          errorFlags,
-          data,
+          _NativeEvent.fromMessage(
+            kind: kind,
+            session: session,
+            token: token,
+            flags: flags,
+            value: value,
+            errorDomain: errorDomain,
+            errorKind: errorKind,
+            errorOperation: errorOperation,
+            errorNativeCode: errorNativeCode,
+            errorFlags: errorFlags,
+            data: data,
+          ),
         );
         return;
       }
@@ -56,31 +112,10 @@ final class _NativeEventRouter {
     _handleInfrastructureFailure(failure);
   }
 
-  void _dispatch(
-    int kind,
-    int session,
-    int token,
-    int flags,
-    int value,
-    int errorDomain,
-    int errorKind,
-    int errorOperation,
-    int errorNativeCode,
-    int errorFlags,
-    Object? data,
-  ) {
-    final failure = errorKind == ptyx_error_kind.PTYX_ERROR_NONE
-        ? null
-        : _NativeRuntime._failureFromValues(
-            domain: errorDomain,
-            kind: errorKind,
-            operation: errorOperation,
-            nativeCode: errorNativeCode,
-            flags: errorFlags,
-          );
-    if (_isInfrastructureFailure(kind, session)) {
+  void _dispatch(_NativeEvent event) {
+    if (event.isGlobalInfrastructureFailure) {
       _handleInfrastructureFailure(
-        failure ??
+        event.failure ??
             _NativeRuntime._failureFromValues(
               domain: ptyx_error_domain.PTYX_ERROR_DOMAIN_RUNTIME,
               kind: ptyx_error_kind.PTYX_ERROR_INFRASTRUCTURE_LOST,
@@ -91,36 +126,27 @@ final class _NativeEventRouter {
       );
       return;
     }
-    if (kind == ptyx_event_kind.PTYX_EVENT_SPAWN_READY) {
-      _handleSpawnReady(session);
+    if (event.kind == ptyx_event_kind.PTYX_EVENT_SPAWN_READY) {
+      _handleSpawnReady(event.session);
       return;
     }
-    if (kind == ptyx_event_kind.PTYX_EVENT_SPAWN_FAILED) {
-      _handleSpawnFailure(session, failure);
+    if (event.kind == ptyx_event_kind.PTYX_EVENT_SPAWN_FAILED) {
+      _handleSpawnFailure(event.session, event.failure);
       return;
     }
 
-    final target = _sessions[session]?.target;
+    final target = _sessions[event.session]?.target;
     if (target == null) {
-      if (token != PTYX_INVALID_EVENT_TOKEN) {
-        _ackOrRelease(session, token);
+      if (event.token != PTYX_INVALID_EVENT_TOKEN) {
+        _ackOrRelease(event.session, event.token);
       }
-      final failure = _runtime.releaseSession(session);
+      final failure = _runtime.releaseSession(event.session);
       if (failure != null) {
         _handleInfrastructureFailure(failure);
       }
       return;
     }
-    _dispatchSessionEvent(
-      target,
-      kind,
-      session,
-      token,
-      flags,
-      value,
-      data,
-      failure,
-    );
+    _dispatchSessionEvent(target, event);
   }
 
   _NativeFailure _protocolFailure() => _NativeRuntime._failureFromValues(
@@ -130,10 +156,6 @@ final class _NativeEventRouter {
     nativeCode: 0,
     flags: 0,
   );
-
-  bool _isInfrastructureFailure(int kind, int session) =>
-      session == PTYX_INVALID_SESSION &&
-      kind == ptyx_event_kind.PTYX_EVENT_INFRASTRUCTURE_FAILED;
 
   void _handleInfrastructureFailure(_NativeFailure failure) {
     final pending = _pendingSpawns.values.toList(growable: false);
@@ -189,49 +211,40 @@ final class _NativeEventRouter {
     updateLiveness();
   }
 
-  void _dispatchSessionEvent(
-    _NativeSession target,
-    int kind,
-    int session,
-    int token,
-    int flags,
-    int value,
-    Object? data,
-    _NativeFailure? failure,
-  ) {
-    switch (kind) {
+  void _dispatchSessionEvent(_NativeSession target, _NativeEvent event) {
+    switch (event.kind) {
       case ptyx_event_kind.PTYX_EVENT_OUTPUT:
-        if (data case final Uint8List bytes) {
-          target._nativeOutput(bytes, token);
+        if (event.data case final Uint8List bytes) {
+          target._nativeOutput(bytes, event.token);
         } else {
-          _ackOrRelease(session, token);
+          _ackOrRelease(event.session, event.token);
         }
       case ptyx_event_kind.PTYX_EVENT_INPUT_FAILED:
-        target._nativeInputFailed(failure!);
+        target._nativeInputFailed(event.failure!);
       case ptyx_event_kind.PTYX_EVENT_OUTPUT_FAILED:
         _retainTerminalDeliveryTurn(target);
-        target._nativeOutputFailed(failure!);
+        target._nativeOutputFailed(event.failure!);
       case ptyx_event_kind.PTYX_EVENT_INFRASTRUCTURE_FAILED:
         _retainTerminalDeliveryTurn(target);
-        target._nativeInfrastructureFailed(failure!);
+        target._nativeInfrastructureFailed(event.failure!);
       case ptyx_event_kind.PTYX_EVENT_OUTPUT_DONE:
         _retainTerminalDeliveryTurn(target);
         target._nativeOutputDone();
       case ptyx_event_kind.PTYX_EVENT_EXIT:
         _retainTerminalDeliveryTurn(target);
-        target._nativeExit(value);
+        target._nativeExit(event.value);
       case ptyx_event_kind.PTYX_EVENT_EXIT_FAILED:
         _retainTerminalDeliveryTurn(target);
-        target._nativeExitFailed(failure!);
+        target._nativeExitFailed(event.failure!);
       case ptyx_event_kind.PTYX_EVENT_CLOSE_COMPLETE:
         _retainTerminalDeliveryTurn(target);
-        _sessions.remove(session);
-        target._nativeCloseComplete(failure);
+        _sessions.remove(event.session);
+        target._nativeCloseComplete(event.failure);
         updateLiveness();
       case ptyx_event_kind.PTYX_EVENT_MODE_CHANGED:
-        target._nativeModeChanged(value);
+        target._nativeModeChanged(event.value);
       case ptyx_event_kind.PTYX_EVENT_MODE_FAILED:
-        target._nativeModeFailed(failure!);
+        target._nativeModeFailed(event.failure!);
     }
   }
 
