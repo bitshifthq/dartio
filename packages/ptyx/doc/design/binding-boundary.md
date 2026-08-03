@@ -44,13 +44,14 @@ Dart's stream and future contracts.
 
 ## Event contract
 
-The private adapter receives a fixed eleven-field message. The router validates
-both its shape and the fields required by the event kind before dispatching it.
-Output events carry one nonzero owning token. Every such token is acknowledged
-exactly once, including malformed or unowned events. A malformed global message
-or event is an infrastructure failure; a malformed event for a live session
-terminates that session's projected delivery without inventing a new PTY
-semantic.
+The private adapter receives a fixed eleven-field message. The native event
+pump validates event kind, session identity, token ownership, payload bounds,
+error metadata, close flags, and values before posting. Output validation does
+not copy or allocate. Every output token is acknowledged or released exactly
+once, including malformed or unowned events. A malformed native event becomes
+one canonical infrastructure event and enters native cleanup. The Dart router
+only guards the message shape. If that shape is invalid, it invokes the
+idempotent native abort operation before projecting infrastructure failure.
 
 Close flags remain part of the C ABI diagnostic contract. Dart exposes the
 primary native failure through its existing typed channels and does not
@@ -65,6 +66,12 @@ later cleanup attempt and is surfaced as infrastructure failure when a Dart
 owner still exists. Finalizers use the same idempotent paths asynchronously;
 they may suppress diagnostics because no Dart owner remains, but they must not
 discard ownership before the native release has succeeded.
+
+When the event pump itself reaches a terminal failure, it performs the same
+cleanup before leaving and queues the adapter for bounded native retries if any
+release remains busy or fails. The adapter registry is removed only after the
+runtime, event leases, and tracked sessions have reached a successful or stale
+terminal result.
 
 The reusable Rust engine does not depend on Dart, Dart headers, isolates, or
 native ports. The private Dart adapter is the only layer that depends on

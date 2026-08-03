@@ -35,22 +35,25 @@ final class _NativeEventRouter {
       final int errorFlags,
       final Object? data,
     ]) {
-      _dispatch(
-        kind,
-        session,
-        token,
-        flags,
-        value,
-        errorDomain,
-        errorKind,
-        errorOperation,
-        errorNativeCode,
-        errorFlags,
-        data,
-      );
-      return;
+      if (data == null || data is Uint8List) {
+        _dispatch(
+          kind,
+          session,
+          token,
+          flags,
+          value,
+          errorDomain,
+          errorKind,
+          errorOperation,
+          errorNativeCode,
+          errorFlags,
+          data,
+        );
+        return;
+      }
     }
-    _handleInfrastructureFailure(_protocolFailure());
+    final failure = _runtime.abort() ?? _protocolFailure();
+    _handleInfrastructureFailure(failure);
   }
 
   void _dispatch(
@@ -75,17 +78,6 @@ final class _NativeEventRouter {
             nativeCode: errorNativeCode,
             flags: errorFlags,
           );
-    if (!_validEvent(
-      kind: kind,
-      session: session,
-      token: token,
-      errorKind: errorKind,
-      failure: failure,
-      data: data,
-    )) {
-      _handleMalformedEvent(session, token);
-      return;
-    }
     if (_isInfrastructureFailure(kind, session)) {
       _handleInfrastructureFailure(
         failure ??
@@ -129,74 +121,6 @@ final class _NativeEventRouter {
       data,
       failure,
     );
-  }
-
-  bool _validEvent({
-    required int kind,
-    required int session,
-    required int token,
-    required int errorKind,
-    required _NativeFailure? failure,
-    required Object? data,
-  }) {
-    final hasToken = token != PTYX_INVALID_EVENT_TOKEN;
-    final hasFailure = failure != null;
-    final errorMatches =
-        hasFailure == (errorKind != ptyx_error_kind.PTYX_ERROR_NONE);
-    return errorMatches &&
-        switch (kind) {
-          ptyx_event_kind.PTYX_EVENT_SPAWN_READY =>
-            session != PTYX_INVALID_SESSION &&
-                !hasToken &&
-                !hasFailure &&
-                data == null,
-          ptyx_event_kind.PTYX_EVENT_SPAWN_FAILED =>
-            session != PTYX_INVALID_SESSION &&
-                !hasToken &&
-                hasFailure &&
-                data == null,
-          ptyx_event_kind.PTYX_EVENT_OUTPUT =>
-            session != PTYX_INVALID_SESSION &&
-                hasToken &&
-                !hasFailure &&
-                data is Uint8List,
-          ptyx_event_kind.PTYX_EVENT_INPUT_FAILED ||
-          ptyx_event_kind.PTYX_EVENT_OUTPUT_FAILED ||
-          ptyx_event_kind.PTYX_EVENT_EXIT_FAILED ||
-          ptyx_event_kind.PTYX_EVENT_MODE_FAILED =>
-            session != PTYX_INVALID_SESSION &&
-                !hasToken &&
-                hasFailure &&
-                data == null,
-          ptyx_event_kind.PTYX_EVENT_INFRASTRUCTURE_FAILED =>
-            !hasToken && hasFailure && data == null,
-          ptyx_event_kind.PTYX_EVENT_OUTPUT_DONE ||
-          ptyx_event_kind.PTYX_EVENT_EXIT ||
-          ptyx_event_kind.PTYX_EVENT_MODE_CHANGED =>
-            session != PTYX_INVALID_SESSION &&
-                !hasToken &&
-                !hasFailure &&
-                data == null,
-          ptyx_event_kind.PTYX_EVENT_CLOSE_COMPLETE =>
-            session != PTYX_INVALID_SESSION && !hasToken && data == null,
-          _ => false,
-        };
-  }
-
-  void _handleMalformedEvent(int session, int token) {
-    if (token != PTYX_INVALID_EVENT_TOKEN) {
-      _ackOrRelease(session, token);
-    }
-    final failure = _protocolFailure();
-    final target = _sessions[session]?.target;
-    if (target == null) {
-      _handleInfrastructureFailure(failure);
-      return;
-    }
-    _sessions.remove(session);
-    _retainTerminalDeliveryTurn(target);
-    target._nativeInfrastructureFailed(failure);
-    updateLiveness();
   }
 
   _NativeFailure _protocolFailure() => _NativeRuntime._failureFromValues(

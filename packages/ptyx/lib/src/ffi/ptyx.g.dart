@@ -37,6 +37,27 @@ external int ptyd_event_ack(
 @ffi.Native<ffi.UnsignedInt Function(ffi.Pointer<ffi.Void>)>()
 external int ptyd_initialize(ffi.Pointer<ffi.Void> api_data);
 
+/// @brief Aborts a Dart adapter after a protocol or infrastructure failure.
+///
+/// Abort uses the same idempotent ownership path as detach. Outstanding event
+/// leases, tracked sessions, and the C runtime remain registered when cleanup
+/// reports a busy or internal result. The native cleanup worker retries those
+/// resources without requiring a Dart isolate.
+///
+/// @param[in,out] adapter Adapter handle, cleared only after complete cleanup.
+/// @param[out] error Optional initialized error destination.
+/// @return PTYX_STATUS_OK or a typed failure.
+@ffi.Native<
+  ffi.UnsignedInt Function(
+    ffi.Pointer<ptyd_adapter_t>,
+    ffi.Pointer<ptyx_error_t>,
+  )
+>()
+external int ptyd_runtime_abort(
+  ffi.Pointer<ptyd_adapter_t> adapter,
+  ffi.Pointer<ptyx_error_t> error,
+);
+
 /// @brief Attaches the sole event pump and cleanup owner to a runtime.
 ///
 /// @param[in] runtime Live runtime transferred to the adapter on success.
@@ -48,6 +69,10 @@ external int ptyd_initialize(ffi.Pointer<ffi.Void> api_data);
 /// Each message is an eleven-element Dart array containing kind, session,
 /// token, flags, value, error domain, error kind, error operation, native error
 /// code, error flags, and nullable Uint8List data, in that order.
+/// The adapter validates event-kind, session, token, payload, error, and close
+/// invariants before posting. A malformed native event is converted to one
+/// infrastructure-failure event and native cleanup. The Dart router retains
+/// only a fixed message-shape guard for ABI safety.
 /// Output remains bounded by each session's configured native output capacity.
 /// Withholding an acknowledgement applies backpressure only to that session;
 /// the shared runtime continues fairly delivering other sessions' events.
@@ -76,7 +101,8 @@ external int ptyd_runtime_attach(
 ///
 /// @param[in,out] adapter Adapter handle, cleared on success.
 /// @param[out] error Optional initialized error destination.
-/// @return PTYX_STATUS_OK or a typed failure.
+/// @return PTYX_STATUS_OK or a typed failure. A failure leaves the adapter
+/// registered so the caller can retry cleanup.
 @ffi.Native<
   ffi.UnsignedInt Function(
     ffi.Pointer<ptyd_adapter_t>,
@@ -113,9 +139,14 @@ external void ptyd_session_finalize(ffi.Pointer<ffi.Void> token);
 /// @brief Explicitly abandons and releases a tracked session.
 ///
 /// @param[in] adapter Owning adapter.
-/// @param[in,out] session Tracked handle, cleared on success.
+/// @param[in,out] session Tracked handle, cleared on successful or stale
+/// release.
 /// @param[out] error Optional initialized error destination.
-/// @return PTYX_STATUS_OK or a typed failure.
+/// @return PTYX_STATUS_OK or a typed failure. A failure leaves the session
+/// tracked and its ownership available for a later release attempt.
+///
+/// A busy or internal result leaves ownership tracked so the native cleanup
+/// worker can retry it.
 @ffi.Native<
   ffi.UnsignedInt Function(
     ptyd_adapter_t,

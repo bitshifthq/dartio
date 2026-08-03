@@ -41,9 +41,10 @@ PTYX_EXPORT ptyx_status_t PTYX_CALL ptyd_initialize(void *api_data);
  * Each message is an eleven-element Dart array containing kind, session,
  * token, flags, value, error domain, error kind, error operation, native error
  * code, error flags, and nullable Uint8List data, in that order.
- * The Dart router validates the message shape and event-kind requirements
- * before dispatch. A malformed global message reports infrastructure loss;
- * a malformed session event terminates that session's projected delivery.
+ * The adapter validates event-kind, session, token, payload, error, and close
+ * invariants before posting. A malformed native event is converted to one
+ * infrastructure-failure event and native cleanup. The Dart router retains
+ * only a fixed message-shape guard for ABI safety.
  * Output remains bounded by each session's configured native output capacity.
  * Withholding an acknowledgement applies backpressure only to that session;
  * the shared runtime continues fairly delivering other sessions' events.
@@ -76,14 +77,14 @@ PTYX_EXPORT ptyx_status_t PTYX_CALL ptyd_session_spawn_start(
  * @brief Explicitly abandons and releases a tracked session.
  *
  * @param[in] adapter Owning adapter.
- * @param[in,out] session Tracked handle, cleared on success.
+ * @param[in,out] session Tracked handle, cleared on successful or stale
+ * release.
  * @param[out] error Optional initialized error destination.
  * @return PTYX_STATUS_OK or a typed failure. A failure leaves the session
  * tracked and its ownership available for a later release attempt.
  *
- * The handle is cleared only after native release succeeds or reports a stale
- * generation. A busy or internal result leaves ownership tracked so cleanup
- * can be retried.
+ * A busy or internal result leaves ownership tracked so the native cleanup
+ * worker can retry it.
  */
 PTYX_EXPORT ptyx_status_t PTYX_CALL ptyd_session_release(
     ptyd_adapter_t adapter, ptyx_session_t *session, ptyx_error_t *error);
@@ -117,6 +118,21 @@ PTYX_EXPORT ptyx_status_t PTYX_CALL ptyd_event_ack(ptyd_adapter_t adapter,
  */
 PTYX_EXPORT ptyx_status_t PTYX_CALL ptyd_runtime_detach(ptyd_adapter_t *adapter,
                                                         ptyx_error_t *error);
+
+/**
+ * @brief Aborts a Dart adapter after a protocol or infrastructure failure.
+ *
+ * Abort uses the same idempotent ownership path as detach. Outstanding event
+ * leases, tracked sessions, and the C runtime remain registered when cleanup
+ * reports a busy or internal result. The native cleanup worker retries those
+ * resources without requiring a Dart isolate.
+ *
+ * @param[in,out] adapter Adapter handle, cleared only after complete cleanup.
+ * @param[out] error Optional initialized error destination.
+ * @return PTYX_STATUS_OK or a typed failure.
+ */
+PTYX_EXPORT ptyx_status_t PTYX_CALL ptyd_runtime_abort(ptyd_adapter_t *adapter,
+                                                       ptyx_error_t *error);
 
 /**
  * @brief Native finalizer for an adapter handle encoded as a pointer address.

@@ -352,6 +352,19 @@ final class _NativeRuntime implements Finalizable {
     _sessionCall((error) => ptyx_session_close(session, error));
   }
 
+  _NativeFailure? abort() {
+    final failure = using((arena) {
+      final adapter = arena<ptyd_adapter_t>()..value = _adapter;
+      final error = _newError(arena);
+      final status = ptyd_runtime_abort(adapter, error);
+      return status == ptyx_status.PTYX_STATUS_OK
+          ? null
+          : _failure(status, error);
+    });
+    _updateLiveness();
+    return failure;
+  }
+
   void acknowledge(int token) {
     final status = ptyd_event_ack(_adapter, token, nullptr);
     if (status != ptyx_status.PTYX_STATUS_OK) {
