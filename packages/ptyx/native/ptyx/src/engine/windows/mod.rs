@@ -182,6 +182,8 @@ impl Drop for Session {
         unsafe {
             TerminateJobObject(self.job.raw(), 1);
         }
+        cancel_read(self);
+        cancel_write(self);
         if let Some(read) = self.read.take() {
             quarantine_io_operation(read);
         }
@@ -2134,6 +2136,18 @@ fn cancel_write(session: &Session) {
     }
 }
 
+fn cancel_read(session: &Session) {
+    let Some(operation) = session.read.as_ref() else {
+        return;
+    };
+    if unsafe { CancelIoEx(session.output_pipe.raw(), operation.overlapped_ptr()) } == 0 {
+        let error = unsafe { GetLastError() };
+        if error != ERROR_NOT_FOUND {
+            let _ = error;
+        }
+    }
+}
+
 fn start_pseudoconsole_close(
     iocp: &IocpSender,
     handle: u64,
@@ -2564,6 +2578,7 @@ fn shutdown_all(
             unsafe {
                 TerminateJobObject(session.job.raw(), 1);
             }
+            cancel_read(session);
             cancel_write(session);
             force_pseudoconsole_close(iocp, handle, session, closer);
         }
