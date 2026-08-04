@@ -107,13 +107,6 @@ const MAX_SPAWN_PAYLOAD: usize = 64 * 1024;
 const MAX_SESSION_CAPACITY: usize = 64 * 1024 * 1024;
 const SPAWN_INHERIT_ENVIRONMENT: u32 = 1;
 
-#[cfg(feature = "test-controls")]
-static TEST_SPAWN_DELAY_MS: AtomicUsize = AtomicUsize::new(0);
-#[cfg(feature = "test-controls")]
-static TEST_SPAWN_DELAY_ACTIVE: AtomicBool = AtomicBool::new(false);
-#[cfg(feature = "test-controls")]
-static TEST_WRITE_INFRASTRUCTURE_FAILURE: AtomicBool = AtomicBool::new(false);
-
 #[repr(C)]
 struct BytesView {
     data: *const u8,
@@ -251,21 +244,6 @@ impl<T> Registry<T> {
 
     pub fn values(&self) -> impl Iterator<Item = &T> {
         self.slots.iter().filter_map(|slot| slot.value.as_ref())
-    }
-
-    #[cfg(feature = "test-controls")]
-    pub fn sole(&self) -> Option<&T> {
-        let mut values = self.slots.iter().filter_map(|slot| slot.value.as_ref());
-        let value = values.next()?;
-        values.next().is_none().then_some(value)
-    }
-
-    #[cfg(feature = "test-controls")]
-    pub fn live_count(&self) -> usize {
-        self.slots
-            .iter()
-            .filter(|slot| slot.value.is_some())
-            .count()
     }
 
     pub fn remove(&mut self, handle: u64) -> Option<T> {
@@ -806,15 +784,6 @@ pub unsafe extern "C" fn ptyx_runtime_next_event(
                     request,
                     handle: engine_handle,
                 } => {
-                    #[cfg(feature = "test-controls")]
-                    {
-                        let delay = TEST_SPAWN_DELAY_MS.swap(0, Ordering::AcqRel);
-                        if delay != 0 {
-                            TEST_SPAWN_DELAY_ACTIVE.store(true, Ordering::Release);
-                            std::thread::sleep(Duration::from_millis(delay as u64));
-                            TEST_SPAWN_DELAY_ACTIVE.store(false, Ordering::Release);
-                        }
-                    }
                     let Some(entry) = session_entry(request) else {
                         runtime.engine.try_abandon(engine_handle);
                         continue;
@@ -1442,19 +1411,6 @@ pub unsafe extern "C" fn ptyx_session_write(
             set_error(error, invalid_error(OPERATION_WRITE));
             return STATUS_INVALID_ARGUMENT;
         }
-        #[cfg(feature = "test-controls")]
-        if TEST_WRITE_INFRASTRUCTURE_FAILURE.swap(false, Ordering::AcqRel) {
-            set_error(
-                error,
-                Error::value(
-                    ERROR_DOMAIN_RUNTIME,
-                    ERROR_INFRASTRUCTURE_LOST,
-                    OPERATION_WRITE,
-                    0,
-                ),
-            );
-            return STATUS_INTERNAL;
-        }
         let (entry, engine_handle) = match active_session_for_write(session) {
             Ok(value) => value,
             Err(STATUS_BACKPRESSURE) => {
@@ -1499,38 +1455,6 @@ pub unsafe extern "C" fn ptyx_session_write(
         }
         status
     })
-}
-
-#[cfg(feature = "test-controls")]
-pub fn test_delay_next_spawn(milliseconds: usize) {
-    TEST_SPAWN_DELAY_MS.store(milliseconds, Ordering::Release);
-}
-
-#[cfg(feature = "test-controls")]
-pub fn test_spawn_delay_active() -> bool {
-    TEST_SPAWN_DELAY_ACTIVE.load(Ordering::Acquire)
-}
-
-#[cfg(feature = "test-controls")]
-pub fn test_fail_next_write() {
-    TEST_WRITE_INFRASTRUCTURE_FAILURE.store(true, Ordering::Release);
-}
-
-#[cfg(feature = "test-controls")]
-pub fn test_kill_broker(runtime: u64) -> bool {
-    let Some(runtime) = runtime_entry(runtime) else {
-        return false;
-    };
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    {
-        runtime.engine.kill_broker_for_test();
-        true
-    }
-    #[cfg(windows)]
-    {
-        let _ = runtime;
-        false
-    }
 }
 
 #[no_mangle]

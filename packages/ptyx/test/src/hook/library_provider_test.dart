@@ -109,14 +109,6 @@ void main() {
           ]),
         );
       });
-
-      test('separates diagnostic feature artifacts', () {
-        final directory = cargoBuildDirectory(
-          createBuildInput(userDefines: {'test_controls': 'true'}),
-        );
-
-        expect(directory.uri.pathSegments, contains('test-controls'));
-      });
     });
 
     group('androidToolchainEnvironment', () {

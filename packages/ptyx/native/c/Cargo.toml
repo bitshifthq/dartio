@@ -7,7 +7,6 @@ license = "MIT"
 
 [features]
 default = []
-test-controls = ["ptyx/test-controls"]
 
 [lib]
 name = "ptyx_c"

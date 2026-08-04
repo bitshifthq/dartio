@@ -13,7 +13,6 @@ categories = ["os", "api-bindings"]
 [features]
 default = []
 __private_adapter = []
-test-controls = ["__private_adapter"]
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fuzzing)"] }

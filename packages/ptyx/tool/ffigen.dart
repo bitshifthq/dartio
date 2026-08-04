@@ -13,13 +13,11 @@ import 'package:ffigen/ffigen.dart';
 import 'package:logging/logging.dart';
 
 const _output = 'lib/src/ffi/ptyx.g.dart';
-const _testOutput = 'test/src/ffi/ptyx_test.g.dart';
 
 void main() {
   Logger.root.onRecord.listen((record) => stderr.writeln(record));
   try {
     _generator().generate(logger: Logger.root);
-    _testGenerator().generate(logger: Logger.root);
   } on Object catch (error, stackTrace) {
     stderr.writeln('Failed to generate bindings: $error\n$stackTrace');
     exitCode = 1;
@@ -72,35 +70,12 @@ bool _includeType(Declaration declaration) =>
     declaration.originalName.startsWith('Ptyx') ||
     declaration.originalName.startsWith('Ptyd');
 
-FfiGenerator _testGenerator() => FfiGenerator(
-  output: Output(
-    dartFile: Uri.file(_testOutput),
-    preamble: '// ignore_for_file: type=lint',
-    style: const NativeExternalBindings(assetId: 'package:ptyx/ptyx.dart'),
-  ),
-  headers: Headers(
-    entryPoints: [Uri.file('native/dart/tests/ptyx_dart_test.h')],
-    include: (header) =>
-        header.path.endsWith('/native/dart/tests/ptyx_dart_test.h') ||
-        header.path == 'native/dart/tests/ptyx_dart_test.h',
-    compilerOptions: [..._compilerOptions(), '-DPTYX_TEST_CONTROLS'],
-  ),
-  functions: Functions(
-    include: (declaration) => declaration.originalName.startsWith('ptyd_test_'),
-  ),
-  structs: const Structs(include: _exclude),
-  unions: const Unions(include: _exclude),
-  enums: const Enums(include: _exclude),
-  typedefs: const Typedefs(include: _exclude),
-  globals: const Globals(include: _exclude),
-  macros: const Macros(include: _exclude),
-);
+bool _exclude(Declaration _) => false;
 
 List<String> _compilerOptions() {
   final options = <String>['-Inative/include', '-Inative/dart/include'];
-  if (!Platform.isMacOS) {
-    return options;
-  }
+  if (!Platform.isMacOS) return options;
+
   final configured = Platform.environment['SDKROOT'];
   if (configured != null && configured.isNotEmpty) {
     return [...options, '-isysroot', configured];
@@ -114,5 +89,3 @@ List<String> _compilerOptions() {
   }
   return options;
 }
-
-bool _exclude(Declaration _) => false;

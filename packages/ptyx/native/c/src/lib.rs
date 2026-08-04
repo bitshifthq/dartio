@@ -20,10 +20,6 @@ pub mod private {
         OPERATION_RUNTIME_SHUTDOWN, STATUS_INTERNAL, STATUS_INVALID_ARGUMENT, STATUS_OK,
         STATUS_STALE_HANDLE, STATUS_WRONG_STATE,
     };
-    #[cfg(feature = "test-controls")]
-    pub use crate::c_api::{
-        test_delay_next_spawn, test_fail_next_write, test_kill_broker, test_spawn_delay_active,
-    };
 }
 
 /// Retains the complete stable C ABI when this crate is linked into a product

@@ -9,38 +9,10 @@
 #define PTYX_HIDDEN __attribute__((visibility("hidden")))
 #endif
 
-#ifdef _MSC_VER
-#include <windows.h>
-static volatile LONG fail_next_post = 0;
-
-static bool take_failed_post(void) {
-  return InterlockedExchange(&fail_next_post, 0) != 0;
-}
-
-PTYX_HIDDEN void ptyx_dart_test_fail_next_post(void) {
-  InterlockedExchange(&fail_next_post, 1);
-}
-#else
-#include <stdatomic.h>
-static atomic_int fail_next_post = 0;
-
-static bool take_failed_post(void) {
-  return atomic_exchange(&fail_next_post, 0) != 0;
-}
-
-PTYX_HIDDEN void ptyx_dart_test_fail_next_post(void) {
-  atomic_store(&fail_next_post, 1);
-}
-#endif
-
 PTYX_HIDDEN bool ptyx_dart_post_event(
     Dart_Port_DL port, uint32_t kind, uint64_t session, uint64_t token,
     uint32_t flags, int64_t value, uint32_t error_domain, uint32_t error_kind,
     int32_t native_code, const uint8_t *bytes, intptr_t length) {
-  if (take_failed_post()) {
-    return false;
-  }
-
   Dart_CObject fields[8];
   int64_t integers[8] = {
       (int64_t)kind,

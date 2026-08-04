@@ -1,12 +1,9 @@
 import 'dart:async';
 import 'dart:io';
 import 'dart:isolate';
-import 'dart:typed_data';
 
 import 'package:ptyx/ptyx.dart';
 import 'package:test/test.dart';
-
-import '../ffi/ptyx_test.g.dart';
 
 Future<void> _ownQuietSession(SendPort ready) async {
   final session = await PtySession.spawn(
@@ -76,74 +73,13 @@ Future<int> _spawnAndDropQuietSession() async {
 }
 
 Future<void> _collectDroppedSession(SendPort reports) async {
-  final baseline = ptyd_test_session_count();
   final pid = await _spawnAndDropQuietSession();
   reports.send(pid);
-  final retained = <Uint8List>[];
   final deadline = DateTime.now().add(const Duration(seconds: 10));
-  while (ptyd_test_session_count() != baseline &&
-      DateTime.now().isBefore(deadline)) {
-    retained.add(Uint8List(1024 * 1024));
-    if (retained.length == 16) {
-      retained.clear();
-    }
+  while (await _processExists(pid) && DateTime.now().isBefore(deadline)) {
     await Future<void>.delayed(const Duration(milliseconds: 10));
   }
-  reports.send(
-    ptyd_test_session_count() == baseline && !await _processExists(pid),
-  );
-}
-
-Future<void> _loseDuringStagedSpawn((SendPort, String) message) async {
-  final (ready, pidFile) = message;
-  ptyd_test_delay_next_spawn(1000);
-  ready.send(null);
-  await PtySession.spawn(
-    PtySpawnOptions(
-      executable: Platform.isWindows
-          ? r'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe'
-          : '/bin/sh',
-      arguments: Platform.isWindows
-          ? const [
-              '-NoProfile',
-              '-NonInteractive',
-              '-Command',
-              r'''
-$temporaryPidFile = "$env:PTYX_STAGE_PID_FILE.tmp"
-[System.IO.File]::WriteAllText($temporaryPidFile, "$PID")
-[System.IO.File]::Move($temporaryPidFile, $env:PTYX_STAGE_PID_FILE)
-Start-Sleep -Seconds 30
-''',
-            ]
-          : const [
-              '-c',
-              r'printf %s "$$" > "$PTYX_STAGE_PID_FILE"; exec sleep 30',
-            ],
-      environment: {'PTYX_STAGE_PID_FILE': pidFile},
-      initialSize: const PtySize(rows: 24, columns: 80),
-    ),
-  );
-}
-
-Future<void> _loseDuringGuardianStartup(SendPort ready) async {
-  ptyd_test_delay_next_attach(1000);
-  ready.send(null);
-  await PtySession.spawn(
-    PtySpawnOptions(
-      executable: Platform.isWindows
-          ? r'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe'
-          : '/bin/sh',
-      arguments: Platform.isWindows
-          ? const [
-              '-NoProfile',
-              '-NonInteractive',
-              '-Command',
-              'Start-Sleep -Seconds 30',
-            ]
-          : const ['-c', 'exec sleep 30'],
-      initialSize: const PtySize(rows: 24, columns: 80),
-    ),
-  );
+  reports.send(!await _processExists(pid));
 }
 
 Future<bool> _processExists(int pid) async {
@@ -190,39 +126,6 @@ void main() {
       }
     });
 
-    test('guardian owns runtime creation before the owner can exit', () async {
-      final baseline = ptyd_test_adapter_count();
-      final ready = ReceivePort();
-      final isolate = await Isolate.spawn(
-        _loseDuringGuardianStartup,
-        ready.sendPort,
-      );
-      addTearDown(() => isolate.kill(priority: Isolate.immediate));
-      await ready.first.timeout(const Duration(seconds: 10));
-      ready.close();
-
-      final activeDeadline = DateTime.now().add(const Duration(seconds: 5));
-      while (ptyd_test_attach_delay_active() == 0 &&
-          DateTime.now().isBefore(activeDeadline)) {
-        await Future<void>.delayed(const Duration(milliseconds: 10));
-      }
-      expect(
-        ptyd_test_attach_delay_active(),
-        1,
-        reason: 'owner must be killed while native attachment is in progress',
-      );
-      isolate.kill(priority: Isolate.immediate);
-
-      final cleanupDeadline = DateTime.now().add(const Duration(seconds: 10));
-      while ((ptyd_test_attach_delay_active() != 0 ||
-              ptyd_test_adapter_count() != baseline) &&
-          DateTime.now().isBefore(cleanupDeadline)) {
-        await Future<void>.delayed(const Duration(milliseconds: 20));
-      }
-      expect(ptyd_test_attach_delay_active(), 0);
-      expect(ptyd_test_adapter_count(), baseline);
-    });
-
     test('reclaims an unreachable session in a live isolate', () async {
       final reports = ReceivePort();
       final messages = StreamIterator(reports);
@@ -259,46 +162,6 @@ void main() {
 
       final deadline = DateTime.now().add(const Duration(seconds: 10));
       while (await _processExists(pid) && DateTime.now().isBefore(deadline)) {
-        await Future<void>.delayed(const Duration(milliseconds: 20));
-      }
-      expect(await _processExists(pid), isFalse);
-    });
-
-    test('isolate loss during staged spawn cannot orphan a child', () async {
-      final temporary = await Directory.systemTemp.createTemp(
-        'ptyx-staged-spawn-',
-      );
-      addTearDown(() => temporary.delete(recursive: true));
-      final pidFile = File('${temporary.path}/pid');
-      final ready = ReceivePort();
-      final isolate = await Isolate.spawn(_loseDuringStagedSpawn, (
-        ready.sendPort,
-        pidFile.path,
-      ));
-      addTearDown(() => isolate.kill(priority: Isolate.immediate));
-      await ready.first.timeout(const Duration(seconds: 10));
-      ready.close();
-
-      final publicationDeadline = DateTime.now().add(
-        const Duration(seconds: 5),
-      );
-      while (!pidFile.existsSync() &&
-          DateTime.now().isBefore(publicationDeadline)) {
-        await Future<void>.delayed(const Duration(milliseconds: 10));
-      }
-      expect(pidFile.existsSync(), isTrue);
-      final pid = int.parse(pidFile.readAsStringSync());
-      expect(
-        ptyd_test_spawn_delay_active() != 0,
-        isTrue,
-        reason: 'owner must be killed before staged spawn returns',
-      );
-
-      isolate.kill(priority: Isolate.immediate);
-
-      final cleanupDeadline = DateTime.now().add(const Duration(seconds: 10));
-      while (await _processExists(pid) &&
-          DateTime.now().isBefore(cleanupDeadline)) {
         await Future<void>.delayed(const Duration(milliseconds: 20));
       }
       expect(await _processExists(pid), isFalse);

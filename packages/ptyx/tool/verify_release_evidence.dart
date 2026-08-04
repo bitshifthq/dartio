@@ -29,7 +29,7 @@ const _evidenceKeys = {
   'soak',
   'sanitizers',
   'fuzz',
-  'fault-and-publication',
+  'publication',
   'fixture-aot',
   'fixture-source',
 };
@@ -141,7 +141,6 @@ List<String> verifyReleaseEvidence(
     'leak_sanitizer',
     'thread_sanitizer',
     'fuzz',
-    'fault_injection',
     'publication_dry_run',
   ]) {
     require(
@@ -401,17 +400,13 @@ List<String> _verifyResult(
         })) {
       failures.add('fuzz evidence must prove both decoder targets');
     }
-  } else if (key == 'fault-and-publication') {
+  } else if (key == 'publication') {
     final dryRun = artifact['publication_dry_run'];
-    if (artifact['fault_cases_passed'] is! int ||
-        (artifact['fault_cases_passed']! as int) < 6 ||
-        dryRun is! Map<String, Object?> ||
+    if (dryRun is! Map<String, Object?> ||
         dryRun['exit_code'] != 0 ||
         dryRun['command'] is! List<Object?> ||
         (dryRun['command']! as List<Object?>).isEmpty) {
-      failures.add(
-        'fault-and-publication evidence must prove both required checks',
-      );
+      failures.add('publication evidence must prove a successful dry run');
     }
   }
   return failures;

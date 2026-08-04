@@ -32,17 +32,12 @@ Map<String, String> androidToolchainEnvironment(
 @internal
 Directory cargoBuildDirectory(BuildInput input) {
   final target = input.artifactTargetTriple();
-  final variant = _testControlsEnabled(input) ? 'test-controls' : 'production';
   return Directory.fromUri(
     _asDirectoryUri(
       input.outputDirectoryShared,
-    ).resolve('cargo/$variant/$target/'),
+    ).resolve('cargo/production/$target/'),
   );
 }
-
-bool _testControlsEnabled(BuildInput input) =>
-    input.userDefines['test_controls'] == true ||
-    input.userDefines['test_controls'] == 'true';
 
 @internal
 String libraryExtension(OS os) => switch (os) {
@@ -105,7 +100,6 @@ final class CompileFromSource extends LibraryProvider {
     final targetOS = input.config.code.targetOS;
     final targetArch = input.config.code.targetArchitecture;
     final isHost = targetOS == OS.current && targetArch == Architecture.current;
-    final testControls = _testControlsEnabled(input);
 
     final args = <String>[
       'build',
@@ -114,7 +108,6 @@ final class CompileFromSource extends LibraryProvider {
       '--release',
       '--target-dir',
       targetDir.path,
-      if (testControls) ...['--features', 'test-controls'],
       if (!isHost && cargoTarget != null) ...['--target', cargoTarget],
     ];
 

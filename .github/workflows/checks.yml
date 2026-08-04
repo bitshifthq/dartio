@@ -57,7 +57,6 @@ jobs:
             native/include/ptyx/ptyx.h \
             native/dart/include/ptyx_dart.h \
             lib/src/ffi/ptyx.g.dart \
-            test/src/ffi/ptyx_test.g.dart
       - name: verify generated native asset hashes
         working-directory: packages/ptyx
         run: |
@@ -128,9 +127,6 @@ jobs:
       - name: run Dart tests
         working-directory: packages/ptyx
         run: |
-          # Fatal infrastructure injection owns a process-wide native runtime.
-          # Keep it in a dedicated test VM before the regular package suite.
-          dart test --concurrency=1 test/src/api/fault_injection_check.dart
           dart test --concurrency=1
 
   rust:

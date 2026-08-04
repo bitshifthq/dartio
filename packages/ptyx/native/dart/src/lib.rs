@@ -6,8 +6,6 @@ use ptyx_c::private::{
     OPERATION_RUNTIME_SHUTDOWN, STATUS_INTERNAL, STATUS_INVALID_ARGUMENT, STATUS_OK,
     STATUS_STALE_HANDLE, STATUS_WRONG_STATE,
 };
-#[cfg(feature = "test-controls")]
-use ptyx_c::private::{ERROR_DOMAIN_PROCESS, ERROR_NATIVE_FAILURE, OPERATION_EXIT};
 use std::collections::HashSet;
 use std::ffi::c_void;
 use std::mem::size_of;
@@ -23,8 +21,6 @@ const EVENT_SPAWN_FAILED: u32 = 2;
 const EVENT_OUTPUT: u32 = 3;
 const EVENT_INFRASTRUCTURE_FAILED: u32 = 6;
 const EVENT_CLOSE_COMPLETE: u32 = 9;
-#[cfg(feature = "test-controls")]
-const EVENT_EXIT_FAILED: u32 = 12;
 const CLEANUP_RETRIES: usize = 8;
 const CLEANUP_RETRY_DELAY: Duration = Duration::from_millis(10);
 const CLEANUP_RETRY_MAX_DELAY: Duration = Duration::from_secs(1);
@@ -226,8 +222,6 @@ pub unsafe extern "C" fn ptyd_runtime_attach(
         return STATUS_INVALID_ARGUMENT;
     }
     catch_unwind(AssertUnwindSafe(|| {
-        #[cfg(feature = "test-controls")]
-        delay_next_attach();
         if adapter.is_null() {
             return fail(
                 error,
@@ -908,126 +902,6 @@ fn pin_native_library() -> bool {
     }
 }
 
-#[cfg(feature = "test-controls")]
-#[no_mangle]
-pub extern "C" fn ptyd_test_fail_next_post() {
-    unsafe {
-        ptyx_dart_test_fail_next_post();
-    }
-}
-
-#[cfg(feature = "test-controls")]
-#[no_mangle]
-pub extern "C" fn ptyd_test_kill_broker() -> u32 {
-    let pump = pumps()
-        .lock()
-        .ok()
-        .and_then(|registry| registry.sole().map(Arc::clone));
-    pump.map_or(0, |pump| u32::from(c_api::test_kill_broker(pump.runtime)))
-}
-
-#[cfg(feature = "test-controls")]
-#[no_mangle]
-pub extern "C" fn ptyd_test_delay_next_spawn(milliseconds: u64) {
-    c_api::test_delay_next_spawn(usize::try_from(milliseconds).unwrap_or(usize::MAX));
-}
-
-#[cfg(feature = "test-controls")]
-#[no_mangle]
-pub extern "C" fn ptyd_test_spawn_delay_active() -> u32 {
-    u32::from(c_api::test_spawn_delay_active())
-}
-
-#[cfg(feature = "test-controls")]
-#[no_mangle]
-pub extern "C" fn ptyd_test_fail_next_write() {
-    c_api::test_fail_next_write();
-}
-
-#[cfg(feature = "test-controls")]
-#[no_mangle]
-pub extern "C" fn ptyd_test_fail_exit_observation() -> u32 {
-    let pump = pumps()
-        .lock()
-        .ok()
-        .and_then(|registry| registry.sole().map(Arc::clone));
-    let Some(pump) = pump else {
-        return 0;
-    };
-    let session = pump
-        .state
-        .lock()
-        .ok()
-        .and_then(|state| state.sessions.iter().copied().next());
-    let Some(session) = session else {
-        return 0;
-    };
-    let mut event = Event::empty(size_of::<Event>() as u32);
-    event.kind = EVENT_EXIT_FAILED;
-    event.session = session;
-    event.error = Error::value(
-        ERROR_DOMAIN_PROCESS,
-        ERROR_NATIVE_FAILURE,
-        OPERATION_EXIT,
-        87,
-    );
-    u32::from(unsafe { post_event(pump.port, &event) })
-}
-
-#[cfg(feature = "test-controls")]
-static ATTACH_DELAY_MILLISECONDS: AtomicU64 = AtomicU64::new(0);
-#[cfg(feature = "test-controls")]
-static ATTACH_DELAY_ACTIVE: AtomicBool = AtomicBool::new(false);
-
-#[cfg(feature = "test-controls")]
-fn delay_next_attach() {
-    let milliseconds = ATTACH_DELAY_MILLISECONDS.swap(0, Ordering::AcqRel);
-    if milliseconds == 0 {
-        return;
-    }
-    ATTACH_DELAY_ACTIVE.store(true, Ordering::Release);
-    std::thread::sleep(std::time::Duration::from_millis(milliseconds));
-    ATTACH_DELAY_ACTIVE.store(false, Ordering::Release);
-}
-
-#[cfg(feature = "test-controls")]
-#[no_mangle]
-pub extern "C" fn ptyd_test_delay_next_attach(milliseconds: u64) {
-    ATTACH_DELAY_MILLISECONDS.store(milliseconds, Ordering::Release);
-}
-
-#[cfg(feature = "test-controls")]
-#[no_mangle]
-pub extern "C" fn ptyd_test_attach_delay_active() -> u32 {
-    u32::from(ATTACH_DELAY_ACTIVE.load(Ordering::Acquire))
-}
-
-#[cfg(feature = "test-controls")]
-#[no_mangle]
-pub extern "C" fn ptyd_test_adapter_count() -> u32 {
-    pumps()
-        .lock()
-        .map_or(u32::MAX, |registry| registry.live_count() as u32)
-}
-
-#[cfg(feature = "test-controls")]
-#[no_mangle]
-pub extern "C" fn ptyd_test_session_count() -> u32 {
-    let Ok(registry) = pumps().lock() else {
-        return u32::MAX;
-    };
-    let adapters = registry.values().cloned().collect::<Vec<_>>();
-    drop(registry);
-
-    adapters
-        .iter()
-        .try_fold(0_u32, |total, pump| {
-            let state = pump.state.lock().ok()?;
-            total.checked_add(u32::try_from(state.sessions.len()).ok()?)
-        })
-        .unwrap_or(u32::MAX)
-}
-
 unsafe extern "C" {
     fn Dart_InitializeApiDL(data: *mut c_void) -> libc::intptr_t;
     fn ptyx_dart_post_event(
@@ -1043,8 +917,6 @@ unsafe extern "C" {
         bytes: *const u8,
         length: isize,
     ) -> bool;
-    #[cfg(feature = "test-controls")]
-    fn ptyx_dart_test_fail_next_post();
 }
 
 #[cfg(test)]

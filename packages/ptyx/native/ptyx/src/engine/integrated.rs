@@ -632,11 +632,6 @@ impl IntegratedRuntime {
         true
     }
 
-    #[cfg(feature = "test-controls")]
-    pub fn kill_broker_for_test(&self) {
-        self.broker.kill_for_test();
-    }
-
     fn request_result<R>(&self, command: impl FnOnce(ReplySender<R>) -> Command) -> io::Result<R> {
         let (sender, receiver) = oneshot::channel();
         self.commands

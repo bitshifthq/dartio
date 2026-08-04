@@ -46,7 +46,6 @@ Map<String, Object?> _acceptedManifest() => {
     'leak_sanitizer': 'passed',
     'thread_sanitizer': 'passed',
     'fuzz': 'passed',
-    'fault_injection': 'passed',
     'publication_dry_run': 'passed',
   },
   'evidence': {
@@ -62,7 +61,7 @@ Map<String, Object?> _acceptedManifest() => {
       'soak',
       'sanitizers',
       'fuzz',
-      'fault-and-publication',
+      'publication',
       'fixture-aot',
       'fixture-source',
     ])
@@ -192,9 +191,8 @@ Map<String, Object?> _resultEvidence(String key) {
           'finished_at_utc': '2026-01-01T00:10:00Z',
         },
     };
-  } else if (key == 'fault-and-publication') {
+  } else if (key == 'publication') {
     result.addAll({
-      'fault_cases_passed': 6,
       'publication_dry_run': {
         'exit_code': 0,
         'command': ['dart', 'pub', 'publish', '--dry-run'],
@@ -270,7 +268,7 @@ void main() {
 
       final failures = verifyReleaseEvidence(manifest, _revision);
 
-      expect(failures, hasLength(13));
+      expect(failures, hasLength(12));
       expect(failures, contains('all six runtime_targets must be passed'));
       expect(failures, contains('performance must clear 90% direct output'));
       expect(

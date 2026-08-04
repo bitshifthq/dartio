@@ -7,7 +7,6 @@ license = "MIT"
 
 [features]
 default = []
-test-controls = ["ptyx-c/test-controls"]
 
 [lib]
 name = "ptyx_dart"

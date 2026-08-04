@@ -770,13 +770,6 @@ impl BrokerOwner {
         self.client.clone()
     }
 
-    #[cfg(feature = "test-controls")]
-    pub(crate) fn kill_for_test(&self) {
-        unsafe {
-            libc::kill(self.pid, libc::SIGKILL);
-        }
-    }
-
     pub(crate) fn shutdown(&self) -> bool {
         let Some(thread) = self.thread.lock().ok().and_then(|mut value| value.take()) else {
             return true;
