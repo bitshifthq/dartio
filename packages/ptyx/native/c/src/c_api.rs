@@ -407,7 +407,7 @@ fn retire_session_entry(runtime: &Arc<RuntimeEntry>, handle: u64) {
 }
 
 fn retire_released_sessions(runtime: &Arc<RuntimeEntry>) {
-    let handles = sessions()
+    let candidates = sessions()
         .read()
         .map(|state| {
             state
@@ -417,20 +417,24 @@ fn retire_released_sessions(runtime: &Arc<RuntimeEntry>) {
                 .filter_map(|(index, slot)| {
                     let handle = (u64::from(slot.generation) << 32) | (index as u64 + 1);
                     slot.value.as_ref().and_then(|entry| {
-                        (Arc::ptr_eq(&entry.runtime, runtime)
-                            && entry
-                                .state
-                                .lock()
-                                .map(|state| matches!(*state, SessionState::Released))
-                                .unwrap_or(false))
-                        .then_some(handle)
+                        Arc::ptr_eq(&entry.runtime, runtime).then(|| (handle, Arc::clone(entry)))
                     })
                 })
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    for handle in handles {
-        retire_session_entry(runtime, handle);
+    // Do not hold the global registry lock while taking a session-state lock.
+    // Release takes those locks in the opposite order while it removes the
+    // native session map entry.
+    for (handle, entry) in candidates {
+        if entry
+            .state
+            .lock()
+            .map(|state| matches!(*state, SessionState::Released))
+            .unwrap_or(false)
+        {
+            retire_session_entry(runtime, handle);
+        }
     }
 }
 
