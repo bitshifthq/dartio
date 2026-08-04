@@ -125,6 +125,15 @@ changing the bounded output budget, credit contract, or interactive batching.
 On clean exact revision `7849136`, production reached a 95.401 MiB/s median
 versus a 113.795 MiB/s direct median, or 83.84%.
 
+The current clean revision `c928d30` batches native output leases at 128 KiB
+while retaining the same 256 KiB session capacity. A source-mode macOS x64
+diagnostic using three 32 MiB repetitions measured 99.621, 100.550, and
+101.141 MiB/s (mean 100.437 MiB/s, standard deviation 0.626 MiB/s), with
+every child exiting successfully. This is directional optimization evidence;
+it has no same-revision direct comparison and does not satisfy the release
+acceptance workload or allocation/copy instrumentation requirements. The exact
+clean artifact is `benchmark/results/transport-output-128k-macos-x64-c928d30.json`.
+
 The direct candidate omits the asynchronous Dart stream contract, bounded
 output ownership, native-port delivery, and credit return. Under the
 equivalence rule in `doc/architecture/candidate-gates.md`, it is a useful
