@@ -202,12 +202,7 @@ fn wait_for_cancelled_io(pipe: HANDLE, operation: Pin<Box<IoOperation>>) {
     // quarantine. Cancellation has already been requested by the caller.
     let mut transferred = 0;
     unsafe {
-        GetOverlappedResult(
-            pipe,
-            operation.overlapped_ptr(),
-            &mut transferred,
-            1,
-        );
+        GetOverlappedResult(pipe, operation.overlapped_ptr(), &mut transferred, 1);
     }
     drop(operation);
 }
