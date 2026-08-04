@@ -3,7 +3,9 @@ use crate::engine::broker_client::{BrokerClient, BrokerOwner, BrokerSession};
 use crate::engine::control::{fail_wake_socket, wake_socket, Control, ControlQueue, WakeGate};
 use crate::engine::event::{self, Receiver as EventReceiver, Sender as EventSender};
 use crate::engine::oneshot::{self, Sender as ReplySender};
-use crate::engine::session::{AdmissionResult, InputAdmission, SessionCore};
+#[cfg(any(feature = "__private_adapter", test))]
+use crate::engine::session::AdmissionResult;
+use crate::engine::session::{InputAdmission, SessionCore};
 use crate::engine::spawn::BrokerSpawn;
 #[cfg(feature = "__private_adapter")]
 use crate::engine::Failure;
@@ -200,6 +202,10 @@ pub(crate) enum Command {
     GracefulSignalResult {
         handle: u64,
         result: Option<bool>,
+    },
+    CloseResult {
+        handle: u64,
+        succeeded: bool,
     },
     ForceCloseResult {
         handle: u64,
@@ -1080,7 +1086,7 @@ fn process_commands(
                 } else if let Some(session) = sessions.get_mut(handle) {
                     session.abandoned = true;
                     session.activation_deadline = None;
-                    let _ = close_session(session, broker_client);
+                    let _ = close_session(handle, session, broker_client);
                 }
                 let _ = reply.send(result);
             }
@@ -1311,6 +1317,20 @@ fn process_commands(
                     }
                 }
             }
+            Command::CloseResult { handle, succeeded } => {
+                if let Some(session) = sessions.get_mut(handle) {
+                    if !succeeded {
+                        session.cleanup_failure.get_or_insert_with(|| {
+                            OperationError::new(
+                                Operation::Close,
+                                FailureKind::InfrastructureLost,
+                                None,
+                            )
+                        });
+                        escalate_close(handle, session, broker_client);
+                    }
+                }
+            }
             Command::ForceCloseResult { handle, succeeded } => {
                 if let Some(session) = sessions.get_mut(handle) {
                     record_cleanup_result(session, succeeded);
@@ -1361,7 +1381,7 @@ fn process_controls(
                     session.input_bytes = 0;
                     session.input_entries = 0;
                     session.forget_output();
-                    let _ = close_session(session, broker);
+                    let _ = close_session(handle, session, broker);
                     let _ = update_read_filter(kqueue, handle, session, true);
                     let _ = update_write_filter(kqueue, handle, session, false);
                 }
@@ -1855,7 +1875,7 @@ fn refresh_modes(
     }
 }
 
-fn close_session(session: &mut Session, broker: &BrokerClient) -> bool {
+fn close_session(handle: u64, session: &mut Session, broker: &BrokerClient) -> bool {
     if session.close_started {
         return true;
     }
@@ -1864,7 +1884,7 @@ fn close_session(session: &mut Session, broker: &BrokerClient) -> bool {
         session.close_started = true;
         return true;
     }
-    if broker.close_async(session.broker_session).is_err() {
+    if broker.close_async(session.broker_session, handle).is_err() {
         return false;
     }
     session.admission.close();
@@ -2031,7 +2051,7 @@ fn reap_abandoned(
                 session.forget_output();
             }
             if session.abandoned && !session.close_started {
-                let _ = close_session(session, broker);
+                let _ = close_session(handle, session, broker);
             }
         }
         let removable = sessions.get(handle).is_some_and(|session| {
@@ -2065,7 +2085,7 @@ fn shutdown_all(
 ) {
     for handle in sessions.handles() {
         if let Some(session) = sessions.get_mut(handle) {
-            close_session(session, broker);
+            close_session(handle, session, broker);
         }
     }
     for handle in sessions.handles() {

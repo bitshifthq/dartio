@@ -34,11 +34,12 @@ use self::handles::{IoOperation, OwnedHandle, OwnedPseudoConsole};
 use crate::engine::control::{Control, ControlQueue, WakeGate};
 use crate::engine::event::{self, Receiver as EventReceiver, Sender as EventSender};
 use crate::engine::oneshot::{self, Sender as ReplySender};
-use crate::engine::session::{AdmissionResult, InputAdmission, SessionCore};
+#[cfg(any(feature = "__private_adapter", test))]
+use crate::engine::session::AdmissionResult;
+use crate::engine::session::{InputAdmission, SessionCore};
 use crate::engine::spawn::BrokerSpawn;
 #[cfg(feature = "__private_adapter")]
 use crate::engine::Failure;
-#[cfg(feature = "__private_adapter")]
 use crate::engine::{CloseResult, Completion, GenerationRegistry, Notice};
 use crate::error::{FailureKind, Operation, OperationError, WriteError, WriteErrorKind};
 
@@ -56,6 +57,7 @@ const ACTIVATION_TIMEOUT: Duration = Duration::from_secs(5);
 const CLOSE_KEY_TAG: usize = 1_usize << (usize::BITS - 2);
 const NOTICE_AVAILABLE_KEY: usize = 1_usize << (usize::BITS - 1);
 const PROCESS_EXIT_KEY_TAG: usize = 1_usize << (usize::BITS - 3);
+#[cfg(any(feature = "__private_adapter", test))]
 const WRITE_INFRASTRUCTURE_FAILURE: i64 = -2;
 static QUARANTINED_IO_OPERATIONS: AtomicUsize = AtomicUsize::new(0);
 static QUARANTINED_PSEUDOCONSOLES: AtomicUsize = AtomicUsize::new(0);
@@ -236,14 +238,6 @@ enum Command {
     ProcessId {
         handle: u64,
         reply: ReplySender<Result<i64, OperationError>>,
-    },
-    TerminalMode {
-        handle: u64,
-        reply: ReplySender<Result<[bool; 3], OperationError>>,
-    },
-    TerminalName {
-        handle: u64,
-        reply: ReplySender<Result<Vec<u8>, OperationError>>,
     },
     Resize {
         handle: u64,
@@ -1060,7 +1054,7 @@ impl IntegratedRuntime {
             })
     }
 
-    pub fn terminal_mode(&self, handle: u64) -> Result<[bool; 3], OperationError> {
+    pub fn terminal_mode(&self, _handle: u64) -> Result<[bool; 3], OperationError> {
         Err(OperationError::new(
             Operation::TerminalMode,
             FailureKind::Unsupported,
@@ -1068,7 +1062,7 @@ impl IntegratedRuntime {
         ))
     }
 
-    pub fn terminal_name(&self, handle: u64) -> Result<Vec<u8>, OperationError> {
+    pub fn terminal_name(&self, _handle: u64) -> Result<Vec<u8>, OperationError> {
         Err(OperationError::new(
             Operation::TerminalName,
             FailureKind::Unsupported,
@@ -1696,20 +1690,6 @@ fn process_commands(
                         OperationError::new(Operation::ProcessId, FailureKind::WrongState, None)
                     });
                 let _ = reply.send(result);
-            }
-            Command::TerminalMode { handle: _, reply } => {
-                let _ = reply.send(Err(OperationError::new(
-                    Operation::TerminalMode,
-                    FailureKind::Unsupported,
-                    None,
-                )));
-            }
-            Command::TerminalName { handle: _, reply } => {
-                let _ = reply.send(Err(OperationError::new(
-                    Operation::TerminalName,
-                    FailureKind::Unsupported,
-                    None,
-                )));
             }
             Command::Resize {
                 handle,

@@ -24,6 +24,7 @@ pub(crate) struct QueuedOutput {
 }
 
 /// Result of the non-blocking adapter admission attempt.
+#[cfg(any(feature = "__private_adapter", test))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum AdmissionResult {
     Accepted,

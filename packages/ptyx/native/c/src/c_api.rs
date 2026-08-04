@@ -372,12 +372,14 @@ pub unsafe fn ptyx_runtime_adapter_release(runtime: u64) -> u32 {
     let Some(entry) = runtime_entry(runtime) else {
         return STATUS_STALE_HANDLE;
     };
-    let previous = entry.adapter_count.load(Ordering::Acquire);
-    if previous == 0 {
-        return STATUS_WRONG_STATE;
+    match entry
+        .adapter_count
+        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+            count.checked_sub(1)
+        }) {
+        Ok(_) => STATUS_OK,
+        Err(_) => STATUS_WRONG_STATE,
     }
-    entry.adapter_count.fetch_sub(1, Ordering::AcqRel);
-    STATUS_OK
 }
 
 fn sessions() -> &'static RwLock<Registry<Arc<SessionEntry>>> {
@@ -1036,6 +1038,7 @@ unsafe fn populate_event(
 ) -> u32 {
     match notice {
         Notice::Output { bytes, .. } => {
+            let byte_length = bytes.len();
             event.kind = EVENT_OUTPUT;
             event.data = bytes.as_ptr();
             event.data_length = bytes.len() as u64;
@@ -1045,6 +1048,16 @@ unsafe fn populate_event(
                 bytes,
             };
             let Ok(mut state) = adapter().lock() else {
+                // The notice has already left the engine. Return its credit
+                // before reporting the adapter failure so a poisoned adapter
+                // registry cannot permanently consume the session's output
+                // budget.
+                if !runtime.engine.credit_async(engine_handle, byte_length) {
+                    // If the credit lane is unavailable, close the session
+                    // through the independent lifecycle lane instead of
+                    // leaving the engine's output lease live indefinitely.
+                    let _ = runtime.engine.try_abandon(engine_handle);
+                }
                 set_error(
                     error,
                     Error::value(
@@ -1844,7 +1857,7 @@ pub unsafe extern "C" fn ptyx_session_release(session: *mut u64, error: *mut Err
             set_error(error, stale_error(OPERATION_CLOSE));
             return STATUS_STALE_HANDLE;
         };
-        let engine_handle = {
+        let _engine_handle = {
             // Keep the registry lock order consistent with event publication
             // and spawn activation: session state first, then the runtime
             // session map. Reversing these locks lets a close event, spawn
@@ -1874,18 +1887,31 @@ pub unsafe extern "C" fn ptyx_session_release(session: *mut u64, error: *mut Err
                 | SessionState::Failed
                 | SessionState::Released => None,
             };
-            *session_state = SessionState::Released;
             if let Some(engine_handle) = engine_handle {
+                // Do not discard the adapter's only ownership record until the
+                // native reactor has accepted the abandonment command. A
+                // bounded lifecycle queue may reject it under saturation or
+                // shutdown; retaining the handle lets the caller retry.
+                if !entry.runtime.engine.try_abandon(engine_handle) {
+                    set_error(
+                        error,
+                        Error::value(
+                            ERROR_DOMAIN_RUNTIME,
+                            ERROR_INFRASTRUCTURE_LOST,
+                            OPERATION_CLOSE,
+                            0,
+                        ),
+                    );
+                    return STATUS_INTERNAL;
+                }
                 sessions.remove(&engine_handle);
             }
+            *session_state = SessionState::Released;
             engine_handle
         };
-        if let Some(engine_handle) = engine_handle {
-            entry.runtime.engine.try_abandon(engine_handle);
-        }
-        let Ok(mut state) = sessions().write() else {
-            return STATUS_INTERNAL;
-        };
+        let mut state = sessions()
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         if state.remove(*session).is_none() {
             set_error(error, stale_error(OPERATION_CLOSE));
             return STATUS_STALE_HANDLE;
@@ -1925,10 +1951,13 @@ pub unsafe extern "C" fn ptyx_event_release(event: *mut Event, error: *mut Error
             set_error(error, stale_error(OPERATION_OUTPUT));
             return STATUS_STALE_HANDLE;
         };
-        if !lease
-            .runtime
-            .engine
-            .credit_async(lease.engine_handle, lease.bytes.len())
+        let credit_required = !lease.runtime.shut_down.load(Ordering::Acquire);
+        if credit_required
+            && !lease
+                .runtime
+                .engine
+                .credit_async(lease.engine_handle, lease.bytes.len())
+            && !lease.runtime.shut_down.load(Ordering::Acquire)
         {
             set_error(
                 error,

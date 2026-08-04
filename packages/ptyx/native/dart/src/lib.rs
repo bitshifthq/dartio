@@ -11,7 +11,7 @@ use std::ffi::c_void;
 use std::mem::size_of;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
@@ -21,7 +21,6 @@ const EVENT_SPAWN_FAILED: u32 = 2;
 const EVENT_OUTPUT: u32 = 3;
 const EVENT_INFRASTRUCTURE_FAILED: u32 = 6;
 const EVENT_CLOSE_COMPLETE: u32 = 9;
-const CLEANUP_RETRIES: usize = 8;
 const CLEANUP_RETRY_DELAY: Duration = Duration::from_millis(10);
 const CLEANUP_RETRY_MAX_DELAY: Duration = Duration::from_secs(1);
 static DART_INITIALIZED: AtomicBool = AtomicBool::new(false);
@@ -34,6 +33,7 @@ struct PumpState {
 
 struct Pump {
     handle: AtomicU64,
+    in_flight_events: AtomicUsize,
     runtime: u64,
     runtime_retained: AtomicBool,
     port: i64,
@@ -47,6 +47,7 @@ impl Pump {
     fn new(runtime: u64, port: i64) -> Self {
         Self {
             handle: AtomicU64::new(0),
+            in_flight_events: AtomicUsize::new(0),
             runtime,
             runtime_retained: AtomicBool::new(true),
             port,
@@ -59,6 +60,21 @@ impl Pump {
             cleaned: AtomicBool::new(false),
             thread: Mutex::new(None),
         }
+    }
+}
+
+struct EventWait<'a>(&'a AtomicUsize);
+
+impl EventWait<'_> {
+    fn start(counter: &AtomicUsize) -> EventWait<'_> {
+        counter.fetch_add(1, Ordering::AcqRel);
+        EventWait(counter)
+    }
+}
+
+impl Drop for EventWait<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
     }
 }
 
@@ -106,50 +122,39 @@ fn schedule_cleanup(cleanup: Cleanup) {
 }
 
 fn retry_adapter(handle: u64) {
-    let mut delay = CLEANUP_RETRY_DELAY;
-    for attempt in 0..CLEANUP_RETRIES {
+    retry_until_terminal(|| {
         let mut adapter = handle;
-        let status = unsafe { detach_adapter(&mut adapter, ptr::null_mut()) };
-        if status == STATUS_OK || adapter == 0 {
-            return;
-        }
-        if attempt + 1 < CLEANUP_RETRIES {
-            thread::sleep(delay);
-            delay = (delay * 2).min(CLEANUP_RETRY_MAX_DELAY);
-        }
-    }
+        unsafe { detach_adapter(&mut adapter, ptr::null_mut()) }
+    });
 }
 
 fn retry_session(handle: u64) {
-    let mut delay = CLEANUP_RETRY_DELAY;
-    for attempt in 0..CLEANUP_RETRIES {
-        let status = release_session_handle(handle);
-        if status == STATUS_OK || status == STATUS_STALE_HANDLE {
-            return;
-        }
-        if attempt + 1 < CLEANUP_RETRIES {
-            thread::sleep(delay);
-            delay = (delay * 2).min(CLEANUP_RETRY_MAX_DELAY);
-        }
-    }
+    retry_until_terminal(|| release_session_handle(handle));
 }
 
 fn retry_event(adapter: u64, token: u64) {
-    let Some(pump) = pump(adapter) else {
-        return;
-    };
-    let mut delay = CLEANUP_RETRY_DELAY;
-    for attempt in 0..CLEANUP_RETRIES {
-        let status = acknowledge_token(&pump, token, || unsafe {
+    retry_until_terminal(|| {
+        let Some(pump) = pump(adapter) else {
+            return unsafe { release_event(token, ptr::null_mut()) };
+        };
+        acknowledge_token(&pump, token, || unsafe {
             release_event(token, ptr::null_mut())
-        });
+        })
+    });
+}
+
+/// Retains ownership until a cleanup operation reaches an idempotent terminal
+/// state. Cleanup runs off the Dart-facing thread, so a transient native
+/// shutdown failure cannot leak a resource by exhausting a fixed retry budget.
+fn retry_until_terminal(mut operation: impl FnMut() -> u32) {
+    let mut delay = CLEANUP_RETRY_DELAY;
+    loop {
+        let status = operation();
         if status == STATUS_OK || status == STATUS_STALE_HANDLE {
             return;
         }
-        if attempt + 1 < CLEANUP_RETRIES {
-            thread::sleep(delay);
-            delay = (delay * 2).min(CLEANUP_RETRY_MAX_DELAY);
-        }
+        thread::sleep(delay);
+        delay = (delay * 2).min(CLEANUP_RETRY_MAX_DELAY);
     }
 }
 
@@ -560,7 +565,7 @@ unsafe fn detach_adapter(adapter: *mut u64, error: *mut Error) -> u32 {
         *adapter = 0;
         return STATUS_OK;
     };
-    stop_pump(&value);
+    let stop_status = stop_pump(&value);
     if let Some(worker) = value
         .thread
         .lock()
@@ -569,7 +574,12 @@ unsafe fn detach_adapter(adapter: *mut u64, error: *mut Error) -> u32 {
     {
         let _ = worker.join();
     }
-    let status = cleanup_pump(&value);
+    let cleanup_status = cleanup_pump(&value);
+    let status = if cleanup_status == STATUS_OK {
+        stop_status
+    } else {
+        cleanup_status
+    };
     if status != STATUS_OK {
         return status;
     }
@@ -613,6 +623,7 @@ fn pump_events(pump: &Arc<Pump>) {
             break;
         }
 
+        let _wait = EventWait::start(&pump.in_flight_events);
         let mut event = Event::empty(size_of::<Event>() as u32);
         let mut error = Error::none();
         let status =
@@ -631,6 +642,16 @@ fn pump_events(pump: &Arc<Pump>) {
             break;
         }
 
+        if pump
+            .state
+            .lock()
+            .map(|state| state.stopping)
+            .unwrap_or(true)
+        {
+            retain_unpublished_event(pump, &event);
+            break;
+        }
+
         if event.kind == EVENT_OUTPUT {
             let mut state = pump
                 .state
@@ -643,16 +664,6 @@ fn pump_events(pump: &Arc<Pump>) {
             {
                 drop(state);
                 handle_invalid_event(pump, &event);
-                break;
-            }
-            if state.stopping {
-                drop(state);
-                let status = unsafe { release_event(event.token, ptr::null_mut()) };
-                if status != STATUS_OK && status != STATUS_STALE_HANDLE {
-                    if let Ok(mut state) = pump.state.lock() {
-                        state.outstanding.insert(event.token);
-                    }
-                }
                 break;
             }
             state.outstanding.insert(event.token);
@@ -745,6 +756,15 @@ fn handle_invalid_event(pump: &Pump, event: &Event) {
     }
 }
 
+fn retain_unpublished_event(pump: &Pump, event: &Event) {
+    let status = unsafe { release_event(event.token, ptr::null_mut()) };
+    if event.token != 0 && status != STATUS_OK && status != STATUS_STALE_HANDLE {
+        if let Ok(mut state) = pump.state.lock() {
+            state.outstanding.insert(event.token);
+        }
+    }
+}
+
 fn release_completed_session(pump: &Pump, session: u64) -> u32 {
     let Ok(mut state) = pump.state.lock() else {
         return STATUS_INTERNAL;
@@ -798,6 +818,16 @@ fn cleanup_pump(pump: &Pump) -> u32 {
     if pump.cleaned.load(Ordering::Acquire) {
         return STATUS_OK;
     }
+    // Stop publication before taking the ownership snapshot. The in-flight
+    // wait counter ensures a completed native event cannot add a lease after
+    // this snapshot, even when shutdown races the event thread.
+    if let Ok(mut state) = pump.state.lock() {
+        state.stopping = true;
+    }
+    let shutdown_status = stop_pump(pump);
+    while pump.in_flight_events.load(Ordering::Acquire) != 0 {
+        thread::yield_now();
+    }
     let (events, sessions) = {
         let state = pump
             .state
@@ -807,9 +837,10 @@ fn cleanup_pump(pump: &Pump) -> u32 {
         let sessions = state.sessions.iter().copied().collect::<Vec<_>>();
         (events, sessions)
     };
-    // Return output credit and abandon sessions while the engine is still
-    // running. Shutting it down first would accept a credit into a stopped
-    // reactor and then incorrectly discard the corresponding event lease.
+    // Return output credit and abandon sessions before the final runtime
+    // release. If an explicit detach already stopped the runtime, the C ABI
+    // treats those leases as terminal and relinquishes them without queuing
+    // credit into a reactor that can no longer consume it.
     let mut cleanup_status = STATUS_OK;
     for token in events {
         unsafe {
@@ -833,7 +864,6 @@ fn cleanup_pump(pump: &Pump) -> u32 {
             }
         }
     }
-    let shutdown_status = stop_pump(pump);
     if shutdown_status != STATUS_OK {
         cleanup_status = shutdown_status;
     }
@@ -956,9 +986,10 @@ unsafe extern "C" {
 mod tests {
     use super::{
         acknowledge_token, ptyd_runtime_abort, ptyd_runtime_detach, pumps, release_tracked_session,
-        retry_adapter, Pump,
+        retry_adapter, retry_until_terminal, Pump,
     };
     use ptyx_c::private::{self as c_api, Error, STATUS_INTERNAL, STATUS_OK};
+    use std::sync::atomic::AtomicUsize;
     use std::sync::Arc;
 
     #[test]
@@ -1058,5 +1089,20 @@ mod tests {
             .expect("pump state")
             .outstanding
             .contains(&7));
+    }
+
+    #[test]
+    fn cleanup_retry_does_not_drop_transient_failures() {
+        let attempts = AtomicUsize::new(0);
+        retry_until_terminal(|| {
+            let attempt = attempts.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            if attempt < 2 {
+                STATUS_INTERNAL
+            } else {
+                STATUS_OK
+            }
+        });
+
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::Acquire), 3);
     }
 }

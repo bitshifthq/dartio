@@ -673,6 +673,7 @@ enum Request {
     },
     CloseDetached {
         session: u64,
+        handle: u64,
     },
     GracefulSignal {
         session: u64,
@@ -798,8 +799,8 @@ impl BrokerClient {
             .ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "broker worker stopped"))?
     }
 
-    pub(crate) fn close_async(&self, session: u64) -> io::Result<()> {
-        self.send(Request::CloseDetached { session })
+    pub(crate) fn close_async(&self, session: u64, handle: u64) -> io::Result<()> {
+        self.send(Request::CloseDetached { session, handle })
     }
 
     pub(crate) fn graceful_signal_async(&self, session: u64, handle: u64) -> io::Result<()> {
@@ -1132,8 +1133,12 @@ fn run_worker(
                     Request::Spawn { config, reply } => {
                         let _ = reply.send(worker.spawn(config));
                     }
-                    Request::CloseDetached { session } => {
-                        let _ = worker.close(session);
+                    Request::CloseDetached { session, handle } => {
+                        let succeeded = worker.close(session).is_ok();
+                        let _ = worker
+                            .reactor_commands
+                            .send(Command::CloseResult { handle, succeeded });
+                        let _ = wake_socket(worker.reactor_wake.as_raw_fd());
                     }
                     Request::GracefulSignal { session, handle } => {
                         let result = worker.signal(session, libc::SIGTERM).ok();
