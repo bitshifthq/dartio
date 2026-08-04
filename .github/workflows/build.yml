@@ -215,6 +215,8 @@ jobs:
             ptyd_event_ack \
             ptyd_initialize \
             ptyd_runtime_attach \
+            ptyd_runtime_abort \
+            ptyd_runtime_capabilities \
             ptyd_runtime_detach \
             ptyd_runtime_finalize \
             ptyd_session_finalize \

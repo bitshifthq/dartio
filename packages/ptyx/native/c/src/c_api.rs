@@ -341,7 +341,10 @@ fn runtime_entry(handle: u64) -> Option<Arc<RuntimeEntry>> {
 /// `error` must be null or point to initialized compatible error storage.
 pub unsafe fn ptyx_runtime_adapter_retain(runtime: u64, error: *mut Error) -> u32 {
     boundary(error, || {
-        let Some(entry) = runtime_entry(runtime) else {
+        let Ok(state) = adapter().lock() else {
+            return STATUS_INTERNAL;
+        };
+        let Some(entry) = state.runtimes.get(runtime) else {
             set_error(error, stale_error(OPERATION_RUNTIME_CREATE));
             return STATUS_STALE_HANDLE;
         };
@@ -1137,7 +1140,10 @@ unsafe fn populate_event(
 /// `error`, when non-null, must point to compatible initialized storage.
 pub unsafe extern "C" fn ptyx_runtime_shutdown(runtime: u64, error: *mut Error) -> u32 {
     boundary(error, || {
-        let Some(runtime) = runtime_entry(runtime) else {
+        let Ok(state) = adapter().lock() else {
+            return STATUS_INTERNAL;
+        };
+        let Some(runtime) = state.runtimes.get(runtime) else {
             set_error(error, stale_error(OPERATION_RUNTIME_SHUTDOWN));
             return STATUS_STALE_HANDLE;
         };
@@ -1177,7 +1183,10 @@ pub unsafe extern "C" fn ptyx_runtime_release(runtime: *mut u64, error: *mut Err
         if *runtime == 0 {
             return STATUS_OK;
         }
-        let Some(entry) = runtime_entry(*runtime) else {
+        let Ok(mut state) = adapter().lock() else {
+            return STATUS_INTERNAL;
+        };
+        let Some(entry) = state.runtimes.get(*runtime).map(Arc::clone) else {
             set_error(error, stale_error(OPERATION_RUNTIME_SHUTDOWN));
             return STATUS_STALE_HANDLE;
         };
@@ -1197,9 +1206,6 @@ pub unsafe extern "C" fn ptyx_runtime_release(runtime: *mut u64, error: *mut Err
             );
             return STATUS_BUSY;
         }
-        let Ok(mut state) = adapter().lock() else {
-            return STATUS_INTERNAL;
-        };
         if state.runtimes.remove(*runtime).is_none() {
             set_error(error, stale_error(OPERATION_RUNTIME_SHUTDOWN));
             return STATUS_STALE_HANDLE;

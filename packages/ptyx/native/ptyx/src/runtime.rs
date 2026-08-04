@@ -240,10 +240,8 @@ impl Session {
     ///
     /// Success transfers the owned buffer without another facade or engine
     /// copy. The operation never waits for PTY writability or queue capacity.
+    /// An empty buffer is a successful no-op, matching the C ABI.
     pub fn write(&self, bytes: Bytes) -> Result<(), WriteError> {
-        if bytes.is_empty() {
-            return Err(WriteError::new(WriteErrorKind::Empty, bytes, None));
-        }
         if self.control.closing.load(Ordering::Acquire) {
             return Err(WriteError::new(WriteErrorKind::Closed, bytes, None));
         }

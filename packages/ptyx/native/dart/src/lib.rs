@@ -6,16 +6,16 @@ use ptyx_c::private::{
     OPERATION_RUNTIME_SHUTDOWN, STATUS_INTERNAL, STATUS_INVALID_ARGUMENT, STATUS_OK,
     STATUS_STALE_HANDLE, STATUS_WRONG_STATE,
 };
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::ffi::c_void;
 use std::mem::size_of;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::mpsc::{self, Sender};
+use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const EVENT_SPAWN_FAILED: u32 = 2;
 const EVENT_OUTPUT: u32 = 3;
@@ -93,6 +93,28 @@ enum Cleanup {
     Session(u64),
 }
 
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+enum CleanupKey {
+    Adapter(u64),
+    Event { adapter: u64, token: u64 },
+    Session(u64),
+}
+
+impl Cleanup {
+    fn key(&self) -> CleanupKey {
+        match *self {
+            Self::Adapter(handle) => CleanupKey::Adapter(handle),
+            Self::Event { adapter, token } => CleanupKey::Event { adapter, token },
+            Self::Session(handle) => CleanupKey::Session(handle),
+        }
+    }
+}
+
+fn pending_cleanup() -> &'static Mutex<HashSet<CleanupKey>> {
+    static PENDING: OnceLock<Mutex<HashSet<CleanupKey>>> = OnceLock::new();
+    PENDING.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
 fn cleanup_sender() -> Option<&'static Sender<Cleanup>> {
     static CLEANUP: OnceLock<Option<Sender<Cleanup>>> = OnceLock::new();
     CLEANUP
@@ -101,11 +123,36 @@ fn cleanup_sender() -> Option<&'static Sender<Cleanup>> {
             thread::Builder::new()
                 .name("ptyx-dart-cleanup".into())
                 .spawn(move || {
-                    while let Ok(cleanup) = receiver.recv() {
-                        match cleanup {
-                            Cleanup::Adapter(handle) => retry_adapter(handle),
-                            Cleanup::Event { adapter, token } => retry_event(adapter, token),
-                            Cleanup::Session(handle) => retry_session(handle),
+                    let mut pending: VecDeque<PendingCleanup> = VecDeque::new();
+                    loop {
+                        let now = Instant::now();
+                        let due = pending
+                            .iter()
+                            .map(|item| item.retry_at.saturating_duration_since(now))
+                            .min();
+                        let wait = due.unwrap_or(CLEANUP_RETRY_MAX_DELAY);
+                        match receiver.recv_timeout(wait) {
+                            Ok(cleanup) => pending.push_back(PendingCleanup::new(cleanup)),
+                            Err(RecvTimeoutError::Timeout) => {
+                                let Some(index) = pending
+                                    .iter()
+                                    .position(|item| item.retry_at <= Instant::now())
+                                else {
+                                    continue;
+                                };
+                                let Some(mut item) = pending.remove(index) else {
+                                    continue;
+                                };
+                                let status = attempt_cleanup(&item.cleanup);
+                                if status != STATUS_OK && status != STATUS_STALE_HANDLE {
+                                    item.retry_at = Instant::now() + item.delay;
+                                    item.delay = (item.delay * 2).min(CLEANUP_RETRY_MAX_DELAY);
+                                    pending.push_back(item);
+                                } else if let Ok(mut keys) = pending_cleanup().lock() {
+                                    keys.remove(&item.cleanup.key());
+                                }
+                            }
+                            Err(RecvTimeoutError::Disconnected) => break,
                         }
                     }
                 })
@@ -115,46 +162,54 @@ fn cleanup_sender() -> Option<&'static Sender<Cleanup>> {
         .as_ref()
 }
 
-fn schedule_cleanup(cleanup: Cleanup) {
-    if let Some(sender) = cleanup_sender() {
-        let _ = sender.send(cleanup);
+struct PendingCleanup {
+    cleanup: Cleanup,
+    retry_at: Instant,
+    delay: Duration,
+}
+
+impl PendingCleanup {
+    fn new(cleanup: Cleanup) -> Self {
+        Self {
+            cleanup,
+            retry_at: Instant::now(),
+            delay: CLEANUP_RETRY_DELAY,
+        }
     }
 }
 
-fn retry_adapter(handle: u64) {
-    retry_until_terminal(|| {
-        let mut adapter = handle;
-        unsafe { detach_adapter(&mut adapter, ptr::null_mut()) }
-    });
-}
-
-fn retry_session(handle: u64) {
-    retry_until_terminal(|| release_session_handle(handle));
-}
-
-fn retry_event(adapter: u64, token: u64) {
-    retry_until_terminal(|| {
-        let Some(pump) = pump(adapter) else {
-            return unsafe { release_event(token, ptr::null_mut()) };
-        };
-        acknowledge_token(&pump, token, || unsafe {
-            release_event(token, ptr::null_mut())
-        })
-    });
-}
-
-/// Retains ownership until a cleanup operation reaches an idempotent terminal
-/// state. Cleanup runs off the Dart-facing thread, so a transient native
-/// shutdown failure cannot leak a resource by exhausting a fixed retry budget.
-fn retry_until_terminal(mut operation: impl FnMut() -> u32) {
-    let mut delay = CLEANUP_RETRY_DELAY;
-    loop {
-        let status = operation();
-        if status == STATUS_OK || status == STATUS_STALE_HANDLE {
-            return;
+fn attempt_cleanup(cleanup: &Cleanup) -> u32 {
+    match cleanup {
+        Cleanup::Adapter(handle) => {
+            let mut adapter = *handle;
+            unsafe { detach_adapter(&mut adapter, ptr::null_mut()) }
         }
-        thread::sleep(delay);
-        delay = (delay * 2).min(CLEANUP_RETRY_MAX_DELAY);
+        Cleanup::Event { adapter, token } => {
+            let Some(pump) = pump(*adapter) else {
+                return unsafe { release_event(*token, ptr::null_mut()) };
+            };
+            acknowledge_token(&pump, *token, || unsafe {
+                release_event(*token, ptr::null_mut())
+            })
+        }
+        Cleanup::Session(handle) => release_session_handle(*handle),
+    }
+}
+
+fn schedule_cleanup(cleanup: Cleanup) {
+    let key = cleanup.key();
+    let Ok(mut pending) = pending_cleanup().lock() else {
+        return;
+    };
+    if !pending.insert(key) {
+        return;
+    }
+    if let Some(sender) = cleanup_sender() {
+        if sender.send(cleanup).is_err() {
+            pending.remove(&key);
+        }
+    } else {
+        pending.remove(&key);
     }
 }
 
@@ -596,9 +651,7 @@ pub extern "C" fn ptyd_runtime_finalize(token: *mut c_void) {
     if handle == 0 {
         return;
     }
-    if let Some(sender) = cleanup_sender() {
-        let _ = sender.send(Cleanup::Adapter(handle));
-    }
+    schedule_cleanup(Cleanup::Adapter(handle));
 }
 
 #[no_mangle]
@@ -607,23 +660,17 @@ pub extern "C" fn ptyd_session_finalize(token: *mut c_void) {
     if handle == 0 {
         return;
     }
-    if let Some(sender) = cleanup_sender() {
-        let _ = sender.send(Cleanup::Session(handle));
-    }
+    schedule_cleanup(Cleanup::Session(handle));
 }
 
 fn pump_events(pump: &Arc<Pump>) {
     loop {
-        if pump
-            .state
-            .lock()
-            .map(|state| state.stopping)
-            .unwrap_or(true)
-        {
+        // Register the native wait while holding the same lock used by
+        // cleanup_pump to stop publication. This closes the shutdown race in
+        // which cleanup could snapshot ownership before a late waiter starts.
+        let Some(_wait) = begin_event_wait(pump) else {
             break;
-        }
-
-        let _wait = EventWait::start(&pump.in_flight_events);
+        };
         let mut event = Event::empty(size_of::<Event>() as u32);
         let mut error = Error::none();
         let status =
@@ -714,6 +761,14 @@ fn pump_events(pump: &Arc<Pump>) {
     } else if handle != 0 {
         schedule_cleanup(Cleanup::Adapter(handle));
     }
+}
+
+fn begin_event_wait(pump: &Pump) -> Option<EventWait<'_>> {
+    let state = pump.state.lock().ok()?;
+    if state.stopping {
+        return None;
+    }
+    Some(EventWait::start(&pump.in_flight_events))
 }
 
 unsafe fn post_terminal_failure(port: i64) {
@@ -985,12 +1040,19 @@ unsafe extern "C" {
 #[cfg(test)]
 mod tests {
     use super::{
-        acknowledge_token, ptyd_runtime_abort, ptyd_runtime_detach, pumps, release_tracked_session,
-        retry_adapter, retry_until_terminal, Pump,
+        acknowledge_token, attempt_cleanup, begin_event_wait, ptyd_runtime_abort,
+        ptyd_runtime_detach, pumps, release_tracked_session, Cleanup, Pump,
     };
     use ptyx_c::private::{self as c_api, Error, STATUS_INTERNAL, STATUS_OK};
-    use std::sync::atomic::AtomicUsize;
     use std::sync::Arc;
+
+    #[test]
+    fn event_wait_registration_obeys_stop_state() {
+        let pump = Pump::new(0, 1);
+        assert!(begin_event_wait(&pump).is_some());
+        drop(pump.state.lock().map(|mut state| state.stopping = true));
+        assert!(begin_event_wait(&pump).is_none());
+    }
 
     #[test]
     fn concurrent_detach_releases_runtime_once() {
@@ -1007,7 +1069,7 @@ mod tests {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .insert(Arc::clone(&pump));
 
-        let cleanup = std::thread::spawn(move || retry_adapter(handle));
+        let cleanup = std::thread::spawn(move || attempt_cleanup(&Cleanup::Adapter(handle)));
         let mut explicit = handle;
         let status = unsafe { ptyd_runtime_detach(&mut explicit, &mut error) };
         cleanup.join().expect("cleanup worker panicked");
@@ -1089,20 +1151,5 @@ mod tests {
             .expect("pump state")
             .outstanding
             .contains(&7));
-    }
-
-    #[test]
-    fn cleanup_retry_does_not_drop_transient_failures() {
-        let attempts = AtomicUsize::new(0);
-        retry_until_terminal(|| {
-            let attempt = attempts.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-            if attempt < 2 {
-                STATUS_INTERNAL
-            } else {
-                STATUS_OK
-            }
-        });
-
-        assert_eq!(attempts.load(std::sync::atomic::Ordering::Acquire), 3);
     }
 }

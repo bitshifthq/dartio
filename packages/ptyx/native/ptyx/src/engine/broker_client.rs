@@ -34,6 +34,9 @@ const SPAWN_OK: u16 = 3;
 const ERROR: u16 = 4;
 const CLOSE: u16 = 5;
 const CLOSE_RESULT: u16 = 6;
+const CLOSE_KILLED: u32 = 1;
+const CLOSE_ALREADY_EXITED: u32 = 2;
+const CLOSE_STALE: u32 = 3;
 const EXIT: u16 = 7;
 const RELEASE: u16 = 8;
 const RELEASE_RESULT: u16 = 9;
@@ -1005,8 +1008,9 @@ impl Worker {
         frame.request = request;
         frame.session = session;
         send_frame(self.control.as_raw_fd(), &frame)?;
-        let _ = self.receive_for(request, CLOSE_RESULT)?;
-        Ok(())
+        let (response, passed) = self.receive_for(request, CLOSE_RESULT)?;
+        drop(passed);
+        close_status(response.aux)
     }
 
     fn release(&mut self, session: u64) -> io::Result<()> {
@@ -1029,7 +1033,11 @@ impl Worker {
     }
 
     fn abort(&mut self, session: u64) -> io::Result<()> {
-        self.close(session)?;
+        match self.close(session) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error),
+        }
         if self.exits.remove(&session).is_none() {
             loop {
                 let (frame, passed) = self.receive()?;
@@ -1067,6 +1075,20 @@ impl Worker {
             terminate_process(self.broker_pid);
         }
         reap_process(self.broker_pid)
+    }
+}
+
+fn close_status(status: u32) -> io::Result<()> {
+    match status {
+        CLOSE_KILLED | CLOSE_ALREADY_EXITED => Ok(()),
+        CLOSE_STALE => Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "broker session is stale",
+        )),
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "broker returned an unknown close result",
+        )),
     }
 }
 
@@ -1309,4 +1331,25 @@ fn drain(fd: RawFd) {
 
 unsafe extern "C" {
     static mut environ: *mut *mut libc::c_char;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{close_status, CLOSE_ALREADY_EXITED, CLOSE_KILLED, CLOSE_STALE};
+    use std::io::ErrorKind;
+
+    #[test]
+    fn close_status_accepts_killed_and_already_exited() {
+        assert!(close_status(CLOSE_KILLED).is_ok());
+        assert!(close_status(CLOSE_ALREADY_EXITED).is_ok());
+    }
+
+    #[test]
+    fn close_status_preserves_stale_and_unknown_results() {
+        assert_eq!(
+            close_status(CLOSE_STALE).unwrap_err().kind(),
+            ErrorKind::NotFound
+        );
+        assert_eq!(close_status(99).unwrap_err().kind(), ErrorKind::InvalidData);
+    }
 }

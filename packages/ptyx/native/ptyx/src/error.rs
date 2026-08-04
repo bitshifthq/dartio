@@ -252,8 +252,6 @@ impl Error for SpawnError {
 /// A write was not accepted.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WriteErrorKind {
-    /// Empty writes are not valid input operations.
-    Empty,
     /// The bounded input queue cannot accept the complete buffer now.
     Backpressure,
     /// The input direction is permanently closed or failed.
@@ -265,7 +263,6 @@ pub enum WriteErrorKind {
 impl fmt::Display for WriteErrorKind {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
-            Self::Empty => "an input write must contain at least one byte",
             Self::Backpressure => "the bounded input queue is full",
             Self::Closed => "the session input is closed",
             Self::Infrastructure => "the native runtime is unavailable",
