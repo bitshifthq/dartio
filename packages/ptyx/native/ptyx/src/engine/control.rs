@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 #[cfg(unix)]
 use std::io;
 #[cfg(unix)]
@@ -102,7 +102,7 @@ mod wake_tests {
 }
 
 pub(crate) struct ControlQueue {
-    values: Mutex<VecDeque<Control>>,
+    credits: Mutex<HashMap<u64, usize>>,
     lifecycle: Mutex<VecDeque<Control>>,
 }
 
@@ -112,32 +112,44 @@ const MAX_LIFECYCLE_ENTRIES: usize = 1024;
 impl ControlQueue {
     pub(crate) fn new() -> Self {
         Self {
-            values: Mutex::new(VecDeque::new()),
+            credits: Mutex::new(HashMap::new()),
             lifecycle: Mutex::new(VecDeque::new()),
         }
     }
 
     pub(crate) fn push(&self, value: Control) -> bool {
-        if matches!(value, Control::Abandon { .. }) {
-            let mut lifecycle = self
-                .lifecycle
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            if lifecycle.len() >= MAX_LIFECYCLE_ENTRIES {
-                return false;
+        match value {
+            Control::Credit { handle, bytes } => {
+                let mut credits = self
+                    .credits
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                if let Some(total) = credits.get_mut(&handle) {
+                    let Some(updated) = total.checked_add(bytes) else {
+                        return false;
+                    };
+                    *total = updated;
+                    true
+                } else {
+                    if credits.len() >= MAX_CONTROL_ENTRIES {
+                        return false;
+                    }
+                    credits.insert(handle, bytes);
+                    true
+                }
             }
-            lifecycle.push_back(value);
-            return true;
+            Control::Abandon { handle } => {
+                let mut lifecycle = self
+                    .lifecycle
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                if lifecycle.len() >= MAX_LIFECYCLE_ENTRIES {
+                    return false;
+                }
+                lifecycle.push_back(Control::Abandon { handle });
+                true
+            }
         }
-        let mut values = self
-            .values
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if values.len() >= MAX_CONTROL_ENTRIES {
-            return false;
-        }
-        values.push_back(value);
-        true
     }
 
     pub(crate) fn swap_into(&self, target: &mut VecDeque<Control>) {
@@ -145,18 +157,23 @@ impl ControlQueue {
             .lifecycle
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let mut values = self
-            .values
+        target.append(&mut lifecycle);
+        let mut credits = self
+            .credits
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        target.append(&mut lifecycle);
-        target.append(&mut values);
+        target.extend(
+            credits
+                .drain()
+                .map(|(handle, bytes)| Control::Credit { handle, bytes }),
+        );
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{Control, ControlQueue, WakeGate, MAX_CONTROL_ENTRIES};
+    use std::collections::VecDeque;
 
     #[test]
     fn wake_gate_coalesces_until_the_reactor_clears_it() {
@@ -170,7 +187,7 @@ mod tests {
     }
 
     #[test]
-    fn control_queue_rejects_unbounded_growth() {
+    fn control_queue_coalesces_credit_without_unbounded_growth() {
         let queue = ControlQueue::new();
         for _ in 0..MAX_CONTROL_ENTRIES {
             assert!(queue.push(Control::Credit {
@@ -178,10 +195,17 @@ mod tests {
                 bytes: 1
             }));
         }
-        assert!(!queue.push(Control::Credit {
+        assert!(queue.push(Control::Credit {
             handle: 1,
             bytes: 1
         }));
+        assert!(queue.push(Control::Credit {
+            handle: 2,
+            bytes: 1
+        }));
+        let mut target = VecDeque::new();
+        queue.swap_into(&mut target);
+        assert_eq!(target.len(), 2);
         assert!(queue.push(Control::Abandon { handle: 1 }));
     }
 }
