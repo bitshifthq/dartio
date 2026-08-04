@@ -406,6 +406,34 @@ fn retire_session_entry(runtime: &Arc<RuntimeEntry>, handle: u64) {
     }
 }
 
+fn retire_released_sessions(runtime: &Arc<RuntimeEntry>) {
+    let handles = sessions()
+        .read()
+        .map(|state| {
+            state
+                .slots
+                .iter()
+                .enumerate()
+                .filter_map(|(index, slot)| {
+                    let handle = (u64::from(slot.generation) << 32) | (index as u64 + 1);
+                    slot.value.as_ref().and_then(|entry| {
+                        (Arc::ptr_eq(&entry.runtime, runtime)
+                            && entry
+                                .state
+                                .lock()
+                                .map(|state| matches!(*state, SessionState::Released))
+                                .unwrap_or(false))
+                        .then_some(handle)
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    for handle in handles {
+        retire_session_entry(runtime, handle);
+    }
+}
+
 fn active_session(handle: u64) -> Result<(Arc<SessionEntry>, u64), u32> {
     let entry = session_entry(handle).ok_or(STATUS_STALE_HANDLE)?;
     let state = *entry.state.lock().map_err(|_| STATUS_INTERNAL)?;
@@ -1228,6 +1256,10 @@ pub unsafe extern "C" fn ptyx_runtime_shutdown(runtime: u64, error: *mut Error) 
             );
             return STATUS_INTERNAL;
         }
+        // A spawn reservation can be released before its readiness event is
+        // consumed. Once the engine has stopped, no event can retire that
+        // reservation, so remove the adapter-only tombstone here.
+        retire_released_sessions(runtime);
         runtime.shut_down.store(true, Ordering::Release);
         STATUS_OK
     })
