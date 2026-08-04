@@ -32,7 +32,7 @@ use std::time::{Duration, Instant};
 const BYTE_QUANTUM: usize = 64 * 1024;
 const SYSCALL_QUANTUM: usize = 4;
 const INTERACTIVE_BATCH: usize = 256;
-const OUTPUT_BATCH: usize = 64 * 1024;
+const OUTPUT_BATCH: usize = 128 * 1024;
 const OUTPUT_DELAY: Duration = Duration::from_millis(1);
 const COMMAND_QUANTUM: usize = 64;
 const COMMAND_CAPACITY: usize = 1024;

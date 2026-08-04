@@ -10,7 +10,7 @@ const MAX_INPUT_ENTRIES: usize = 4096;
 // Keep queued output aligned with the platform delivery batch. This bounds a
 // maximum-capacity session to 1024 queued allocations and lets pull_output
 // transfer the common 64 KiB chunk without an intermediate coalescing copy.
-const OUTPUT_CHUNK_TARGET: usize = 64 * 1024;
+const OUTPUT_CHUNK_TARGET: usize = 128 * 1024;
 
 pub(crate) struct QueuedInput {
     pub(crate) bytes: Bytes,
