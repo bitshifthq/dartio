@@ -35,6 +35,7 @@ struct PumpState {
 struct Pump {
     handle: AtomicU64,
     runtime: u64,
+    runtime_retained: AtomicBool,
     port: i64,
     state: Mutex<PumpState>,
     cleanup: Mutex<()>,
@@ -47,6 +48,7 @@ impl Pump {
         Self {
             handle: AtomicU64::new(0),
             runtime,
+            runtime_retained: AtomicBool::new(true),
             port,
             state: Mutex::new(PumpState {
                 stopping: false,
@@ -250,9 +252,18 @@ pub unsafe extern "C" fn ptyd_runtime_attach(
                 OPERATION_RUNTIME_CREATE,
             );
         }
+        // Validate and take ownership of a live C runtime before publishing an
+        // adapter handle. Registering a stale runtime would otherwise create a
+        // pump that can only fail asynchronously, leaving an orphaned registry
+        // entry and making attach appear successful to the caller.
+        let status = unsafe { c_api::ptyx_runtime_adapter_retain(runtime, error) };
+        if status != STATUS_OK {
+            return status;
+        }
         let value = Arc::new(Pump::new(runtime, port));
         let handle = {
             let Ok(mut registry) = pumps().lock() else {
+                let _ = unsafe { c_api::ptyx_runtime_adapter_release(runtime) };
                 return fail(
                     error,
                     STATUS_INTERNAL,
@@ -261,6 +272,18 @@ pub unsafe extern "C" fn ptyd_runtime_attach(
                     OPERATION_RUNTIME_CREATE,
                 );
             };
+            if registry.values().any(|existing| {
+                existing.runtime == runtime && !existing.cleaned.load(Ordering::Acquire)
+            }) {
+                let _ = unsafe { c_api::ptyx_runtime_adapter_release(runtime) };
+                return fail(
+                    error,
+                    STATUS_WRONG_STATE,
+                    ERROR_DOMAIN_STATE,
+                    ERROR_WRONG_STATE,
+                    OPERATION_RUNTIME_CREATE,
+                );
+            }
             registry.insert(Arc::clone(&value))
         };
         value.handle.store(handle, Ordering::Release);
@@ -272,6 +295,7 @@ pub unsafe extern "C" fn ptyd_runtime_attach(
             }) {
             Ok(worker) => worker,
             Err(_) => {
+                let _ = unsafe { c_api::ptyx_runtime_adapter_release(runtime) };
                 if let Ok(mut registry) = pumps().lock() {
                     registry.remove(handle);
                 }
@@ -774,7 +798,6 @@ fn cleanup_pump(pump: &Pump) -> u32 {
     if pump.cleaned.load(Ordering::Acquire) {
         return STATUS_OK;
     }
-    let shutdown_status = stop_pump(pump);
     let (events, sessions) = {
         let state = pump
             .state
@@ -784,11 +807,10 @@ fn cleanup_pump(pump: &Pump) -> u32 {
         let sessions = state.sessions.iter().copied().collect::<Vec<_>>();
         (events, sessions)
     };
-    let mut cleanup_status = if shutdown_status == STATUS_OK {
-        STATUS_OK
-    } else {
-        shutdown_status
-    };
+    // Return output credit and abandon sessions while the engine is still
+    // running. Shutting it down first would accept a credit into a stopped
+    // reactor and then incorrectly discard the corresponding event lease.
+    let mut cleanup_status = STATUS_OK;
     for token in events {
         unsafe {
             let status = release_event(token, ptr::null_mut());
@@ -811,10 +833,21 @@ fn cleanup_pump(pump: &Pump) -> u32 {
             }
         }
     }
+    let shutdown_status = stop_pump(pump);
+    if shutdown_status != STATUS_OK {
+        cleanup_status = shutdown_status;
+    }
     if cleanup_status != STATUS_OK {
         return cleanup_status;
     }
     let mut runtime = pump.runtime;
+    if pump.runtime_retained.load(Ordering::Acquire) {
+        let status = unsafe { c_api::ptyx_runtime_adapter_release(pump.runtime) };
+        if status != STATUS_OK && status != STATUS_STALE_HANDLE {
+            return status;
+        }
+        pump.runtime_retained.store(false, Ordering::Release);
+    }
     let status = unsafe { c_api::ptyx_runtime_release(&mut runtime, ptr::null_mut()) };
     if status == STATUS_OK {
         pump.cleaned.store(true, Ordering::Release);
@@ -936,6 +969,8 @@ mod tests {
             unsafe { c_api::ptyx_runtime_create(std::ptr::null(), &mut runtime, &mut error) };
         assert_eq!(status, STATUS_OK);
         let pump = Arc::new(Pump::new(runtime, 1));
+        pump.runtime_retained
+            .store(false, std::sync::atomic::Ordering::Release);
         let handle = pumps()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -959,6 +994,8 @@ mod tests {
             unsafe { c_api::ptyx_runtime_create(std::ptr::null(), &mut runtime, &mut error) };
         assert_eq!(status, STATUS_OK);
         let pump = Arc::new(Pump::new(runtime, 1));
+        pump.runtime_retained
+            .store(false, std::sync::atomic::Ordering::Release);
         let handle = pumps()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())

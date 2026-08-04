@@ -536,9 +536,11 @@ impl IntegratedRuntime {
     }
 
     pub fn credit_async(&self, handle: u64, bytes: usize) -> bool {
-        self.controls.push(Control::Credit { handle, bytes });
-        self.wake.wake();
-        true
+        let queued = self.controls.push(Control::Credit { handle, bytes });
+        if queued {
+            self.wake.wake();
+        }
+        queued
     }
 
     pub fn cancel_output(&self, handle: u64) -> Result<(), OperationError> {
@@ -627,9 +629,11 @@ impl IntegratedRuntime {
         {
             admission.close();
         }
-        self.controls.push(Control::Abandon { handle });
-        self.wake.wake();
-        true
+        let queued = self.controls.push(Control::Abandon { handle });
+        if queued {
+            self.wake.wake();
+        }
+        queued
     }
 
     fn request_result<R>(&self, command: impl FnOnce(ReplySender<R>) -> Command) -> io::Result<R> {

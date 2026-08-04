@@ -473,6 +473,13 @@ impl SessionControl {
     }
 
     fn finish_close(&self, result: CachedClose) -> Result<CloseResult, CloseError> {
+        // A lost completion means the reactor stopped before it could report
+        // the terminal close result.  Do not let that transport failure turn
+        // into an abandoned native session: enqueue the idempotent abandon
+        // operation while the runtime is still owned by this control.
+        if matches!(result, CachedClose::Lost) {
+            let _ = self.runtime.native.try_abandon(self.handle);
+        }
         let (result, wakers) = {
             let mut state = self.close.state();
             if state.result.is_none() {
@@ -504,7 +511,7 @@ impl SessionControl {
     }
 
     pub(crate) fn release_output(&self, bytes: usize) {
-        if bytes != 0 && !self.closed.load(Ordering::Acquire) {
+        if bytes != 0 {
             let _ = self.runtime.native.credit_async(self.handle, bytes);
         }
     }

@@ -38,6 +38,11 @@ PTYX_EXPORT PtyxStatus PTYX_CALL ptyd_initialize(void *api_data);
  * @param[out] error Optional initialized error destination.
  * @return PTYX_STATUS_OK or a typed failure.
  *
+ * The runtime must be live and this operation transfers its ownership to the
+ * adapter. Only one adapter may be attached to a runtime at a time. A stale
+ * runtime or a duplicate attachment is rejected before an event-pump thread
+ * is created.
+ *
  * Each message is a nine-element Dart array containing kind, session, token,
  * flags, value, error domain, error kind, native error code, and nullable
  * Uint8List data, in that order.

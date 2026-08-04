@@ -282,6 +282,7 @@ struct RuntimeEntry {
     sessions: Mutex<HashMap<u64, u64>>,
     session_count: AtomicUsize,
     event_count: AtomicUsize,
+    adapter_count: AtomicUsize,
     shut_down: AtomicBool,
 }
 
@@ -329,6 +330,54 @@ fn adapter() -> &'static Mutex<AdapterState> {
 
 fn runtime_entry(handle: u64) -> Option<Arc<RuntimeEntry>> {
     adapter().lock().ok()?.runtimes.get(handle).map(Arc::clone)
+}
+
+/// Reserves one adapter ownership slot while a private language adapter owns
+/// the runtime handle. The reservation closes the probe/release race between
+/// attaching an event pump and releasing an otherwise idle runtime.
+///
+/// # Safety
+///
+/// `error` must be null or point to initialized compatible error storage.
+pub unsafe fn ptyx_runtime_adapter_retain(runtime: u64, error: *mut Error) -> u32 {
+    boundary(error, || {
+        let Some(entry) = runtime_entry(runtime) else {
+            set_error(error, stale_error(OPERATION_RUNTIME_CREATE));
+            return STATUS_STALE_HANDLE;
+        };
+        if entry.shut_down.load(Ordering::Acquire) {
+            set_error(
+                error,
+                Error::value(
+                    ERROR_DOMAIN_STATE,
+                    ERROR_WRONG_STATE,
+                    OPERATION_RUNTIME_CREATE,
+                    0,
+                ),
+            );
+            return STATUS_WRONG_STATE;
+        }
+        entry.adapter_count.fetch_add(1, Ordering::AcqRel);
+        STATUS_OK
+    })
+}
+
+/// Releases one private adapter ownership slot.
+///
+/// # Safety
+///
+/// `runtime` must identify a runtime previously retained by this adapter
+/// boundary. Releasing an unknown handle is harmless and returns stale.
+pub unsafe fn ptyx_runtime_adapter_release(runtime: u64) -> u32 {
+    let Some(entry) = runtime_entry(runtime) else {
+        return STATUS_STALE_HANDLE;
+    };
+    let previous = entry.adapter_count.load(Ordering::Acquire);
+    if previous == 0 {
+        return STATUS_WRONG_STATE;
+    }
+    entry.adapter_count.fetch_sub(1, Ordering::AcqRel);
+    STATUS_OK
 }
 
 fn sessions() -> &'static RwLock<Registry<Arc<SessionEntry>>> {
@@ -665,6 +714,7 @@ pub unsafe extern "C" fn ptyx_runtime_create(
             sessions: Mutex::new(HashMap::new()),
             session_count: AtomicUsize::new(0),
             event_count: AtomicUsize::new(0),
+            adapter_count: AtomicUsize::new(0),
             shut_down: AtomicBool::new(false),
         });
         let Ok(mut state) = adapter().lock() else {
@@ -1148,6 +1198,7 @@ pub unsafe extern "C" fn ptyx_runtime_release(runtime: *mut u64, error: *mut Err
         if !entry.shut_down.load(Ordering::Acquire)
             || entry.session_count.load(Ordering::Acquire) != 0
             || entry.event_count.load(Ordering::Acquire) != 0
+            || entry.adapter_count.load(Ordering::Acquire) != 0
         {
             set_error(
                 error,
@@ -1900,10 +1951,22 @@ pub unsafe extern "C" fn ptyx_event_release(event: *mut Event, error: *mut Error
             set_error(error, stale_error(OPERATION_OUTPUT));
             return STATUS_STALE_HANDLE;
         };
-        let _ = lease
+        if !lease
             .runtime
             .engine
-            .credit_async(lease.engine_handle, lease.bytes.len());
+            .credit_async(lease.engine_handle, lease.bytes.len())
+        {
+            set_error(
+                error,
+                Error::value(
+                    ERROR_DOMAIN_RUNTIME,
+                    ERROR_INFRASTRUCTURE_LOST,
+                    OPERATION_OUTPUT,
+                    0,
+                ),
+            );
+            return STATUS_INTERNAL;
+        }
         let Some(lease) = state.events.remove((*event).token) else {
             return STATUS_INTERNAL;
         };

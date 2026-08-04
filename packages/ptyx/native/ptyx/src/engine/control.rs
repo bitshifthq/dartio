@@ -103,36 +103,60 @@ mod wake_tests {
 
 pub(crate) struct ControlQueue {
     values: Mutex<VecDeque<Control>>,
+    lifecycle: Mutex<VecDeque<Control>>,
 }
+
+const MAX_CONTROL_ENTRIES: usize = 4096;
+const MAX_LIFECYCLE_ENTRIES: usize = 1024;
 
 impl ControlQueue {
     pub(crate) fn new() -> Self {
         Self {
             values: Mutex::new(VecDeque::new()),
+            lifecycle: Mutex::new(VecDeque::new()),
         }
     }
 
-    pub(crate) fn push(&self, value: Control) {
-        self.values
+    pub(crate) fn push(&self, value: Control) -> bool {
+        if matches!(value, Control::Abandon { .. }) {
+            let mut lifecycle = self
+                .lifecycle
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if lifecycle.len() >= MAX_LIFECYCLE_ENTRIES {
+                return false;
+            }
+            lifecycle.push_back(value);
+            return true;
+        }
+        let mut values = self
+            .values
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .push_back(value);
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if values.len() >= MAX_CONTROL_ENTRIES {
+            return false;
+        }
+        values.push_back(value);
+        true
     }
 
     pub(crate) fn swap_into(&self, target: &mut VecDeque<Control>) {
-        std::mem::swap(
-            &mut *self
-                .values
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner()),
-            target,
-        );
+        let mut lifecycle = self
+            .lifecycle
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut values = self
+            .values
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        target.append(&mut lifecycle);
+        target.append(&mut values);
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::WakeGate;
+    use super::{Control, ControlQueue, WakeGate, MAX_CONTROL_ENTRIES};
 
     #[test]
     fn wake_gate_coalesces_until_the_reactor_clears_it() {
@@ -143,5 +167,21 @@ mod tests {
         assert!(!gate.request());
         gate.clear();
         assert!(gate.request());
+    }
+
+    #[test]
+    fn control_queue_rejects_unbounded_growth() {
+        let queue = ControlQueue::new();
+        for _ in 0..MAX_CONTROL_ENTRIES {
+            assert!(queue.push(Control::Credit {
+                handle: 1,
+                bytes: 1
+            }));
+        }
+        assert!(!queue.push(Control::Credit {
+            handle: 1,
+            bytes: 1
+        }));
+        assert!(queue.push(Control::Abandon { handle: 1 }));
     }
 }

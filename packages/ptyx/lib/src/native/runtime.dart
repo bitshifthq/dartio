@@ -137,12 +137,16 @@ final class _NativeRuntime implements Finalizable {
     _handleInfrastructureFailure(failure);
   }
 
-  void _ackOrRelease(int session, int token) {
+  bool _ackOrRelease(int token) {
     try {
       acknowledge(token);
+      return true;
     } on PtyException {
-      final failure = releaseSession(session);
-      if (failure != null) _handleInfrastructureFailure(failure);
+      // The native adapter retains failed leases and schedules their retry.
+      // Releasing the whole session here would discard an otherwise live
+      // session and strand the output credit.
+      _abortProtocol();
+      return false;
     }
   }
 
@@ -164,14 +168,14 @@ final class _NativeRuntime implements Finalizable {
     final target = _sessions[event.session]?.target;
     if (target == null) {
       if (event.token != PTYX_INVALID_EVENT_TOKEN) {
-        _ackOrRelease(event.session, event.token);
+        if (!_ackOrRelease(event.token)) return;
       }
       final failure = releaseSession(event.session);
       if (failure != null) _handleInfrastructureFailure(failure);
       return;
     }
     if (event.kind == .output && event.data == null) {
-      _ackOrRelease(event.session, event.token);
+      _ackOrRelease(event.token);
       return;
     }
     if (event.kind
@@ -228,8 +232,14 @@ final class _NativeRuntime implements Finalizable {
       if (failure != null) _handleInfrastructureFailure(failure);
       return;
     }
-    final session = pending.onReady(handle);
-    _sessions[handle] = WeakReference(session);
+    try {
+      final session = pending.onReady(handle);
+      _sessions[handle] = WeakReference(session);
+    } on Object {
+      final failure = releaseSession(handle);
+      pending.onFailure(syntheticError(operation: 'spawn'));
+      if (failure != null) _handleInfrastructureFailure(failure);
+    }
     _updateLiveness();
   }
 

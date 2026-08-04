@@ -9,8 +9,9 @@ mod c_api;
 #[doc(hidden)]
 pub mod private {
     pub use crate::c_api::{
-        clear_error, error_is_valid, ptyx_event_release, ptyx_runtime_capabilities,
-        ptyx_runtime_create, ptyx_runtime_next_event, ptyx_runtime_release, ptyx_runtime_shutdown,
+        clear_error, error_is_valid, ptyx_event_release, ptyx_runtime_adapter_release,
+        ptyx_runtime_adapter_retain, ptyx_runtime_capabilities, ptyx_runtime_create,
+        ptyx_runtime_next_event, ptyx_runtime_release, ptyx_runtime_shutdown,
         ptyx_session_get_child_pid, ptyx_session_get_size, ptyx_session_get_term_mode,
         ptyx_session_get_tty_name, ptyx_session_release, ptyx_session_spawn_start, set_error,
         Error, Event, Registry, SpawnOptions, ERROR_DOMAIN_ARGUMENT, ERROR_DOMAIN_PROCESS,
