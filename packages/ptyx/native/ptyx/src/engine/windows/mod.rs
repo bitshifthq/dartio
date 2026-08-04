@@ -27,7 +27,8 @@ use windows_sys::Win32::System::Threading::{
     INFINITE, WT_EXECUTEONLYONCE,
 };
 use windows_sys::Win32::System::IO::{
-    CancelIoEx, CreateIoCompletionPort, GetQueuedCompletionStatus, PostQueuedCompletionStatus,
+    CancelIoEx, CreateIoCompletionPort, GetOverlappedResult, GetQueuedCompletionStatus,
+    PostQueuedCompletionStatus,
 };
 
 use self::handles::{IoOperation, OwnedHandle, OwnedPseudoConsole};
@@ -52,14 +53,12 @@ const COMMAND_CAPACITY: usize = 1024;
 const NOTICE_CAPACITY: usize = 4096;
 const SESSION_NOTICE_RESERVATIONS: usize = 5;
 const CLOSE_ADMISSION_CAPACITY: usize = 128;
-const QUARANTINED_IO_CAPACITY: usize = CLOSE_ADMISSION_CAPACITY * 2;
 const ACTIVATION_TIMEOUT: Duration = Duration::from_secs(5);
 const CLOSE_KEY_TAG: usize = 1_usize << (usize::BITS - 2);
 const NOTICE_AVAILABLE_KEY: usize = 1_usize << (usize::BITS - 1);
 const PROCESS_EXIT_KEY_TAG: usize = 1_usize << (usize::BITS - 3);
 #[cfg(any(feature = "__private_adapter", test))]
 const WRITE_INFRASTRUCTURE_FAILURE: i64 = -2;
-static QUARANTINED_IO_OPERATIONS: AtomicUsize = AtomicUsize::new(0);
 static QUARANTINED_PSEUDOCONSOLES: AtomicUsize = AtomicUsize::new(0);
 
 const fn input_closed() -> OperationError {
@@ -185,10 +184,10 @@ impl Drop for Session {
         cancel_read(self);
         cancel_write(self);
         if let Some(read) = self.read.take() {
-            quarantine_io_operation(read);
+            wait_for_cancelled_io(self.output_pipe.raw(), read);
         }
         if let Some(write) = self.write.take() {
-            quarantine_io_operation(write);
+            wait_for_cancelled_io(self.input_pipe.raw(), write);
         }
         if let Some(pseudoconsole) = self.pseudoconsole.take() {
             quarantine_pseudoconsole(pseudoconsole, self.close_permit.take());
@@ -196,12 +195,21 @@ impl Drop for Session {
     }
 }
 
-fn quarantine_io_operation(operation: Pin<Box<IoOperation>>) {
-    // A canceled OVERLAPPED remains kernel-owned until its completion arrives.
-    // The session admission cap bounds this shutdown-only quarantine.
-    let previous = QUARANTINED_IO_OPERATIONS.fetch_add(1, Ordering::AcqRel);
-    debug_assert!(previous < QUARANTINED_IO_CAPACITY);
-    std::mem::forget(operation);
+fn wait_for_cancelled_io(pipe: HANDLE, operation: Pin<Box<IoOperation>>) {
+    // The reactor owns the final session drop. Waiting here observes the
+    // terminal completion before releasing the OVERLAPPED allocation, so a
+    // shutdown cannot leak kernel-owned I/O state or retain an unbounded
+    // quarantine. Cancellation has already been requested by the caller.
+    let mut transferred = 0;
+    unsafe {
+        GetOverlappedResult(
+            pipe,
+            operation.overlapped_ptr(),
+            &mut transferred,
+            1,
+        );
+    }
+    drop(operation);
 }
 
 fn quarantine_pseudoconsole(pseudoconsole: OwnedPseudoConsole, permit: Option<ClosePermit>) {
@@ -1210,8 +1218,10 @@ fn admit_write_with(
     if !state.open {
         return AdmissionResult::Closed;
     }
-    if length == 0
-        || state.bytes.saturating_add(length) > admission.capacity
+    if length == 0 {
+        return AdmissionResult::Accepted;
+    }
+    if state.bytes.saturating_add(length) > admission.capacity
         || state.entries >= admission.entry_capacity()
     {
         return AdmissionResult::Backpressure;
@@ -1275,8 +1285,10 @@ fn admit_owned_write(
             state.failure,
         ));
     }
-    if length == 0
-        || state.bytes.saturating_add(length) > admission.capacity
+    if length == 0 {
+        return Ok(());
+    }
+    if state.bytes.saturating_add(length) > admission.capacity
         || state.entries >= admission.entry_capacity()
     {
         return Err(WriteError::new(WriteErrorKind::Backpressure, bytes, None));
@@ -2539,10 +2551,19 @@ fn send_lifecycle_notice(
 ) {
     let Some(reservation) = session.notice_reservations.pop() else {
         retain_cleanup_failure(session, infrastructure_failure(Operation::Close));
+        mark_notice_failure(session);
         return;
     };
     if !notices.emit(reservation, notice, counters) {
         retain_cleanup_failure(session, infrastructure_failure(Operation::Close));
+        mark_notice_failure(session);
+    }
+}
+
+fn mark_notice_failure(session: &mut Session) {
+    session.active = false;
+    if !session.close_started {
+        session.abandoned = true;
     }
 }
 
@@ -2682,6 +2703,20 @@ mod tests {
             panic!("owned write admission must submit a write command");
         };
         assert_eq!(bytes.as_ptr(), original_pointer);
+    }
+
+    #[test]
+    fn empty_owned_write_is_a_noop() {
+        let admission = Arc::new(InputAdmission::new(4));
+        let (sender, receiver) = mpsc::sync_channel(0);
+
+        admit_owned_write(&sender, || Ok(()), 7, Bytes::new(), Arc::clone(&admission))
+            .expect("empty writes are successful no-ops");
+
+        assert!(receiver.try_recv().is_err());
+        let state = admission.state.lock().expect("admission state");
+        assert_eq!(state.bytes, 0);
+        assert_eq!(state.entries, 0);
     }
 
     #[test]

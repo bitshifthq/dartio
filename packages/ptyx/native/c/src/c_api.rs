@@ -395,6 +395,17 @@ fn session_entry(handle: u64) -> Option<Arc<SessionEntry>> {
     state.get(handle).map(Arc::clone)
 }
 
+fn retire_session_entry(runtime: &Arc<RuntimeEntry>, handle: u64) {
+    if sessions()
+        .write()
+        .ok()
+        .and_then(|mut state| state.remove(handle))
+        .is_some()
+    {
+        runtime.session_count.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
 fn active_session(handle: u64) -> Result<(Arc<SessionEntry>, u64), u32> {
     let entry = session_entry(handle).ok_or(STATUS_STALE_HANDLE)?;
     let state = *entry.state.lock().map_err(|_| STATUS_INTERNAL)?;
@@ -847,20 +858,39 @@ pub unsafe extern "C" fn ptyx_runtime_next_event(
                         runtime.engine.try_abandon(engine_handle);
                         continue;
                     }
-                    let should_activate = entry
-                        .state
-                        .lock()
-                        .map(|mut state| {
+                    let should_activate = match entry.state.lock() {
+                        Ok(mut state) => {
                             if matches!(*state, SessionState::Spawning) {
                                 *state = SessionState::Activating;
                                 true
                             } else {
                                 false
                             }
-                        })
-                        .unwrap_or(false);
+                        }
+                        Err(_) => {
+                            runtime.engine.try_abandon(engine_handle);
+                            set_error(
+                                error,
+                                Error::value(
+                                    ERROR_DOMAIN_RUNTIME,
+                                    ERROR_INFRASTRUCTURE_LOST,
+                                    OPERATION_SPAWN,
+                                    0,
+                                ),
+                            );
+                            return STATUS_INTERNAL;
+                        }
+                    };
                     if !should_activate {
                         runtime.engine.try_abandon(engine_handle);
+                        if entry
+                            .state
+                            .lock()
+                            .map(|state| matches!(*state, SessionState::Released))
+                            .unwrap_or(false)
+                        {
+                            retire_session_entry(&runtime, request);
+                        }
                         continue;
                     }
                     if !runtime.engine.activate(engine_handle) {
@@ -884,12 +914,30 @@ pub unsafe extern "C" fn ptyx_runtime_next_event(
                     }
                     let Ok(mut state) = entry.state.lock() else {
                         runtime.engine.try_abandon(engine_handle);
-                        continue;
+                        set_error(
+                            error,
+                            Error::value(
+                                ERROR_DOMAIN_RUNTIME,
+                                ERROR_INFRASTRUCTURE_LOST,
+                                OPERATION_SPAWN,
+                                0,
+                            ),
+                        );
+                        return STATUS_INTERNAL;
                     };
                     let Ok(mut sessions) = runtime.sessions.lock() else {
                         *state = SessionState::Failed;
                         runtime.engine.try_abandon(engine_handle);
-                        continue;
+                        set_error(
+                            error,
+                            Error::value(
+                                ERROR_DOMAIN_RUNTIME,
+                                ERROR_INFRASTRUCTURE_LOST,
+                                OPERATION_SPAWN,
+                                0,
+                            ),
+                        );
+                        return STATUS_INTERNAL;
                     };
                     let activated = if matches!(*state, SessionState::Activating) {
                         *state = SessionState::Active(engine_handle);
@@ -916,19 +964,37 @@ pub unsafe extern "C" fn ptyx_runtime_next_event(
                     if !Arc::ptr_eq(&entry.runtime, &runtime) {
                         continue;
                     }
-                    let deliver = entry
-                        .state
-                        .lock()
-                        .map(|mut state| {
+                    let deliver = match entry.state.lock() {
+                        Ok(mut state) => {
                             if matches!(*state, SessionState::Spawning) {
                                 *state = SessionState::Failed;
                                 true
                             } else {
                                 false
                             }
-                        })
-                        .unwrap_or(false);
+                        }
+                        Err(_) => {
+                            set_error(
+                                error,
+                                Error::value(
+                                    ERROR_DOMAIN_RUNTIME,
+                                    ERROR_INFRASTRUCTURE_LOST,
+                                    OPERATION_SPAWN,
+                                    0,
+                                ),
+                            );
+                            return STATUS_INTERNAL;
+                        }
+                    };
                     if !deliver {
+                        if entry
+                            .state
+                            .lock()
+                            .map(|state| matches!(*state, SessionState::Released))
+                            .unwrap_or(false)
+                        {
+                            retire_session_entry(&runtime, request);
+                        }
                         continue;
                     }
                     let struct_size = (*event).struct_size;
@@ -1863,7 +1929,7 @@ pub unsafe extern "C" fn ptyx_session_release(session: *mut u64, error: *mut Err
             set_error(error, stale_error(OPERATION_CLOSE));
             return STATUS_STALE_HANDLE;
         };
-        let _engine_handle = {
+        let pending_spawn = {
             // Keep the registry lock order consistent with event publication
             // and spawn activation: session state first, then the runtime
             // session map. Reversing these locks lets a close event, spawn
@@ -1885,7 +1951,8 @@ pub unsafe extern "C" fn ptyx_session_release(session: *mut u64, error: *mut Err
                 );
                 return STATUS_INTERNAL;
             };
-            let engine_handle = match *session_state {
+            let state = *session_state;
+            let engine_handle = match state {
                 SessionState::Active(value) => Some(value),
                 SessionState::Spawning
                 | SessionState::Activating
@@ -1912,9 +1979,14 @@ pub unsafe extern "C" fn ptyx_session_release(session: *mut u64, error: *mut Err
                 }
                 sessions.remove(&engine_handle);
             }
+            let pending_spawn = matches!(state, SessionState::Spawning | SessionState::Activating);
             *session_state = SessionState::Released;
-            engine_handle
+            pending_spawn
         };
+        if pending_spawn {
+            *session = 0;
+            return STATUS_OK;
+        }
         let mut state = sessions()
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());

@@ -55,6 +55,7 @@ pub struct RuntimeCounters {
     pub read_bytes: u64,
     pub write_bytes: u64,
     pub notifications: u64,
+    pub notification_failures: u64,
 }
 
 struct Session {
@@ -1080,7 +1081,11 @@ fn process_commands(
                     if let Some(status) =
                         sessions.get(handle).and_then(|session| session.exit_status)
                     {
-                        send_notice(notices, Notice::Exit { handle, status }, counters);
+                        if !send_notice(notices, Notice::Exit { handle, status }, counters) {
+                            if let Some(session) = sessions.get_mut(handle) {
+                                mark_notice_failure(session);
+                            }
+                        }
                     }
                     refresh_output(kqueue, handle, notices, sessions, counters);
                 } else if let Some(session) = sessions.get_mut(handle) {
@@ -1291,7 +1296,7 @@ fn process_commands(
                     }
                     read_ready(kqueue, handle, notices, sessions, counters);
                     if sessions.get(handle).is_some_and(|session| session.active) {
-                        send_notice(
+                        let delivered = send_notice(
                             notices,
                             Notice::Exit {
                                 handle,
@@ -1299,6 +1304,11 @@ fn process_commands(
                             },
                             counters,
                         );
+                        if !delivered {
+                            if let Some(session) = sessions.get_mut(handle) {
+                                mark_notice_failure(session);
+                            }
+                        }
                     }
                 } else {
                     pending_broker_exits.insert(broker_session, status);
@@ -1704,7 +1714,9 @@ fn notify_input_failure(
     };
     if !session.input_failure_notified {
         session.input_failure_notified = true;
-        send_notice(notices, Notice::InputFailed { handle, failure }, counters);
+        if !send_notice(notices, Notice::InputFailed { handle, failure }, counters) {
+            mark_notice_failure(session);
+        }
     }
 }
 
@@ -1743,7 +1755,7 @@ fn refresh_output(
         && !session.output_done_notified
     {
         session.output_done_notified = true;
-        send_notice(
+        let delivered = send_notice(
             notices,
             if let Some(failure) = session.output_failure {
                 Notice::OutputFailed { handle, failure }
@@ -1752,6 +1764,9 @@ fn refresh_output(
             },
             counters,
         );
+        if !delivered {
+            mark_notice_failure(session);
+        }
     }
 }
 
@@ -1860,14 +1875,18 @@ fn refresh_modes(
             Ok(modes) if Some(modes) != session.observed_mode => {
                 session.observed_mode = Some(modes);
                 session.mode_interval = MODE_POLL_MIN;
-                send_notice(notices, Notice::ModeChanged { handle, modes }, counters);
+                if !send_notice(notices, Notice::ModeChanged { handle, modes }, counters) {
+                    mark_notice_failure(session);
+                }
             }
             Ok(_) => {
                 session.mode_interval = (session.mode_interval * 2).min(MODE_POLL_MAX);
             }
             Err(failure) => {
                 session.mode_deadline = None;
-                send_notice(notices, Notice::ModeFailed { handle, failure }, counters);
+                if !send_notice(notices, Notice::ModeFailed { handle, failure }, counters) {
+                    mark_notice_failure(session);
+                }
                 continue;
             }
         }
@@ -2242,7 +2261,11 @@ unsafe extern "C" {
     fn ptsname_r(fd: libc::c_int, buffer: *mut libc::c_char, length: libc::size_t) -> libc::c_int;
 }
 
-fn send_notice(notices: &EventSender<Notice>, notice: Notice, counters: &mut RuntimeCounters) {
+fn send_notice(
+    notices: &EventSender<Notice>,
+    notice: Notice,
+    counters: &mut RuntimeCounters,
+) -> bool {
     let handle = notice.handle();
     let sent = if matches!(notice, Notice::ModeChanged { .. }) {
         notices
@@ -2255,6 +2278,17 @@ fn send_notice(notices: &EventSender<Notice>, notice: Notice, counters: &mut Run
     };
     if sent {
         counters.notifications += 1;
+    }
+    if !sent {
+        counters.notification_failures += 1;
+    }
+    sent
+}
+
+fn mark_notice_failure(session: &mut Session) {
+    session.active = false;
+    if !session.close_started {
+        session.abandoned = true;
     }
 }
 
@@ -2313,8 +2347,10 @@ fn admit_write_with(
     if !state.open {
         return AdmissionResult::Closed;
     }
-    if length == 0
-        || state.bytes.saturating_add(length) > admission.capacity
+    if length == 0 {
+        return AdmissionResult::Accepted;
+    }
+    if state.bytes.saturating_add(length) > admission.capacity
         || state.entries >= admission.entry_capacity()
     {
         return AdmissionResult::Backpressure;
@@ -2375,8 +2411,10 @@ fn admit_owned_write(
             state.failure,
         ));
     }
-    if length == 0
-        || state.bytes.saturating_add(length) > admission.capacity
+    if length == 0 {
+        return Ok(());
+    }
+    if state.bytes.saturating_add(length) > admission.capacity
         || state.entries >= admission.entry_capacity()
     {
         return Err(WriteError::new(WriteErrorKind::Backpressure, bytes, None));
@@ -2578,6 +2616,20 @@ mod tests {
             panic!("owned write admission must submit a write command");
         };
         assert_eq!(bytes.as_ptr(), original_pointer);
+    }
+
+    #[test]
+    fn empty_owned_write_is_a_noop() {
+        let admission = Arc::new(InputAdmission::new(4));
+        let (sender, receiver) = mpsc::sync_channel(0);
+
+        admit_owned_write(&sender, 7, Bytes::new(), Arc::clone(&admission))
+            .expect("empty writes are successful no-ops");
+
+        assert!(receiver.try_recv().is_err());
+        let state = admission.state.lock().expect("admission state");
+        assert_eq!(state.bytes, 0);
+        assert_eq!(state.entries, 0);
     }
 
     #[test]

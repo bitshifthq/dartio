@@ -38,8 +38,10 @@ runtime-compatible fallbacks. Applications must use Windows 26100 or newer
 when deterministic cleanup is required.
 
 `ptyx` still performs `ClosePseudoConsole` on a bounded process-wide closer
-pool and limits admission to 128 live or quarantined sessions. Windows client
-and Server SKUs require separate retained runtime qualification.
+pool and limits admission to 128 live closer permits. Canceled overlapped I/O
+is synchronously observed to terminal completion before its allocation is
+released. Windows client and Server SKUs require separate retained runtime
+qualification.
 
 ## Unix helper
 

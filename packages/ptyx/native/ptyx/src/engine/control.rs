@@ -143,6 +143,11 @@ impl ControlQueue {
                     .lifecycle
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
+                if lifecycle.iter().any(|control| {
+                    matches!(control, Control::Abandon { handle: existing } if *existing == handle)
+                }) {
+                    return true;
+                }
                 if lifecycle.len() >= MAX_LIFECYCLE_ENTRIES {
                     return false;
                 }
@@ -153,6 +158,9 @@ impl ControlQueue {
     }
 
     pub(crate) fn swap_into(&self, target: &mut VecDeque<Control>) {
+        // Lifecycle controls are applied before coalesced credits. An abandon
+        // closes the session route, so a later credit must not resurrect or
+        // otherwise extend a session that is already being reclaimed.
         let mut lifecycle = self
             .lifecycle
             .lock()

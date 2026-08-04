@@ -171,7 +171,7 @@ termination and exact reap. Broker loss never authorizes signaling a cached
 PID that is no longer bound to the owned terminal.
 
 On Windows, close terminates the Job Object, initiates ConPTY close, and
-continues consuming terminal IOCP completions. Pinned `OVERLAPPED` memory and
-its handles remain owned until completion. Windows build 26100 is the supported
-floor because earlier ConPTY close behavior cannot provide the same bounded
-convergence.
+continues consuming terminal IOCP completions. Cancellation waits for each
+pending `OVERLAPPED` operation to reach terminal completion before releasing
+its allocation. Windows build 26100 is the supported floor because earlier
+ConPTY close behavior cannot provide the same bounded convergence.
