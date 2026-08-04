@@ -20,7 +20,7 @@ mod runtime;
 pub mod __private_adapter {
     #[cfg(unix)]
     pub use crate::broker::broker_path;
-    pub use crate::engine::{BrokerSpawn, CopyWriteResult, Failure, IntegratedRuntime, Notice};
+    pub use crate::engine::{BrokerSpawn, Failure, IntegratedRuntime, Notice};
     pub use crate::error::FailureKind;
 }
 

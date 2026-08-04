@@ -3,14 +3,10 @@ use crate::engine::broker_client::{BrokerClient, BrokerOwner, BrokerSession};
 use crate::engine::control::{fail_wake_socket, wake_socket, Control, ControlQueue, WakeGate};
 use crate::engine::event::{self, Receiver as EventReceiver, Sender as EventSender};
 use crate::engine::oneshot::{self, Sender as ReplySender};
-use crate::engine::session::{InputAdmission, SessionCore};
+use crate::engine::session::{AdmissionResult, InputAdmission, SessionCore};
 use crate::engine::spawn::BrokerSpawn;
 #[cfg(feature = "__private_adapter")]
-use crate::engine::CopyWriteResult;
-#[cfg(feature = "__private_adapter")]
 use crate::engine::Failure;
-#[cfg(any(feature = "__private_adapter", test))]
-use crate::engine::WRITE_INFRASTRUCTURE_FAILURE;
 use crate::engine::{CloseResult, Completion, Notice};
 use crate::error::{FailureKind, Operation, OperationError, WriteError, WriteErrorKind};
 use bytes::Bytes;
@@ -496,15 +492,27 @@ impl IntegratedRuntime {
     }
 
     #[cfg(feature = "__private_adapter")]
-    pub fn write_copy(&self, handle: u64, bytes: &[u8]) -> CopyWriteResult {
+    pub fn write_copy(&self, handle: u64, bytes: &[u8]) -> Result<(), OperationError> {
         let admission = match self.admissions.try_lock() {
             Ok(admissions) => match admissions.get(&handle).cloned() {
                 Some(admission) => admission,
-                None => return CopyWriteResult::Closed(None),
+                None => {
+                    return Err(OperationError::new(
+                        Operation::Write,
+                        FailureKind::Closed,
+                        None,
+                    ))
+                }
             },
-            Err(std::sync::TryLockError::WouldBlock) => return CopyWriteResult::Backpressure,
+            Err(std::sync::TryLockError::WouldBlock) => {
+                return Err(OperationError::new(
+                    Operation::Write,
+                    FailureKind::Backpressure,
+                    None,
+                ));
+            }
             Err(std::sync::TryLockError::Poisoned(_)) => {
-                return CopyWriteResult::Infrastructure(OperationError::new(
+                return Err(OperationError::new(
                     Operation::Write,
                     FailureKind::InfrastructureLost,
                     None,
@@ -519,15 +527,24 @@ impl IntegratedRuntime {
             || Bytes::copy_from_slice(bytes),
         );
         match result {
-            1 => {
+            AdmissionResult::Accepted => {
                 self.wake.wake();
-                CopyWriteResult::Accepted
+                Ok(())
             }
-            0 => CopyWriteResult::Backpressure,
-            -1 => {
-                CopyWriteResult::Closed(admission.state.lock().ok().and_then(|state| state.failure))
-            }
-            _ => CopyWriteResult::Infrastructure(OperationError::new(
+            AdmissionResult::Backpressure => Err(OperationError::new(
+                Operation::Write,
+                FailureKind::Backpressure,
+                None,
+            )),
+            AdmissionResult::Closed => Err(admission
+                .state
+                .lock()
+                .ok()
+                .and_then(|state| state.failure)
+                .unwrap_or_else(|| {
+                    OperationError::new(Operation::Write, FailureKind::Closed, None)
+                })),
+            AdmissionResult::Infrastructure => Err(OperationError::new(
                 Operation::Write,
                 FailureKind::InfrastructureLost,
                 None,
@@ -2255,7 +2272,7 @@ fn admit_write(
     handle: u64,
     bytes: Bytes,
     admission: Arc<InputAdmission>,
-) -> i64 {
+) -> AdmissionResult {
     let length = bytes.len();
     admit_write_with(commands, handle, length, admission, || bytes)
 }
@@ -2267,20 +2284,20 @@ fn admit_write_with(
     length: usize,
     admission: Arc<InputAdmission>,
     make_bytes: impl FnOnce() -> Bytes,
-) -> i64 {
+) -> AdmissionResult {
     let mut state = match admission.state.try_lock() {
         Ok(state) => state,
-        Err(std::sync::TryLockError::WouldBlock) => return 0,
-        Err(std::sync::TryLockError::Poisoned(_)) => return WRITE_INFRASTRUCTURE_FAILURE,
+        Err(std::sync::TryLockError::WouldBlock) => return AdmissionResult::Backpressure,
+        Err(std::sync::TryLockError::Poisoned(_)) => return AdmissionResult::Infrastructure,
     };
     if !state.open {
-        return -1;
+        return AdmissionResult::Closed;
     }
     if length == 0
         || state.bytes.saturating_add(length) > admission.capacity
         || state.entries >= admission.entry_capacity()
     {
-        return 0;
+        return AdmissionResult::Backpressure;
     }
     let bytes = make_bytes();
     debug_assert_eq!(bytes.len(), length);
@@ -2295,7 +2312,7 @@ fn admit_write_with(
         state.bytes -= length;
         state.entries -= 1;
         return match error {
-            TrySendError::Full(_) => 0,
+            TrySendError::Full(_) => AdmissionResult::Backpressure,
             TrySendError::Disconnected(_) => {
                 state.open = false;
                 state.failure.get_or_insert(OperationError::new(
@@ -2303,11 +2320,11 @@ fn admit_write_with(
                     FailureKind::InfrastructureLost,
                     None,
                 ));
-                WRITE_INFRASTRUCTURE_FAILURE
+                AdmissionResult::Infrastructure
             }
         };
     }
-    1
+    AdmissionResult::Accepted
 }
 
 fn admit_owned_write(
@@ -2382,8 +2399,8 @@ fn admit_owned_write(
 mod tests {
     use super::{
         admit_owned_write, admit_write, admit_write_with, emit_output_notice, fail_input,
-        notify_input_failure, record_cleanup_result, refresh_modes, send_notice, InputAdmission,
-        Notice, RuntimeCounters, Session, OUTPUT_BATCH, WRITE_INFRASTRUCTURE_FAILURE,
+        notify_input_failure, record_cleanup_result, refresh_modes, send_notice, AdmissionResult,
+        InputAdmission, Notice, RuntimeCounters, Session, OUTPUT_BATCH,
     };
     use crate::engine::{broker_client::BrokerSession, event, GenerationRegistry};
     use crate::error::{FailureKind, Operation, OperationError, WriteErrorKind};
@@ -2483,7 +2500,7 @@ mod tests {
 
         let result = admit_write(&sender, 7, vec![1].into(), Arc::clone(&admission));
 
-        assert_eq!(result, WRITE_INFRASTRUCTURE_FAILURE);
+        assert_eq!(result, AdmissionResult::Infrastructure);
         let state = admission.state.lock().unwrap();
         assert!(!state.open);
         assert_eq!(
@@ -2505,7 +2522,7 @@ mod tests {
 
         let result = admit_write(&sender, 7, vec![1].into(), Arc::clone(&admission));
 
-        assert_eq!(result, 0);
+        assert_eq!(result, AdmissionResult::Backpressure);
         let state = admission.state.lock().unwrap();
         assert!(state.open);
         assert_eq!(state.bytes, 0);
@@ -2554,7 +2571,7 @@ mod tests {
             Bytes::from_static(b"large")
         });
 
-        assert_eq!(result, 0);
+        assert_eq!(result, AdmissionResult::Backpressure);
         assert!(!constructed);
     }
 
@@ -2570,7 +2587,7 @@ mod tests {
             Bytes::from_static(b"x")
         });
 
-        assert_eq!(result, 0);
+        assert_eq!(result, AdmissionResult::Backpressure);
         assert!(!constructed);
         drop(held_state);
     }
@@ -2588,7 +2605,7 @@ mod tests {
 
         let result = admit_write(&sender, 7, vec![1].into(), admission);
 
-        assert_eq!(result, WRITE_INFRASTRUCTURE_FAILURE);
+        assert_eq!(result, AdmissionResult::Infrastructure);
     }
 
     #[test]
@@ -2779,12 +2796,12 @@ mod tests {
                     Bytes::from(vec![(sequence & 0xff) as u8]),
                     Arc::clone(&admission),
                 ),
-                1
+                AdmissionResult::Accepted
             );
         }
         assert_eq!(
             admit_write(&sender, 7, Bytes::from_static(b"x"), Arc::clone(&admission)),
-            0
+            AdmissionResult::Backpressure
         );
 
         let state = admission.state.lock().unwrap();

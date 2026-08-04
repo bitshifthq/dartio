@@ -1,5 +1,5 @@
 use bytes::Bytes;
-use ptyx::__private_adapter::{BrokerSpawn, CopyWriteResult, Failure, IntegratedRuntime, Notice};
+use ptyx::__private_adapter::{BrokerSpawn, Failure, IntegratedRuntime, Notice};
 use ptyx::{FailureKind, Operation, OperationError};
 use std::collections::HashMap;
 use std::ffi::OsString;
@@ -1014,33 +1014,6 @@ fn operation_error(failure: OperationError) -> Error {
     Error::value(domain, kind, operation, failure.native_code().unwrap_or(0))
 }
 
-fn copy_write_result(result: CopyWriteResult) -> (u32, Option<Error>) {
-    match result {
-        CopyWriteResult::Accepted => (STATUS_OK, None),
-        CopyWriteResult::Backpressure => (
-            STATUS_BACKPRESSURE,
-            Some(Error::value(
-                ERROR_DOMAIN_INPUT,
-                ERROR_QUEUE_FULL,
-                OPERATION_WRITE,
-                0,
-            )),
-        ),
-        CopyWriteResult::Closed(Some(failure)) | CopyWriteResult::Infrastructure(failure) => {
-            (operation_status(failure), Some(operation_error(failure)))
-        }
-        CopyWriteResult::Closed(None) => (
-            STATUS_CLOSED,
-            Some(Error::value(
-                ERROR_DOMAIN_INPUT,
-                ERROR_CLOSED,
-                OPERATION_WRITE,
-                0,
-            )),
-        ),
-    }
-}
-
 const fn operation_status(failure: OperationError) -> u32 {
     match failure.kind() {
         FailureKind::InvalidArgument => STATUS_INVALID_ARGUMENT,
@@ -1499,12 +1472,13 @@ pub unsafe extern "C" fn ptyx_session_write(
             return STATUS_OK;
         }
         let borrowed = std::slice::from_raw_parts(bytes, length);
-        let (status, failure) =
-            copy_write_result(entry.runtime.engine.write_copy(engine_handle, borrowed));
-        if let Some(failure) = failure {
-            set_error(error, failure);
+        match entry.runtime.engine.write_copy(engine_handle, borrowed) {
+            Ok(()) => STATUS_OK,
+            Err(failure) => {
+                set_error(error, operation_error(failure));
+                operation_status(failure)
+            }
         }
-        status
     })
 }
 
@@ -1980,13 +1954,12 @@ pub unsafe extern "C" fn ptyx_event_release(event: *mut Event, error: *mut Error
 #[cfg(test)]
 mod tests {
     use super::{
-        active_session_for_write, copy_write_result, decode_handle, io_error, operation_error,
-        operation_status, sessions, write_boundary, Error, Event, Registry, RuntimeOptions,
-        SpawnOptions, ERROR_DOMAIN_ARGUMENT, ERROR_DOMAIN_PROCESS, ERROR_INVALID_ARGUMENT,
-        ERROR_NATIVE_FAILURE, OPERATION_SPAWN, OPERATION_TERMINATE, STATUS_BACKPRESSURE,
-        STATUS_INVALID_ARGUMENT, STATUS_OK, STATUS_OS_ERROR,
+        active_session_for_write, decode_handle, io_error, operation_error, operation_status,
+        sessions, write_boundary, Error, Event, Registry, RuntimeOptions, SpawnOptions,
+        ERROR_DOMAIN_ARGUMENT, ERROR_DOMAIN_PROCESS, ERROR_INVALID_ARGUMENT, ERROR_NATIVE_FAILURE,
+        OPERATION_SPAWN, OPERATION_TERMINATE, STATUS_BACKPRESSURE, STATUS_INVALID_ARGUMENT,
+        STATUS_OK, STATUS_OS_ERROR,
     };
-    use ptyx::__private_adapter::CopyWriteResult;
     use ptyx::{FailureKind, Operation, OperationError};
     use std::io;
     use std::mem::size_of;
@@ -2061,11 +2034,11 @@ mod tests {
     }
 
     #[test]
-    fn sticky_copy_write_failure_crosses_the_c_boundary_without_loss() {
+    fn sticky_write_failure_crosses_the_c_boundary_without_loss() {
         let failure = OperationError::new(Operation::Write, FailureKind::NativeFailure, Some(32));
 
-        let (status, error) = copy_write_result(CopyWriteResult::Closed(Some(failure)));
-        let error = error.expect("failed write must populate C error");
+        let status = operation_status(failure);
+        let error = operation_error(failure);
 
         assert_eq!(status, STATUS_OS_ERROR);
         assert_eq!(error.kind, ERROR_NATIVE_FAILURE);

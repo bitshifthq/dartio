@@ -7,15 +7,6 @@ use std::os::fd::RawFd;
 
 const MAX_NOTICE_GENERATION: u32 = ((i64::MAX as u64 >> 3) >> 32) as u32;
 
-#[cfg(feature = "__private_adapter")]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum CopyWriteResult {
-    Accepted,
-    Backpressure,
-    Closed(Option<crate::error::OperationError>),
-    Infrastructure(crate::error::OperationError),
-}
-
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod broker_client;
 mod completion;
@@ -26,12 +17,6 @@ mod integrated;
 mod oneshot;
 mod session;
 mod spawn;
-
-#[cfg(any(
-    feature = "__private_adapter",
-    all(test, any(target_os = "linux", target_os = "macos"))
-))]
-pub const WRITE_INFRASTRUCTURE_FAILURE: i64 = -2;
 
 #[cfg(windows)]
 mod windows;

@@ -34,14 +34,11 @@ use self::handles::{IoOperation, OwnedHandle, OwnedPseudoConsole};
 use crate::engine::control::{Control, ControlQueue, WakeGate};
 use crate::engine::event::{self, Receiver as EventReceiver, Sender as EventSender};
 use crate::engine::oneshot::{self, Sender as ReplySender};
-use crate::engine::session::{InputAdmission, SessionCore};
+use crate::engine::session::{AdmissionResult, InputAdmission, SessionCore};
 use crate::engine::spawn::BrokerSpawn;
-#[cfg(feature = "__private_adapter")]
-use crate::engine::CopyWriteResult;
 #[cfg(feature = "__private_adapter")]
 use crate::engine::Failure;
 #[cfg(feature = "__private_adapter")]
-use crate::engine::WRITE_INFRASTRUCTURE_FAILURE;
 use crate::engine::{CloseResult, Completion, GenerationRegistry, Notice};
 use crate::error::{FailureKind, Operation, OperationError, WriteError, WriteErrorKind};
 
@@ -59,6 +56,7 @@ const ACTIVATION_TIMEOUT: Duration = Duration::from_secs(5);
 const CLOSE_KEY_TAG: usize = 1_usize << (usize::BITS - 2);
 const NOTICE_AVAILABLE_KEY: usize = 1_usize << (usize::BITS - 1);
 const PROCESS_EXIT_KEY_TAG: usize = 1_usize << (usize::BITS - 3);
+const WRITE_INFRASTRUCTURE_FAILURE: i64 = -2;
 static QUARANTINED_IO_OPERATIONS: AtomicUsize = AtomicUsize::new(0);
 static QUARANTINED_PSEUDOCONSOLES: AtomicUsize = AtomicUsize::new(0);
 
@@ -958,22 +956,40 @@ impl IntegratedRuntime {
     }
 
     #[cfg(feature = "__private_adapter")]
-    pub fn write_copy(&self, handle: u64, bytes: &[u8]) -> CopyWriteResult {
+    pub fn write_copy(&self, handle: u64, bytes: &[u8]) -> Result<(), OperationError> {
         let _submission = match try_command_submission(&self.command_submission) {
             Ok(submission) => submission,
-            Err(0) => return CopyWriteResult::Backpressure,
+            Err(0) => {
+                return Err(OperationError::new(
+                    Operation::Write,
+                    FailureKind::Backpressure,
+                    None,
+                ))
+            }
             Err(_) => {
-                return CopyWriteResult::Infrastructure(infrastructure_failure(Operation::Write));
+                return Err(infrastructure_failure(Operation::Write));
             }
         };
         let admission = match self.admissions.try_lock() {
             Ok(admissions) => match admissions.get(&handle).cloned() {
                 Some(admission) => admission,
-                None => return CopyWriteResult::Closed(None),
+                None => {
+                    return Err(OperationError::new(
+                        Operation::Write,
+                        FailureKind::Closed,
+                        None,
+                    ))
+                }
             },
-            Err(std::sync::TryLockError::WouldBlock) => return CopyWriteResult::Backpressure,
+            Err(std::sync::TryLockError::WouldBlock) => {
+                return Err(OperationError::new(
+                    Operation::Write,
+                    FailureKind::Backpressure,
+                    None,
+                ));
+            }
             Err(std::sync::TryLockError::Poisoned(_)) => {
-                return CopyWriteResult::Infrastructure(infrastructure_failure(Operation::Write));
+                return Err(infrastructure_failure(Operation::Write));
             }
         };
         let result = admit_write_with(
@@ -985,12 +1001,21 @@ impl IntegratedRuntime {
             || Bytes::copy_from_slice(bytes),
         );
         match result {
-            1 => CopyWriteResult::Accepted,
-            0 => CopyWriteResult::Backpressure,
-            -1 => {
-                CopyWriteResult::Closed(admission.state.lock().ok().and_then(|state| state.failure))
-            }
-            _ => CopyWriteResult::Infrastructure(infrastructure_failure(Operation::Write)),
+            AdmissionResult::Accepted => Ok(()),
+            AdmissionResult::Backpressure => Err(OperationError::new(
+                Operation::Write,
+                FailureKind::Backpressure,
+                None,
+            )),
+            AdmissionResult::Closed => Err(admission
+                .state
+                .lock()
+                .ok()
+                .and_then(|state| state.failure)
+                .unwrap_or_else(|| {
+                    OperationError::new(Operation::Write, FailureKind::Closed, None)
+                })),
+            AdmissionResult::Infrastructure => Err(infrastructure_failure(Operation::Write)),
         }
     }
 
@@ -1180,20 +1205,20 @@ fn admit_write_with(
     length: usize,
     admission: Arc<InputAdmission>,
     make_bytes: impl FnOnce() -> Bytes,
-) -> i64 {
+) -> AdmissionResult {
     let mut state = match admission.state.try_lock() {
         Ok(state) => state,
-        Err(std::sync::TryLockError::WouldBlock) => return 0,
-        Err(std::sync::TryLockError::Poisoned(_)) => return WRITE_INFRASTRUCTURE_FAILURE,
+        Err(std::sync::TryLockError::WouldBlock) => return AdmissionResult::Backpressure,
+        Err(std::sync::TryLockError::Poisoned(_)) => return AdmissionResult::Infrastructure,
     };
     if !state.open {
-        return -1;
+        return AdmissionResult::Closed;
     }
     if length == 0
         || state.bytes.saturating_add(length) > admission.capacity
         || state.entries >= admission.entry_capacity()
     {
-        return 0;
+        return AdmissionResult::Backpressure;
     }
     if wake().is_err() {
         state.open = false;
@@ -1215,18 +1240,18 @@ fn admit_write_with(
         state.bytes -= length;
         state.entries -= 1;
         return match error {
-            TrySendError::Full(_) => 0,
+            TrySendError::Full(_) => AdmissionResult::Backpressure,
             TrySendError::Disconnected(_) => {
                 state.open = false;
                 state
                     .failure
                     .get_or_insert(infrastructure_failure(Operation::Write));
-                WRITE_INFRASTRUCTURE_FAILURE
+                AdmissionResult::Infrastructure
             }
         };
     }
     drop(state);
-    1
+    AdmissionResult::Accepted
 }
 
 fn admit_owned_write(
@@ -2577,7 +2602,7 @@ mod tests {
         try_command_submission, CloseAdmission, NoticeBudget, OutputTerminalNotice,
         WRITE_INFRASTRUCTURE_FAILURE,
     };
-    use crate::engine::session::InputAdmission;
+    use crate::engine::session::{AdmissionResult, InputAdmission};
     use crate::error::WriteErrorKind;
     use bytes::Bytes;
     use std::io;
@@ -2683,7 +2708,7 @@ mod tests {
             },
         );
 
-        assert_eq!(result, 0);
+        assert_eq!(result, AdmissionResult::Backpressure);
         assert!(!constructed);
         drop(held_state);
     }
@@ -2739,7 +2764,7 @@ mod tests {
             },
         );
 
-        assert_eq!(result, WRITE_INFRASTRUCTURE_FAILURE);
+        assert_eq!(result, AdmissionResult::Infrastructure);
         assert!(!constructed);
         assert!(receiver.try_recv().is_err());
     }

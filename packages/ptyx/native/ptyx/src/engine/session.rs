@@ -23,6 +23,15 @@ pub(crate) struct QueuedOutput {
     pub(crate) offset: usize,
 }
 
+/// Result of the non-blocking adapter admission attempt.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum AdmissionResult {
+    Accepted,
+    Backpressure,
+    Closed,
+    Infrastructure,
+}
+
 pub(crate) struct InputAdmission {
     pub(crate) capacity: usize,
     pub(crate) state: Mutex<InputAdmissionState>,
