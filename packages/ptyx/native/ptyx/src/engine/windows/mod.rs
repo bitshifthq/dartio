@@ -1027,36 +1027,21 @@ impl IntegratedRuntime {
     }
 
     pub fn cancel_output(&self, handle: u64) -> Result<(), OperationError> {
-        self.request_result(|reply| Command::CancelOutput { handle, reply })
-            .unwrap_or_else(|error| {
-                Err(OperationError::new(
-                    Operation::Output,
-                    FailureKind::InfrastructureLost,
-                    error.raw_os_error(),
-                ))
-            })
+        self.request_operation(Operation::Output, |reply| Command::CancelOutput {
+            handle,
+            reply,
+        })?
     }
 
     pub fn size(&self, handle: u64) -> Result<[u32; 4], OperationError> {
-        self.request_result(|reply| Command::Size { handle, reply })
-            .unwrap_or_else(|error| {
-                Err(OperationError::new(
-                    Operation::Size,
-                    FailureKind::InfrastructureLost,
-                    error.raw_os_error(),
-                ))
-            })
+        self.request_operation(Operation::Size, |reply| Command::Size { handle, reply })?
     }
 
     pub fn process_id(&self, handle: u64) -> Result<i64, OperationError> {
-        self.request_result(|reply| Command::ProcessId { handle, reply })
-            .unwrap_or_else(|error| {
-                Err(OperationError::new(
-                    Operation::ProcessId,
-                    FailureKind::InfrastructureLost,
-                    error.raw_os_error(),
-                ))
-            })
+        self.request_operation(Operation::ProcessId, |reply| Command::ProcessId {
+            handle,
+            reply,
+        })?
     }
 
     pub fn terminal_mode(&self, _handle: u64) -> Result<[bool; 3], OperationError> {
@@ -1076,18 +1061,11 @@ impl IntegratedRuntime {
     }
 
     pub fn resize(&self, handle: u64, size: [u32; 4]) -> Result<(), OperationError> {
-        self.request_result(|reply| Command::Resize {
+        self.request_operation(Operation::Resize, |reply| Command::Resize {
             handle,
             size,
             reply,
-        })
-        .unwrap_or_else(|error| {
-            Err(OperationError::new(
-                Operation::Resize,
-                FailureKind::InfrastructureLost,
-                error.raw_os_error(),
-            ))
-        })
+        })?
     }
 
     pub fn observe_mode(&self, _handle: u64, _observe: bool) -> Result<(), OperationError> {
@@ -1099,18 +1077,11 @@ impl IntegratedRuntime {
     }
 
     pub fn signal(&self, handle: u64, signal: i32) -> Result<bool, OperationError> {
-        self.request_result(|reply| Command::Signal {
+        self.request_operation(Operation::Terminate, |reply| Command::Signal {
             handle,
             signal,
             reply,
-        })
-        .unwrap_or_else(|error| {
-            Err(OperationError::new(
-                Operation::Terminate,
-                FailureKind::InfrastructureLost,
-                error.raw_os_error(),
-            ))
-        })
+        })?
     }
 
     pub fn close_start(&self, handle: u64) -> io::Result<Completion<CloseResult>> {
@@ -1160,6 +1131,20 @@ impl IntegratedRuntime {
         receiver
             .recv()
             .ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "ptyx IOCP reactor stopped"))
+    }
+
+    fn request_operation<R>(
+        &self,
+        operation: Operation,
+        command: impl FnOnce(ReplySender<R>) -> Command,
+    ) -> Result<R, OperationError> {
+        self.request_result(command).map_err(|error| {
+            OperationError::new(
+                operation,
+                FailureKind::InfrastructureLost,
+                error.raw_os_error(),
+            )
+        })
     }
 }
 
