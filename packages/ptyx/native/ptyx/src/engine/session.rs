@@ -3,10 +3,12 @@ use crate::engine::CloseResult;
 use crate::error::OperationError;
 use bytes::{Buf, Bytes, BytesMut};
 use std::collections::VecDeque;
+use std::io;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 const MAX_INPUT_ENTRIES: usize = 4096;
+pub(crate) const MAX_SESSION_CAPACITY: usize = 64 * 1024 * 1024;
 // Keep queued output aligned with the platform delivery batch. This bounds a
 // maximum-capacity session to 1024 queued allocations and lets pull_output
 // transfer the common 64 KiB chunk without an intermediate coalescing copy.
@@ -36,6 +38,18 @@ pub(crate) enum AdmissionResult {
 pub(crate) struct InputAdmission {
     pub(crate) capacity: usize,
     pub(crate) state: Mutex<InputAdmissionState>,
+}
+
+pub(crate) fn validate_capacities(input_capacity: usize, output_capacity: usize) -> io::Result<()> {
+    if !(1..=MAX_SESSION_CAPACITY).contains(&input_capacity)
+        || !(1..=MAX_SESSION_CAPACITY).contains(&output_capacity)
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "capacities must be in 1..=67108864",
+        ));
+    }
+    Ok(())
 }
 
 pub(crate) struct InputAdmissionState {
@@ -172,6 +186,21 @@ impl SessionCore {
         Ok(())
     }
 
+    /// Drops every input item that has been admitted but not written.
+    ///
+    /// The admission counters include commands that have not reached the
+    /// reactor yet, so clearing only `input` would strand capacity. Keeping
+    /// this accounting beside the queues makes abandonment and failure paths
+    /// use the same invariant.
+    pub(crate) fn discard_input(&mut self) -> bool {
+        let had_pending = self.input_bytes != 0 || self.admission.has_pending();
+        self.admission.release(self.input_bytes, self.input_entries);
+        self.input.clear();
+        self.input_bytes = 0;
+        self.input_entries = 0;
+        had_pending
+    }
+
     pub(crate) fn pull_output(&mut self, maximum: usize) -> Bytes {
         self.flush_output_tail();
         let amount = maximum.min(self.output_bytes);
@@ -277,7 +306,9 @@ impl SessionCore {
 
 #[cfg(test)]
 mod tests {
-    use super::{InputAdmission, SessionCore, OUTPUT_CHUNK_TARGET};
+    use super::{
+        validate_capacities, InputAdmission, SessionCore, MAX_SESSION_CAPACITY, OUTPUT_CHUNK_TARGET,
+    };
     use bytes::Bytes;
     use std::sync::Arc;
 
@@ -331,5 +362,30 @@ mod tests {
             session.output.len() + usize::from(!session.output_tail.is_empty())
                 <= (1024_usize * 1024).div_ceil(OUTPUT_CHUNK_TARGET)
         );
+    }
+
+    #[test]
+    fn capacities_share_one_platform_independent_bound() {
+        assert!(validate_capacities(1, MAX_SESSION_CAPACITY).is_ok());
+        assert!(validate_capacities(0, 1).is_err());
+        assert!(validate_capacities(MAX_SESSION_CAPACITY + 1, 1).is_err());
+    }
+
+    #[test]
+    fn discarding_input_releases_queue_and_admission_together() {
+        let admission = Arc::new(InputAdmission::new(8));
+        let mut session = SessionCore::new(Arc::clone(&admission), 8);
+        let bytes = Bytes::from_static(b"input");
+        let mut state = admission.state.lock().expect("admission state");
+        state.bytes = bytes.len();
+        state.entries = 1;
+        drop(state);
+        session.enqueue_write(bytes).expect("input is admitted");
+
+        assert!(session.discard_input());
+        assert!(session.input.is_empty());
+        assert_eq!(session.input_bytes, 0);
+        assert_eq!(session.input_entries, 0);
+        assert!(!admission.has_pending());
     }
 }

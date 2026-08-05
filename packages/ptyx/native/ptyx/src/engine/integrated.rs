@@ -5,7 +5,7 @@ use crate::engine::event::{self, Receiver as EventReceiver, Sender as EventSende
 use crate::engine::oneshot::{self, Sender as ReplySender};
 #[cfg(any(feature = "__private_adapter", test))]
 use crate::engine::session::AdmissionResult;
-use crate::engine::session::{InputAdmission, SessionCore};
+use crate::engine::session::{validate_capacities, InputAdmission, SessionCore};
 use crate::engine::spawn::BrokerSpawn;
 #[cfg(feature = "__private_adapter")]
 use crate::engine::Failure;
@@ -706,20 +706,6 @@ impl IntegratedRuntime {
     }
 }
 
-fn validate_capacities(input_capacity: usize, output_capacity: usize) -> io::Result<()> {
-    if input_capacity == 0
-        || input_capacity > 64 * 1024 * 1024
-        || output_capacity == 0
-        || output_capacity > 64 * 1024 * 1024
-    {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "capacities must be in 1..=67108864",
-        ));
-    }
-    Ok(())
-}
-
 fn stage_spawn(
     broker: &BrokerClient,
     commands: &SyncSender<Command>,
@@ -1384,12 +1370,7 @@ fn process_controls(
                     session.active = false;
                     session.paused = false;
                     session.admission.close();
-                    session
-                        .admission
-                        .release(session.input_bytes, session.input_entries);
-                    session.input.clear();
-                    session.input_bytes = 0;
-                    session.input_entries = 0;
+                    session.discard_input();
                     session.forget_output();
                     let _ = close_session(handle, session, broker);
                     let _ = update_read_filter(kqueue, handle, session, true);
@@ -1688,15 +1669,9 @@ fn fail_input(
     counters: &mut RuntimeCounters,
     failure: OperationError,
 ) {
-    let accepted_input_pending = !session.input.is_empty() || session.admission.has_pending();
     session.input_failed = true;
     session.admission.close_with_failure(failure);
-    session
-        .admission
-        .release(session.input_bytes, session.input_entries);
-    session.input.clear();
-    session.input_bytes = 0;
-    session.input_entries = 0;
+    let accepted_input_pending = session.discard_input();
     if accepted_input_pending {
         session.input_failure.get_or_insert(failure);
         notify_input_failure(handle, session, notices, counters);
@@ -2061,12 +2036,7 @@ fn reap_abandoned(
                 session.abandoned = true;
                 session.activation_deadline = None;
                 session.admission.close();
-                session
-                    .admission
-                    .release(session.input_bytes, session.input_entries);
-                session.input.clear();
-                session.input_bytes = 0;
-                session.input_entries = 0;
+                session.discard_input();
                 session.forget_output();
             }
             if session.abandoned && !session.close_started {

@@ -31,6 +31,7 @@ pub use event::ReceiverClosed;
 pub use event::{CloseResult, Notice, SessionReceiver};
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use integrated::IntegratedRuntime;
+pub(crate) use session::MAX_SESSION_CAPACITY;
 pub use spawn::BrokerSpawn;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub type RuntimeEvents = EventReceiver<Notice>;

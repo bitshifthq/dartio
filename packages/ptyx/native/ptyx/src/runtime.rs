@@ -14,8 +14,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::task::{Context, Poll};
 
-const MAX_CAPACITY: usize = 64 * 1024 * 1024;
-
 /// Configures one native PTY runtime.
 #[derive(Default)]
 pub struct RuntimeBuilder {
@@ -630,7 +628,7 @@ impl Drop for RuntimeInner {
 }
 
 fn validate_capacity(field: &'static str, bytes: usize) -> Result<(), SpawnError> {
-    if (1..=MAX_CAPACITY).contains(&bytes) {
+    if (1..=crate::engine::MAX_SESSION_CAPACITY).contains(&bytes) {
         Ok(())
     } else {
         Err(SpawnError::InvalidCapacity { field, bytes })

@@ -37,7 +37,7 @@ use crate::engine::event::{self, Receiver as EventReceiver, Sender as EventSende
 use crate::engine::oneshot::{self, Sender as ReplySender};
 #[cfg(any(feature = "__private_adapter", test))]
 use crate::engine::session::AdmissionResult;
-use crate::engine::session::{InputAdmission, SessionCore};
+use crate::engine::session::{validate_capacities, InputAdmission, SessionCore};
 use crate::engine::spawn::BrokerSpawn;
 #[cfg(feature = "__private_adapter")]
 use crate::engine::Failure;
@@ -59,7 +59,6 @@ const NOTICE_AVAILABLE_KEY: usize = 1_usize << (usize::BITS - 1);
 const PROCESS_EXIT_KEY_TAG: usize = 1_usize << (usize::BITS - 3);
 #[cfg(any(feature = "__private_adapter", test))]
 const WRITE_INFRASTRUCTURE_FAILURE: i64 = -2;
-static QUARANTINED_PSEUDOCONSOLES: AtomicUsize = AtomicUsize::new(0);
 
 const fn input_closed() -> OperationError {
     OperationError::new(Operation::Write, FailureKind::Closed, None)
@@ -182,7 +181,7 @@ impl Drop for Session {
             wait_for_cancelled_io(self.input_pipe.raw(), write);
         }
         if let Some(pseudoconsole) = self.pseudoconsole.take() {
-            quarantine_pseudoconsole(pseudoconsole, self.close_permit.take());
+            close_pseudoconsole_fallback(pseudoconsole, self.close_permit.take());
         }
     }
 }
@@ -199,15 +198,12 @@ fn wait_for_cancelled_io(pipe: HANDLE, operation: Pin<Box<IoOperation>>) {
     drop(operation);
 }
 
-fn quarantine_pseudoconsole(pseudoconsole: OwnedPseudoConsole, permit: Option<ClosePermit>) {
-    // Reaching this path means an isolated closer thread could not be created.
-    // Retaining its permit makes repeated failures consume bounded admission.
-    let previous = QUARANTINED_PSEUDOCONSOLES.fetch_add(1, Ordering::AcqRel);
-    debug_assert!(previous < CLOSE_ADMISSION_CAPACITY);
-    std::mem::forget(pseudoconsole);
-    if let Some(permit) = permit {
-        std::mem::forget(permit);
-    }
+fn close_pseudoconsole_fallback(pseudoconsole: OwnedPseudoConsole, permit: Option<ClosePermit>) {
+    // The supported Windows floor guarantees that ClosePseudoConsole is
+    // nonblocking. Use it directly when an isolated closer cannot be
+    // provisioned; retaining an HPCON would leak process-owned state.
+    pseudoconsole.close();
+    drop(permit);
 }
 
 enum Command {
@@ -745,7 +741,11 @@ impl CloserPool {
                 if let Ok(mut completed) = state.completed.lock() {
                     completed.insert(task.handle, task.permit);
                 } else {
-                    std::mem::forget(task.permit);
+                    // A poisoned completion registry cannot be repaired, but
+                    // the permit is still owned by this worker and must be
+                    // returned so another session is not permanently denied
+                    // close admission.
+                    drop(task.permit);
                 }
                 unsafe {
                     PostQueuedCompletionStatus(
@@ -1321,20 +1321,6 @@ fn admit_owned_write(
             unreachable!("owned write admission submits only write commands")
         }
     }
-}
-
-fn validate_capacities(input_capacity: usize, output_capacity: usize) -> io::Result<()> {
-    if input_capacity == 0
-        || input_capacity > 64 * 1024 * 1024
-        || output_capacity == 0
-        || output_capacity > 64 * 1024 * 1024
-    {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "capacities must be in 1..=67108864",
-        ));
-    }
-    Ok(())
 }
 
 fn stage_spawn(
@@ -2163,7 +2149,7 @@ fn start_pseudoconsole_close(
         return;
     };
     let Some(permit) = session.close_permit.take() else {
-        quarantine_pseudoconsole(pseudoconsole, None);
+        close_pseudoconsole_fallback(pseudoconsole, None);
         retain_cleanup_failure(session, infrastructure_failure(Operation::Close));
         return;
     };
@@ -2218,15 +2204,9 @@ fn fail_input(
     counters: &mut RuntimeCounters,
     failure: OperationError,
 ) {
-    let accepted_pending = session.input_bytes != 0 || session.admission.has_pending();
     session.input_failed = true;
     session.admission.close_with_failure(failure);
-    session
-        .admission
-        .release(session.input_bytes, session.input_entries);
-    session.input.clear();
-    session.input_bytes = 0;
-    session.input_entries = 0;
+    let accepted_pending = session.discard_input();
     if accepted_pending {
         notify_input_failure(handle, session, notices, counters, failure);
     }
