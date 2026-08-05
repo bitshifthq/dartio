@@ -201,6 +201,18 @@ impl SessionCore {
         had_pending
     }
 
+    /// Permanently closes input and retains the first failure that affected
+    /// already accepted bytes. Returns whether any accepted input was lost.
+    pub(crate) fn fail_input(&mut self, failure: OperationError) -> bool {
+        self.input_failed = true;
+        self.admission.close_with_failure(failure);
+        let accepted_pending = self.discard_input();
+        if accepted_pending {
+            self.input_failure.get_or_insert(failure);
+        }
+        accepted_pending
+    }
+
     pub(crate) fn pull_output(&mut self, maximum: usize) -> Bytes {
         self.flush_output_tail();
         let amount = maximum.min(self.output_bytes);
@@ -309,6 +321,7 @@ mod tests {
     use super::{
         validate_capacities, InputAdmission, SessionCore, MAX_SESSION_CAPACITY, OUTPUT_CHUNK_TARGET,
     };
+    use crate::error::{FailureKind, Operation, OperationError};
     use bytes::Bytes;
     use std::sync::Arc;
 
@@ -387,5 +400,24 @@ mod tests {
         assert_eq!(session.input_bytes, 0);
         assert_eq!(session.input_entries, 0);
         assert!(!admission.has_pending());
+    }
+
+    #[test]
+    fn failing_input_closes_admission_and_retains_the_failure() {
+        let admission = Arc::new(InputAdmission::new(8));
+        let mut session = SessionCore::new(Arc::clone(&admission), 8);
+        let bytes = Bytes::from_static(b"input");
+        let mut state = admission.state.lock().expect("admission state");
+        state.bytes = bytes.len();
+        state.entries = 1;
+        drop(state);
+        session.enqueue_write(bytes).expect("input is admitted");
+
+        let failure = OperationError::new(Operation::Write, FailureKind::NativeFailure, Some(5));
+        assert!(session.fail_input(failure));
+        assert!(session.input_failed);
+        assert_eq!(session.input_failure, Some(failure));
+        assert!(!admission.has_pending());
+        assert!(session.enqueue_write(Bytes::from_static(b"later")).is_err());
     }
 }

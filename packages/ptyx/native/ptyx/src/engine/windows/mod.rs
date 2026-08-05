@@ -2245,10 +2245,7 @@ fn fail_input(
     counters: &mut RuntimeCounters,
     failure: OperationError,
 ) {
-    session.input_failed = true;
-    session.admission.close_with_failure(failure);
-    let accepted_pending = session.discard_input();
-    if accepted_pending {
+    if session.fail_input(failure) {
         notify_input_failure(handle, session, notices, counters, failure);
     }
 }
