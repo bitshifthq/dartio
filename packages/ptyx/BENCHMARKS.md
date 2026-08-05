@@ -154,6 +154,13 @@ duration:
 
 - `benchmark/results/current-soak-macos-x64-bf06cc2.json`
 
+An exact-current-revision 512 MiB integrity run also passed on macOS x64:
+38.670 MiB/s output, 3.279 MiB/s input, and 5.796 MiB/s bidirectional, with
+all bytes verified and no trailing data. This remains diagnostic because it is
+not a complete acceptance scorecard or release manifest:
+
+- `benchmark/results/integrity-512m-macos-x64-51330b6.json`
+
 The direct candidate omits the asynchronous Dart stream contract, bounded
 output ownership, native-port delivery, and credit return. Under the
 equivalence rule in `doc/architecture/candidate-gates.md`, it is a useful

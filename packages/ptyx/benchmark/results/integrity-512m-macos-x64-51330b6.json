@@ -1,0 +1,65 @@
+{
+  "schema": 4,
+  "suite": "ptyx-diagnostic-scorecard",
+  "acceptance_result": false,
+  "missing_acceptance_workloads": [
+    "clean exact-revision acceptance manifest for multi-gigabyte integrity",
+    "base, direct-native, and competitor comparisons",
+    "allocation and copy instrumentation"
+  ],
+  "boundary": "Dart public API through native PTY and child; release native asset",
+  "platform": "macos",
+  "platform_version": "Version 26.5.2 (Build 25F84)",
+  "architecture": "x86_64",
+  "dart_version": "3.12.2 (stable) (Tue Jun 9 01:11:39 2026 -0700) on \"macos_x64\"",
+  "rustc_version": "rustc 1.97.1 (8bab26f4f 2026-07-14) (Homebrew)",
+  "cargo_version": "cargo 1.97.1 (c980f4866 2026-06-30) (Homebrew)",
+  "processors": 16,
+  "revision": "51330b6c4678a9b029241846049e94b3941c3de3",
+  "tree_dirty": false,
+  "working_tree_sha256": null,
+  "command": [
+    "integrity",
+    "--integrity-bytes=536870912",
+    "--repetitions=1",
+    "--warmups=0",
+    "--output=benchmark/results/integrity-512m-macos-x64-51330b6.json"
+  ],
+  "fixture_sha256": "f838dc6d52a74972a2428be1f2097e92796b9d3a51a2461b610c86c2d84e620d",
+  "fixture_executable": null,
+  "fixture_executable_sha256": null,
+  "scorecard_sha256": "f7c268a1c9f317bed7e11a1124f3eca2f3d221c62029a3d019a1c123f0d7d136",
+  "warmups": 0,
+  "repetitions": 1,
+  "pid": 22702,
+  "rss_before_bytes": 200949760,
+  "integrity": {
+    "passed": true,
+    "byte_count": 536870912,
+    "output": {
+      "bytes": 536870912,
+      "trailing_bytes": 0,
+      "elapsed_us": 13240293,
+      "mib_per_second": 38.66983910401379,
+      "exit_code": 0,
+      "integrity_scope": "ordered child output bytes"
+    },
+    "input": {
+      "bytes": 536870912,
+      "elapsed_us": 156144886,
+      "mib_per_second": 3.279005884316954,
+      "exit_code": 0,
+      "integrity_scope": "ordered child input validation report"
+    },
+    "bidirectional": {
+      "sent_bytes": 536870912,
+      "received_bytes": 536870912,
+      "trailing_bytes": 0,
+      "elapsed_us": 176685455,
+      "aggregate_mib_per_second": 5.795610057432289,
+      "exit_code": 0,
+      "integrity_scope": "ordered child echo bytes"
+    }
+  },
+  "rss_after_bytes": 206835712
+}
