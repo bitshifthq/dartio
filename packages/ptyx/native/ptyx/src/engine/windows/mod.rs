@@ -646,9 +646,13 @@ impl SpawnPool {
                     };
                     if !delivered {
                         if let Some(handle) = staged {
-                            enqueue_abandon(&commands, &controls, handle, || {
-                                iocp.post_command().is_ok()
-                            });
+                            while let Ok(false) =
+                                enqueue_abandon(&commands, &controls, handle, || {
+                                    iocp.post_command().is_ok()
+                                })
+                            {
+                                thread::yield_now();
+                            }
                         }
                     }
                 }
@@ -1161,17 +1165,18 @@ fn enqueue_abandon(
     controls: &ControlQueue,
     handle: u64,
     wake: impl FnOnce() -> bool,
-) -> bool {
+) -> Result<bool, ()> {
     if controls.push(Control::Abandon { handle }) {
-        return wake();
+        return wake().then_some(true).ok_or(());
     }
     // Keep the lifecycle lane bounded without allowing a saturated queue to
     // strand a staged child. The ordered command lane is a non-blocking
     // emergency fallback; callers retain ownership when it is unavailable.
-    if commands.try_send(Command::Abandon { handle }).is_err() {
-        return false;
+    match commands.try_send(Command::Abandon { handle }) {
+        Ok(()) => wake().then_some(true).ok_or(()),
+        Err(TrySendError::Full(_)) => Ok(false),
+        Err(TrySendError::Disconnected(_)) => Err(()),
     }
-    wake()
 }
 
 impl Drop for IntegratedRuntime {
@@ -1182,7 +1187,6 @@ impl Drop for IntegratedRuntime {
 
 impl IntegratedRuntime {
     pub fn shutdown(&self) -> bool {
-        let spawn = self.spawn_pool.shutdown();
         let _ = self.commands.send(Command::Shutdown);
         let _ = self.iocp.post_command();
         let reactor = self
@@ -1195,6 +1199,7 @@ impl IntegratedRuntime {
         if let Ok(mut emitter) = self.notice_emitter.lock() {
             emitter.take();
         }
+        let spawn = self.spawn_pool.shutdown();
         spawn && reactor
     }
 }

@@ -308,7 +308,11 @@ impl SpawnPool {
                     };
                     if !delivered {
                         if let Some(handle) = staged {
-                            enqueue_abandon(&commands, &controls, handle, || wake.wake());
+                            while let Ok(false) =
+                                enqueue_abandon(&commands, &controls, handle, || wake.wake())
+                            {
+                                thread::yield_now();
+                            }
                         }
                     }
                 }
@@ -657,7 +661,10 @@ impl IntegratedRuntime {
         {
             admission.close();
         }
-        enqueue_abandon(&self.commands, &self.controls, handle, || self.wake.wake())
+        matches!(
+            enqueue_abandon(&self.commands, &self.controls, handle, || self.wake.wake()),
+            Ok(true)
+        )
     }
 
     fn request_result<R>(&self, command: impl FnOnce(ReplySender<R>) -> Command) -> io::Result<R> {
@@ -697,29 +704,30 @@ fn enqueue_abandon(
     controls: &ControlQueue,
     handle: u64,
     wake: impl FnOnce() -> bool,
-) -> bool {
+) -> Result<bool, ()> {
     if controls.push(Control::Abandon { handle }) {
-        return wake();
+        return wake().then_some(true).ok_or(());
     }
     // Keep the lifecycle lane bounded without allowing a saturated queue to
     // strand a staged child. The ordered command lane is a non-blocking
     // emergency fallback; callers retain ownership when it is unavailable.
-    if commands.try_send(Command::Abandon { handle }).is_err() {
-        return false;
+    match commands.try_send(Command::Abandon { handle }) {
+        Ok(()) => wake().then_some(true).ok_or(()),
+        Err(TrySendError::Full(_)) => Ok(false),
+        Err(TrySendError::Disconnected(_)) => Err(()),
     }
-    wake()
 }
 
 impl IntegratedRuntime {
     pub fn shutdown(&self) -> bool {
-        let spawn = self.spawn_pool.shutdown();
         let reactor = self.thread.lock().ok().and_then(|mut value| value.take());
         let Some(reactor) = reactor else {
-            return spawn && self.broker.shutdown();
+            return self.spawn_pool.shutdown() && self.broker.shutdown();
         };
         let _ = self.commands.send(Command::Shutdown);
         self.wake.wake();
         let reactor = reactor.join().is_ok();
+        let spawn = self.spawn_pool.shutdown();
         spawn && reactor && self.broker.shutdown()
     }
 }
@@ -2599,10 +2607,13 @@ mod tests {
         let (sender, receiver) = mpsc::sync_channel(1);
         let mut woke = false;
 
-        assert!(super::enqueue_abandon(&sender, &controls, 99_999, || {
-            woke = true;
-            true
-        }));
+        assert_eq!(
+            super::enqueue_abandon(&sender, &controls, 99_999, || {
+                woke = true;
+                true
+            }),
+            Ok(true)
+        );
         assert!(woke);
         assert!(matches!(
             receiver.try_recv(),
@@ -2611,10 +2622,13 @@ mod tests {
 
         let (sender, _receiver) = mpsc::sync_channel(0);
         let mut woke = false;
-        assert!(!super::enqueue_abandon(&sender, &controls, 100_000, || {
-            woke = true;
-            true
-        }));
+        assert_eq!(
+            super::enqueue_abandon(&sender, &controls, 100_000, || {
+                woke = true;
+                true
+            }),
+            Ok(false)
+        );
         assert!(!woke);
     }
 
