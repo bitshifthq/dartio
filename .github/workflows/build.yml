@@ -14,7 +14,9 @@ on:
         type: string
         default: "300"
   push:
-    branches: [main]
+    # Keep the isolated best-in-class branch continuously qualified while
+    # development credentials cannot dispatch workflow_dispatch manually.
+    branches: [main, codex/ptyx-best-in-class]
     paths:
       - "packages/ptyx/**"
       - "pubspec.yaml"
@@ -51,7 +53,7 @@ jobs:
 
   extended:
     name: extended
-    if: inputs.extended
+    if: inputs.extended || github.ref == 'refs/heads/codex/ptyx-best-in-class'
     uses: ./.github/workflows/ptyx-extended.yml
     with:
       soak_seconds: ${{ inputs.soak_seconds }}

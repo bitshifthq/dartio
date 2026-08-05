@@ -247,6 +247,9 @@ enum Command {
         completion: ReplySender<CloseResult>,
         reply: ReplySender<bool>,
     },
+    Abandon {
+        handle: u64,
+    },
     Shutdown,
 }
 
@@ -643,8 +646,9 @@ impl SpawnPool {
                     };
                     if !delivered {
                         if let Some(handle) = staged {
-                            controls.push(Control::Abandon { handle });
-                            let _ = iocp.post_command();
+                            enqueue_abandon(&commands, &controls, handle, || {
+                                iocp.post_command().is_ok()
+                            });
                         }
                     }
                 }
@@ -1135,11 +1139,9 @@ impl IntegratedRuntime {
         {
             admission.close();
         }
-        let queued = self.controls.push(Control::Abandon { handle });
-        if queued {
-            let _ = self.iocp.post_command();
-        }
-        queued
+        enqueue_abandon(&self.commands, &self.controls, handle, || {
+            self.iocp.post_command().is_ok()
+        })
     }
 
     fn request_result<R>(&self, command: impl FnOnce(ReplySender<R>) -> Command) -> io::Result<R> {
@@ -1152,6 +1154,24 @@ impl IntegratedRuntime {
             .recv()
             .ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "ptyx IOCP reactor stopped"))
     }
+}
+
+fn enqueue_abandon(
+    commands: &SyncSender<Command>,
+    controls: &ControlQueue,
+    handle: u64,
+    wake: impl FnOnce() -> bool,
+) -> bool {
+    if controls.push(Control::Abandon { handle }) {
+        return wake();
+    }
+    // Keep the lifecycle lane bounded without allowing a saturated queue to
+    // strand a staged child. The ordered command lane is a non-blocking
+    // emergency fallback; callers retain ownership when it is unavailable.
+    if commands.try_send(Command::Abandon { handle }).is_err() {
+        return false;
+    }
+    wake()
 }
 
 impl Drop for IntegratedRuntime {
@@ -1793,6 +1813,19 @@ fn process_commands(
                     true
                 });
                 let _ = reply.send(accepted);
+            }
+            Command::Abandon { handle } => {
+                if let Some(session) = sessions.get_mut(handle) {
+                    abandon_session(
+                        iocp,
+                        iocp_sender,
+                        handle,
+                        session,
+                        closer,
+                        notices,
+                        counters,
+                    );
+                }
             }
             Command::Shutdown => return true,
         }

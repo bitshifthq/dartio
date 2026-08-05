@@ -332,6 +332,30 @@ fn runtime_entry(handle: u64) -> Option<Arc<RuntimeEntry>> {
     adapter().lock().ok()?.runtimes.get(handle).map(Arc::clone)
 }
 
+fn abandon_or_shutdown(runtime: &Arc<RuntimeEntry>, handle: u64) -> bool {
+    if runtime.engine.try_abandon(handle) {
+        return true;
+    }
+    // A failed lifecycle admission means the reactor has already stopped or
+    // its command lane is unavailable. Do not discard the last ownership
+    // record while a staged child may still exist: converge the entire engine
+    // through its idempotent shutdown path instead.
+    if runtime.shut_down.swap(true, Ordering::AcqRel) {
+        return false;
+    }
+    // Shutdown can wait for a saturated reactor command lane to drain. Keep
+    // this failure path non-blocking for synchronous C callers while a native
+    // owner performs the idempotent shutdown and joins the reactor.
+    let owner = Arc::clone(runtime);
+    let _ = std::thread::Builder::new()
+        .name("ptyx-abandon-cleanup".to_owned())
+        .spawn(move || {
+            let _ = owner.engine.shutdown();
+        });
+    retire_runtime_sessions(runtime);
+    false
+}
+
 /// Reserves one adapter ownership slot while a private language adapter owns
 /// the runtime handle. The reservation closes the probe/release race between
 /// attaching an event pump and releasing an otherwise idle runtime.
@@ -433,6 +457,33 @@ fn retire_released_sessions(runtime: &Arc<RuntimeEntry>) {
             .map(|state| matches!(*state, SessionState::Released))
             .unwrap_or(false)
         {
+            retire_session_entry(runtime, handle);
+        }
+    }
+}
+
+fn retire_runtime_sessions(runtime: &Arc<RuntimeEntry>) {
+    let candidates = sessions()
+        .read()
+        .map(|state| {
+            state
+                .slots
+                .iter()
+                .enumerate()
+                .filter_map(|(index, slot)| {
+                    let handle = (u64::from(slot.generation) << 32) | (index as u64 + 1);
+                    slot.value
+                        .as_ref()
+                        .and_then(|entry| Arc::ptr_eq(&entry.runtime, runtime).then_some(handle))
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    for handle in candidates {
+        if let Some(entry) = session_entry(handle) {
+            if let Ok(mut state) = entry.state.lock() {
+                *state = SessionState::Released;
+            }
             retire_session_entry(runtime, handle);
         }
     }
@@ -885,11 +936,11 @@ pub unsafe extern "C" fn ptyx_runtime_next_event(
                     handle: engine_handle,
                 } => {
                     let Some(entry) = session_entry(request) else {
-                        runtime.engine.try_abandon(engine_handle);
+                        abandon_or_shutdown(&runtime, engine_handle);
                         continue;
                     };
                     if !Arc::ptr_eq(&entry.runtime, &runtime) {
-                        runtime.engine.try_abandon(engine_handle);
+                        abandon_or_shutdown(&runtime, engine_handle);
                         continue;
                     }
                     let should_activate = match entry.state.lock() {
@@ -902,7 +953,7 @@ pub unsafe extern "C" fn ptyx_runtime_next_event(
                             }
                         }
                         Err(_) => {
-                            runtime.engine.try_abandon(engine_handle);
+                            abandon_or_shutdown(&runtime, engine_handle);
                             set_error(
                                 error,
                                 Error::value(
@@ -916,7 +967,7 @@ pub unsafe extern "C" fn ptyx_runtime_next_event(
                         }
                     };
                     if !should_activate {
-                        runtime.engine.try_abandon(engine_handle);
+                        abandon_or_shutdown(&runtime, engine_handle);
                         if entry
                             .state
                             .lock()
@@ -928,7 +979,7 @@ pub unsafe extern "C" fn ptyx_runtime_next_event(
                         continue;
                     }
                     if !runtime.engine.activate(engine_handle) {
-                        runtime.engine.try_abandon(engine_handle);
+                        abandon_or_shutdown(&runtime, engine_handle);
                         if let Ok(mut state) = entry.state.lock() {
                             if matches!(*state, SessionState::Activating) {
                                 *state = SessionState::Failed;
@@ -947,7 +998,7 @@ pub unsafe extern "C" fn ptyx_runtime_next_event(
                         return STATUS_OK;
                     }
                     let Ok(mut state) = entry.state.lock() else {
-                        runtime.engine.try_abandon(engine_handle);
+                        abandon_or_shutdown(&runtime, engine_handle);
                         set_error(
                             error,
                             Error::value(
@@ -961,7 +1012,7 @@ pub unsafe extern "C" fn ptyx_runtime_next_event(
                     };
                     let Ok(mut sessions) = runtime.sessions.lock() else {
                         *state = SessionState::Failed;
-                        runtime.engine.try_abandon(engine_handle);
+                        abandon_or_shutdown(&runtime, engine_handle);
                         set_error(
                             error,
                             Error::value(
@@ -982,7 +1033,7 @@ pub unsafe extern "C" fn ptyx_runtime_next_event(
                     if activated {
                         sessions.insert(engine_handle, request);
                     } else {
-                        runtime.engine.try_abandon(engine_handle);
+                        abandon_or_shutdown(&runtime, engine_handle);
                         continue;
                     }
                     let struct_size = (*event).struct_size;
@@ -1159,7 +1210,7 @@ unsafe fn populate_event(
                     // If the credit lane is unavailable, close the session
                     // through the independent lifecycle lane instead of
                     // leaving the engine's output lease live indefinitely.
-                    let _ = runtime.engine.try_abandon(engine_handle);
+                    abandon_or_shutdown(runtime, engine_handle);
                 }
                 set_error(
                     error,
@@ -1248,6 +1299,10 @@ pub unsafe extern "C" fn ptyx_runtime_shutdown(runtime: u64, error: *mut Error) 
             return STATUS_STALE_HANDLE;
         };
         if runtime.shut_down.load(Ordering::Acquire) {
+            retire_released_sessions(runtime);
+            if let Ok(mut active) = runtime.sessions.lock() {
+                active.clear();
+            }
             return STATUS_OK;
         }
         if !runtime.engine.shutdown() {
@@ -2003,7 +2058,7 @@ pub unsafe extern "C" fn ptyx_session_release(session: *mut u64, error: *mut Err
                 // native reactor has accepted the abandonment command. A
                 // bounded lifecycle queue may reject it under saturation or
                 // shutdown; retaining the handle lets the caller retry.
-                if !entry.runtime.engine.try_abandon(engine_handle) {
+                if !abandon_or_shutdown(&entry.runtime, engine_handle) {
                     set_error(
                         error,
                         Error::value(

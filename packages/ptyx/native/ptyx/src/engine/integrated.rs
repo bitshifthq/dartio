@@ -208,6 +208,9 @@ pub(crate) enum Command {
         handle: u64,
         succeeded: bool,
     },
+    Abandon {
+        handle: u64,
+    },
     ForceCloseResult {
         handle: u64,
         succeeded: bool,
@@ -232,14 +235,16 @@ struct ReactorWake {
 }
 
 impl WakeWriter {
-    fn wake(&self) {
+    fn wake(&self) -> bool {
         if self.gate.request() && wake_socket(self.fd.as_raw_fd()).is_err() {
             // A fatal send cannot leave already-committed commands stranded.
             // Closing the wake direction forces the reactor to fail its
             // pending operations and drop the command receiver.
             self.gate.clear();
             fail_wake_socket(self.fd.as_raw_fd());
+            return false;
         }
+        true
     }
 }
 
@@ -303,8 +308,7 @@ impl SpawnPool {
                     };
                     if !delivered {
                         if let Some(handle) = staged {
-                            controls.push(Control::Abandon { handle });
-                            wake.wake();
+                            enqueue_abandon(&commands, &controls, handle, || wake.wake());
                         }
                     }
                 }
@@ -653,11 +657,7 @@ impl IntegratedRuntime {
         {
             admission.close();
         }
-        let queued = self.controls.push(Control::Abandon { handle });
-        if queued {
-            self.wake.wake();
-        }
-        queued
+        enqueue_abandon(&self.commands, &self.controls, handle, || self.wake.wake())
     }
 
     fn request_result<R>(&self, command: impl FnOnce(ReplySender<R>) -> Command) -> io::Result<R> {
@@ -690,6 +690,24 @@ impl Drop for IntegratedRuntime {
     fn drop(&mut self) {
         let _ = self.shutdown();
     }
+}
+
+fn enqueue_abandon(
+    commands: &SyncSender<Command>,
+    controls: &ControlQueue,
+    handle: u64,
+    wake: impl FnOnce() -> bool,
+) -> bool {
+    if controls.push(Control::Abandon { handle }) {
+        return wake();
+    }
+    // Keep the lifecycle lane bounded without allowing a saturated queue to
+    // strand a staged child. The ordered command lane is a non-blocking
+    // emergency fallback; callers retain ownership when it is unavailable.
+    if commands.try_send(Command::Abandon { handle }).is_err() {
+        return false;
+    }
+    wake()
 }
 
 impl IntegratedRuntime {
@@ -1258,6 +1276,9 @@ fn process_commands(
                 });
                 let _ = reply.send(accepted);
             }
+            Command::Abandon { handle } => {
+                abandon_session(kqueue, handle, sessions, broker_client);
+            }
             Command::BrokerExit {
                 broker_session,
                 status,
@@ -1365,20 +1386,30 @@ fn process_controls(
                 }
             }
             Control::Abandon { handle } => {
-                if let Some(session) = sessions.get_mut(handle) {
-                    session.abandoned = true;
-                    session.active = false;
-                    session.paused = false;
-                    session.admission.close();
-                    session.discard_input();
-                    session.forget_output();
-                    let _ = close_session(handle, session, broker);
-                    let _ = update_read_filter(kqueue, handle, session, true);
-                    let _ = update_write_filter(kqueue, handle, session, false);
-                }
+                abandon_session(kqueue, handle, sessions, broker);
             }
         }
     }
+}
+
+fn abandon_session(
+    kqueue: RawFd,
+    handle: u64,
+    sessions: &mut GenerationRegistry<Session>,
+    broker: &BrokerClient,
+) {
+    let Some(session) = sessions.get_mut(handle) else {
+        return;
+    };
+    session.abandoned = true;
+    session.active = false;
+    session.paused = false;
+    session.admission.close();
+    session.discard_input();
+    session.forget_output();
+    let _ = close_session(handle, session, broker);
+    let _ = update_read_filter(kqueue, handle, session, true);
+    let _ = update_write_filter(kqueue, handle, session, false);
 }
 
 fn register_session(kqueue: RawFd, handle: u64, session: &mut Session) -> io::Result<()> {
@@ -2428,9 +2459,11 @@ mod tests {
     use super::{
         admit_owned_write, admit_write, admit_write_with, emit_output_notice, fail_input,
         notify_input_failure, record_cleanup_result, refresh_modes, send_notice, AdmissionResult,
-        InputAdmission, Notice, RuntimeCounters, Session, OUTPUT_BATCH,
+        Control, ControlQueue, InputAdmission, Notice, RuntimeCounters, Session, OUTPUT_BATCH,
     };
-    use crate::engine::{broker_client::BrokerSession, event, GenerationRegistry};
+    use crate::engine::{
+        broker_client::BrokerSession, control::MAX_LIFECYCLE_ENTRIES, event, GenerationRegistry,
+    };
     use crate::error::{FailureKind, Operation, OperationError, WriteErrorKind};
     use bytes::Bytes;
     use std::collections::VecDeque;
@@ -2555,6 +2588,34 @@ mod tests {
         assert!(state.open);
         assert_eq!(state.bytes, 0);
         assert_eq!(state.entries, 0);
+    }
+
+    #[test]
+    fn saturated_lifecycle_lane_uses_ordered_abandon_fallback() {
+        let controls = ControlQueue::new();
+        for handle in 0..MAX_LIFECYCLE_ENTRIES as u64 {
+            assert!(controls.push(Control::Abandon { handle }));
+        }
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let mut woke = false;
+
+        assert!(super::enqueue_abandon(&sender, &controls, 99_999, || {
+            woke = true;
+            true
+        }));
+        assert!(woke);
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(super::Command::Abandon { handle: 99_999 })
+        ));
+
+        let (sender, _receiver) = mpsc::sync_channel(0);
+        let mut woke = false;
+        assert!(!super::enqueue_abandon(&sender, &controls, 100_000, || {
+            woke = true;
+            true
+        }));
+        assert!(!woke);
     }
 
     #[test]

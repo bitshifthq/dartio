@@ -107,7 +107,7 @@ pub(crate) struct ControlQueue {
 }
 
 const MAX_CONTROL_ENTRIES: usize = 4096;
-const MAX_LIFECYCLE_ENTRIES: usize = 1024;
+pub(crate) const MAX_LIFECYCLE_ENTRIES: usize = 1024;
 
 impl ControlQueue {
     pub(crate) fn new() -> Self {
