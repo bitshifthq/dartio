@@ -343,6 +343,9 @@ fn abandon_or_shutdown(runtime: &Arc<RuntimeEntry>, handle: u64) -> bool {
     // record while a staged child may still exist: converge the entire engine
     // through its idempotent shutdown path instead.
     if runtime.shut_down.swap(true, Ordering::AcqRel) {
+        if runtime.shutdown_complete.load(Ordering::Acquire) {
+            retire_runtime_sessions(runtime);
+        }
         return false;
     }
     // Shutdown can wait for a saturated reactor command lane to drain. Keep
@@ -357,9 +360,13 @@ fn abandon_or_shutdown(runtime: &Arc<RuntimeEntry>, handle: u64) -> bool {
         .is_ok();
     if !spawned {
         // Thread creation failure is itself an unrecoverable adapter failure.
-        // Leave the runtime non-releasable so the caller can retry the
-        // explicit shutdown path instead of discarding native ownership.
-        runtime.shut_down.store(false, Ordering::Release);
+        // Fall back to the same idempotent shutdown synchronously. This path
+        // is allowed to wait because otherwise no native owner would remain
+        // to reclaim a staged child. If shutdown cannot converge, the
+        // runtime stays owned and retryable.
+        if complete_runtime_shutdown(runtime) {
+            retire_runtime_sessions(runtime);
+        }
         return false;
     }
     retire_runtime_sessions(runtime);
