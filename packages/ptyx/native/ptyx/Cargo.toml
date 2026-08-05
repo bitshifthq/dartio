@@ -11,11 +11,10 @@ keywords = ["pty", "terminal", "conpty", "process"]
 categories = ["os", "api-bindings"]
 
 [features]
-default = []
 __private_adapter = []
 
-[lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fuzzing)"] }
+[lints]
+workspace = true
 
 [dependencies]
 bytes = "1"

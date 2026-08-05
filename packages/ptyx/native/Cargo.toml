@@ -2,3 +2,6 @@
 members = ["broker", "c", "dart", "ptyx"]
 default-members = ["c", "dart", "ptyx"]
 resolver = "2"
+
+[workspace.lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fuzzing)"] }

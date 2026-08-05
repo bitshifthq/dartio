@@ -3,7 +3,7 @@
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::io;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-use std::os::fd::RawFd;
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 
 const MAX_NOTICE_GENERATION: u32 = ((i64::MAX as u64 >> 3) >> 32) as u32;
 
@@ -151,6 +151,23 @@ pub(crate) fn set_nonblocking(fd: RawFd) -> io::Result<()> {
         return Err(io::Error::last_os_error());
     }
     Ok(())
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) fn socket_pair() -> io::Result<(OwnedFd, OwnedFd)> {
+    let mut sockets = [-1; 2];
+    #[cfg(target_os = "macos")]
+    let socket_type = libc::SOCK_STREAM;
+    #[cfg(target_os = "linux")]
+    let socket_type = libc::SOCK_STREAM | libc::SOCK_CLOEXEC;
+    if unsafe { libc::socketpair(libc::AF_UNIX, socket_type, 0, sockets.as_mut_ptr()) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let first = unsafe { OwnedFd::from_raw_fd(sockets[0]) };
+    let second = unsafe { OwnedFd::from_raw_fd(sockets[1]) };
+    set_cloexec(first.as_raw_fd())?;
+    set_cloexec(second.as_raw_fd())?;
+    Ok((first, second))
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]

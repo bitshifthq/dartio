@@ -10,8 +10,8 @@ readme = "README.md"
 keywords = ["pty", "terminal", "process", "unix"]
 categories = ["os"]
 
-[lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fuzzing)"] }
+[lints]
+workspace = true
 
 [dependencies]
 libc = "0.2"

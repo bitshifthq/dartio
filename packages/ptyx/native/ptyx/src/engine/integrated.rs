@@ -1,6 +1,8 @@
 use super::{dup_cloexec, set_cloexec, set_nonblocking, GenerationRegistry};
 use crate::engine::broker_client::{BrokerClient, BrokerOwner, BrokerSession};
-use crate::engine::control::{fail_wake_socket, wake_socket, Control, ControlQueue, WakeGate};
+use crate::engine::control::{
+    enqueue_control_or_fallback, fail_wake_socket, wake_socket, Control, ControlQueue, WakeGate,
+};
 use crate::engine::event::{self, Receiver as EventReceiver, Sender as EventSender};
 use crate::engine::oneshot::{self, Sender as ReplySender};
 #[cfg(any(feature = "__private_adapter", test))]
@@ -705,17 +707,13 @@ fn enqueue_abandon(
     handle: u64,
     wake: impl FnOnce() -> bool,
 ) -> Result<bool, ()> {
-    if controls.push(Control::Abandon { handle }) {
-        return wake().then_some(true).ok_or(());
-    }
-    // Keep the lifecycle lane bounded without allowing a saturated queue to
-    // strand a staged child. The ordered command lane is a non-blocking
-    // emergency fallback; callers retain ownership when it is unavailable.
-    match commands.try_send(Command::Abandon { handle }) {
-        Ok(()) => wake().then_some(true).ok_or(()),
-        Err(TrySendError::Full(_)) => Ok(false),
-        Err(TrySendError::Disconnected(_)) => Err(()),
-    }
+    enqueue_control_or_fallback(
+        commands,
+        controls,
+        Control::Abandon { handle },
+        Command::Abandon { handle },
+        wake,
+    )
 }
 
 impl IntegratedRuntime {

@@ -4,6 +4,7 @@ use std::io;
 #[cfg(unix)]
 use std::os::fd::RawFd;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{SyncSender, TrySendError};
 use std::sync::Mutex;
 
 pub(crate) enum Control {
@@ -28,6 +29,23 @@ impl WakeGate {
 
     pub(crate) fn clear(&self) {
         self.pending.store(false, Ordering::Release);
+    }
+}
+
+pub(crate) fn enqueue_control_or_fallback<T>(
+    commands: &SyncSender<T>,
+    controls: &ControlQueue,
+    control: Control,
+    fallback: T,
+    wake: impl FnOnce() -> bool,
+) -> Result<bool, ()> {
+    if controls.push(control) {
+        return wake().then_some(true).ok_or(());
+    }
+    match commands.try_send(fallback) {
+        Ok(()) => wake().then_some(true).ok_or(()),
+        Err(TrySendError::Full(_)) => Ok(false),
+        Err(TrySendError::Disconnected(_)) => Err(()),
     }
 }
 

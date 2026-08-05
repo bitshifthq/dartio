@@ -5,9 +5,6 @@ edition = "2021"
 publish = false
 license = "MIT"
 
-[features]
-default = []
-
 [lib]
 name = "ptyx_c"
 crate-type = ["cdylib", "rlib"]
