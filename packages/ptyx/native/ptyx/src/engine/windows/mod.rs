@@ -1143,9 +1143,12 @@ impl IntegratedRuntime {
         {
             admission.close();
         }
-        enqueue_abandon(&self.commands, &self.controls, handle, || {
-            self.iocp.post_command().is_ok()
-        })
+        matches!(
+            enqueue_abandon(&self.commands, &self.controls, handle, || {
+                self.iocp.post_command().is_ok()
+            }),
+            Ok(true)
+        )
     }
 
     fn request_result<R>(&self, command: impl FnOnce(ReplySender<R>) -> Command) -> io::Result<R> {
@@ -1243,7 +1246,7 @@ fn admit_write_with(
         state
             .failure
             .get_or_insert(infrastructure_failure(Operation::Write));
-        return WRITE_INFRASTRUCTURE_FAILURE;
+        return AdmissionResult::Infrastructure;
     }
     let bytes = make_bytes();
     debug_assert_eq!(bytes.len(), length);
