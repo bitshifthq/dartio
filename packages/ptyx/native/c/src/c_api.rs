@@ -513,12 +513,14 @@ fn retire_runtime_sessions(runtime: &Arc<RuntimeEntry>) {
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    for handle in candidates {
-        if let Some(entry) = session_entry(handle) {
-            if let Ok(mut state) = entry.state.lock() {
-                *state = SessionState::Released;
+    // Runtime shutdown invalidates every public session handle. Remove the
+    // records directly instead of taking each session-state lock: callers can
+    // reach this path while already holding one of those locks.
+    if let Ok(mut registry) = sessions().write() {
+        for handle in candidates {
+            if registry.remove(handle).is_some() {
+                runtime.session_count.fetch_sub(1, Ordering::AcqRel);
             }
-            retire_session_entry(runtime, handle);
         }
     }
     if let Ok(mut active) = runtime.sessions.try_lock() {
@@ -2208,14 +2210,18 @@ pub unsafe extern "C" fn ptyx_event_release(event: *mut Event, error: *mut Error
 mod tests {
     use super::{
         active_session_for_write, decode_handle, io_error, operation_error, operation_status,
-        sessions, write_boundary, Error, Event, Registry, RuntimeOptions, SpawnOptions,
-        ERROR_DOMAIN_ARGUMENT, ERROR_DOMAIN_PROCESS, ERROR_INVALID_ARGUMENT, ERROR_NATIVE_FAILURE,
-        OPERATION_SPAWN, OPERATION_TERMINATE, STATUS_BACKPRESSURE, STATUS_INVALID_ARGUMENT,
-        STATUS_OK, STATUS_OS_ERROR,
+        ptyx_runtime_create, ptyx_runtime_release, ptyx_runtime_shutdown, retire_runtime_sessions,
+        session_entry, sessions, write_boundary, Error, Event, Registry, RuntimeOptions,
+        SessionEntry, SessionState, SpawnOptions, ERROR_DOMAIN_ARGUMENT, ERROR_DOMAIN_PROCESS,
+        ERROR_INVALID_ARGUMENT, ERROR_NATIVE_FAILURE, OPERATION_SPAWN, OPERATION_TERMINATE,
+        STATUS_BACKPRESSURE, STATUS_INVALID_ARGUMENT, STATUS_OK, STATUS_OS_ERROR,
     };
     use ptyx::{FailureKind, Operation, OperationError};
     use std::io;
     use std::mem::size_of;
+    use std::sync::atomic::Ordering;
+    use std::sync::{mpsc, Arc, Mutex};
+    use std::time::Duration;
 
     #[test]
     fn error_layout_matches_the_public_header() {
@@ -2311,5 +2317,48 @@ mod tests {
 
         assert_eq!(status, STATUS_OK);
         assert_eq!(error.native_code, 73);
+    }
+
+    #[test]
+    fn runtime_session_retirement_does_not_reenter_session_state_lock() {
+        let mut runtime_handle = 0;
+        let mut error = Error::none();
+        let status =
+            unsafe { ptyx_runtime_create(std::ptr::null(), &mut runtime_handle, &mut error) };
+        assert_eq!(status, STATUS_OK, "runtime creation failed: {}", error.kind);
+        let runtime = super::runtime_entry(runtime_handle).expect("runtime registry entry");
+        let entry = Arc::new(SessionEntry {
+            runtime: Arc::clone(&runtime),
+            state: Mutex::new(SessionState::Active(1)),
+            close_started: Mutex::new(false),
+            output_cancelled: Mutex::new(false),
+        });
+        let session = sessions()
+            .write()
+            .expect("session registry")
+            .insert(Arc::clone(&entry));
+        runtime.session_count.store(1, Ordering::Release);
+        let state_guard = entry.state.lock().expect("session state");
+        let (sender, receiver) = mpsc::channel();
+        let worker_runtime = Arc::clone(&runtime);
+        let worker = std::thread::spawn(move || {
+            retire_runtime_sessions(&worker_runtime);
+            sender.send(()).expect("retirement result");
+        });
+        assert!(receiver.recv_timeout(Duration::from_secs(1)).is_ok());
+        drop(state_guard);
+        worker.join().expect("retirement worker");
+        assert!(session_entry(session).is_none());
+        assert_eq!(runtime.session_count.load(Ordering::Acquire), 0);
+
+        let mut runtime_value = runtime_handle;
+        assert_eq!(
+            unsafe { ptyx_runtime_shutdown(runtime_handle, &mut error) },
+            STATUS_OK
+        );
+        assert_eq!(
+            unsafe { ptyx_runtime_release(&mut runtime_value, &mut error) },
+            STATUS_OK
+        );
     }
 }
