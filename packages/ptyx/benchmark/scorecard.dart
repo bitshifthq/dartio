@@ -828,6 +828,7 @@ Future<Map<String, Object?>> _bidirectionalThroughput(int byteCount) async {
           (1024 * 1024) /
           (stopwatch.elapsedMicroseconds / 1e6),
       'exit_code': exitCode,
+      'integrity_scope': 'ordered child echo bytes',
     };
   } finally {
     await bytes.cancel();
