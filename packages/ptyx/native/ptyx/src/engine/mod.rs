@@ -100,15 +100,7 @@ impl<T> GenerationRegistry<T> {
     }
 
     pub(crate) fn handles(&self) -> Vec<u64> {
-        self.slots
-            .iter()
-            .enumerate()
-            .filter_map(|(index, slot)| {
-                slot.value
-                    .as_ref()
-                    .map(|_| encode_handle(index, slot.generation))
-            })
-            .collect()
+        self.iter().map(|(handle, _)| handle).collect()
     }
 
     pub(crate) fn iter(&self) -> impl Iterator<Item = (u64, &T)> {

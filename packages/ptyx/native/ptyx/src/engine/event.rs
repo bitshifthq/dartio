@@ -116,8 +116,8 @@ impl Notice {
             | Self::ExitFailed { handle, .. }
             | Self::BrokerLost { handle, .. }
             | Self::OutputDone(handle)
-            | Self::Closed { handle, .. } => *handle,
-            Self::Exit { handle, .. } => *handle,
+            | Self::Closed { handle, .. }
+            | Self::Exit { handle, .. } => *handle,
             #[cfg(feature = "__private_adapter")]
             Self::SpawnReady { handle, .. } => *handle,
             #[cfg(feature = "__private_adapter")]
@@ -223,10 +223,7 @@ impl<T> Sender<T> {
         let Ok(mut state) = self.shared.state.lock() else {
             return Err(event);
         };
-        if state.senders == 0 {
-            return Err(event);
-        }
-        if state.closed_sessions.contains(&session) || state.retired_sessions.contains(&session) {
+        if !route_open(&state, session) {
             return Err(event);
         }
         let queue = state.queues.entry(session).or_default();
@@ -259,10 +256,7 @@ impl<T> Sender<T> {
         let Ok(mut state) = self.shared.state.lock() else {
             return Err(event);
         };
-        if state.senders == 0 {
-            return Err(event);
-        }
-        if state.closed_sessions.contains(&session) || state.retired_sessions.contains(&session) {
+        if !route_open(&state, session) {
             return Err(event);
         }
         let queue = state.queues.entry(session).or_default();
@@ -284,6 +278,12 @@ impl<T> Sender<T> {
         }
         Ok(true)
     }
+}
+
+fn route_open<T>(state: &State<T>, session: u64) -> bool {
+    state.senders != 0
+        && !state.closed_sessions.contains(&session)
+        && !state.retired_sessions.contains(&session)
 }
 
 impl<T> Drop for Sender<T> {
