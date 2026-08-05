@@ -440,15 +440,8 @@ fn retire_released_sessions(runtime: &Arc<RuntimeEntry>) {
 
 fn active_session(handle: u64) -> Result<(Arc<SessionEntry>, u64), u32> {
     let entry = session_entry(handle).ok_or(STATUS_STALE_HANDLE)?;
-    let state = *entry.state.lock().map_err(|_| STATUS_INTERNAL)?;
-    match state {
-        SessionState::Active(engine_handle) => Ok((entry, engine_handle)),
-        SessionState::Spawning
-        | SessionState::Activating
-        | SessionState::Closed
-        | SessionState::Failed
-        | SessionState::Released => Err(STATUS_WRONG_STATE),
-    }
+    let engine_handle = active_engine_handle(&entry)?;
+    Ok((entry, engine_handle))
 }
 
 fn active_session_for_write(handle: u64) -> Result<(Arc<SessionEntry>, u64), u32> {
@@ -463,13 +456,22 @@ fn active_session_for_write(handle: u64) -> Result<(Arc<SessionEntry>, u64), u32
             .map(Arc::clone)
             .ok_or(STATUS_STALE_HANDLE)?
     };
-    let state = match entry.state.try_lock() {
-        Ok(state) => *state,
+    let engine_handle = match entry.state.try_lock() {
+        Ok(state) => active_engine_handle_value(*state),
         Err(std::sync::TryLockError::WouldBlock) => return Err(STATUS_BACKPRESSURE),
         Err(std::sync::TryLockError::Poisoned(_)) => return Err(STATUS_INTERNAL),
     };
+    Ok((entry, engine_handle?))
+}
+
+fn active_engine_handle(entry: &SessionEntry) -> Result<u64, u32> {
+    let state = *entry.state.lock().map_err(|_| STATUS_INTERNAL)?;
+    active_engine_handle_value(state)
+}
+
+fn active_engine_handle_value(state: SessionState) -> Result<u64, u32> {
     match state {
-        SessionState::Active(engine_handle) => Ok((entry, engine_handle)),
+        SessionState::Active(engine_handle) => Ok(engine_handle),
         SessionState::Spawning
         | SessionState::Activating
         | SessionState::Closed
