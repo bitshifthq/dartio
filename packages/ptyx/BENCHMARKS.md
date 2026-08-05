@@ -122,8 +122,8 @@ That retained raw output result did **not** clear the nominal 90%
 direct-throughput gate. A follow-up found and removed a redundant Rust copy
 when a complete queued read already matched the delivery batch, without
 changing the bounded output budget, credit contract, or interactive batching.
-On clean exact revision `7849136`, production reached a 95.401 MiB/s median
-versus a 113.795 MiB/s direct median, or 83.84%.
+No raw artifact for that follow-up is retained, so it is not used as
+qualification evidence.
 
 The current clean revision `c928d30` batches native output leases at 128 KiB
 while retaining the same 256 KiB session capacity. A source-mode macOS x64
