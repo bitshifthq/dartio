@@ -164,6 +164,12 @@ Future<void> main(List<String> arguments) async {
   final steadyRssWithinBudget = peakRssGrowth <= steadyRssGrowthBudget;
   final cleanupPassed =
       stabilization.stable && cleanupRssWithinBudget && steadyRssWithinBudget;
+  final passed =
+      cleanupPassed &&
+      threadsWithinGrowthBudget &&
+      resourceUnitsWithinGrowthBudget &&
+      (resourceBefore['tree_cpu_us'] is int) &&
+      (resourceAfter['tree_cpu_us'] is int);
   final encoded = jsonEncode({
     'schema': 1,
     'suite': 'ptyx-exact-integrity-soak',
@@ -206,6 +212,7 @@ Future<void> main(List<String> arguments) async {
     'cleanup_rss_growth_budget_bytes': cleanupRssGrowthBudget,
     'cleanup_rss_within_growth_budget': cleanupRssWithinBudget,
     'cleanup_passed': cleanupPassed,
+    'passed': passed,
   });
   await progress.record('final-artifact-writing');
   if (outputPath != null) {

@@ -353,7 +353,7 @@ jobs:
   scorecard:
     name: scorecard-${{ matrix.os }}
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 30
+    timeout-minutes: 60
     defaults:
       run:
         shell: bash
@@ -395,9 +395,9 @@ jobs:
           printf '{"schema":1,"phase":"runner-started"}\n' > "$progress"
           set +e
           dart run benchmark/scorecard.dart all \
-            --warmups=0 \
-            --repetitions=1 \
-            --bytes=8388608 \
+            --warmups=1 \
+            --repetitions=3 \
+            --bytes=134217728 \
             --output=scorecard-${{ matrix.os }}.json \
             --progress="$progress"
           command_rc=$?

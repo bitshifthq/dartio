@@ -32,6 +32,7 @@ const _repeatedWorkloads = {
   'pause_resume',
   'discard',
 };
+const _minimumQualificationBytes = 128 * 1024 * 1024;
 
 Future<void> main(List<String> arguments) async {
   if (arguments.length != 2 ||
@@ -157,8 +158,17 @@ List<String> validateCiResult(String kind, Map<String, Object?> artifact) {
         }
         if (_repeatedWorkloads.contains(workload)) {
           final runs = result['raw_runs'];
-          if (runs is! List<Object?> || runs.isEmpty) {
-            failures.add('$workload must contain at least one raw run');
+          final repetitions = result['repetitions'];
+          final warmups = result['warmups'];
+          if (runs is! List<Object?> ||
+              repetitions is! int ||
+              repetitions < 3 ||
+              warmups is! int ||
+              warmups < 1 ||
+              runs.length != repetitions) {
+            failures.add(
+              '$workload must contain at least three post-warmup raw runs',
+            );
             continue;
           }
           for (final (index, run) in runs.indexed) {
@@ -262,6 +272,20 @@ List<String> validateCiResult(String kind, Map<String, Object?> artifact) {
       if (artifact['cleanup_passed'] != true) {
         failures.add('soak cleanup did not pass');
       }
+      if (artifact['passed'] != true ||
+          artifact['resource_counts_stabilized'] != true ||
+          artifact['threads_within_growth_budget'] != true ||
+          artifact['resource_units_within_growth_budget'] != true) {
+        failures.add('soak resource and completion gates did not pass');
+      }
+      for (final snapshotName in const ['resource_before', 'resource_after']) {
+        final snapshot = artifact[snapshotName];
+        if (snapshot is! Map<String, Object?> ||
+            snapshot['tree_cpu_us'] is! int ||
+            (snapshot['tree_cpu_us']! as int) < 0) {
+          failures.add('soak $snapshotName must include CPU accounting');
+        }
+      }
   }
   return failures;
 }
@@ -272,32 +296,56 @@ bool _validRepeatedRun(
   String platform,
 ) {
   bool positive(String key) => run[key] is num && (run[key]! as num) > 0;
+  final hasQualificationBytes = switch (workload) {
+    'output' || 'transport_output' || 'input' || 'transport_input' =>
+      run['bytes'] is int &&
+          (run['bytes']! as int) >= _minimumQualificationBytes,
+    'bidirectional' =>
+      run['sent_bytes'] is int &&
+          (run['sent_bytes']! as int) >= _minimumQualificationBytes,
+    'pause_resume' =>
+      run['bytes'] is int &&
+          (run['bytes']! as int) >= _minimumQualificationBytes,
+    'discard' =>
+      run['generated_bytes'] is int &&
+          (run['generated_bytes']! as int) >= _minimumQualificationBytes,
+    _ => false,
+  };
   return switch (workload) {
     'output' || 'transport_output' || 'input' || 'transport_input' =>
-      positive('bytes') && positive('elapsed_us') && positive('mib_per_second'),
+      hasQualificationBytes &&
+          positive('bytes') &&
+          positive('elapsed_us') &&
+          positive('mib_per_second') &&
+          (platform != 'windows' || run['trailing_bytes'] == 0),
     'bidirectional' =>
-      positive('sent_bytes') &&
-          _validBidirectionalReceipt(run, platform) &&
+      hasQualificationBytes &&
+          positive('sent_bytes') &&
+          _validBidirectionalReceipt(run) &&
           positive('elapsed_us') &&
           positive('aggregate_mib_per_second'),
     'pause_resume' =>
-      positive('bytes') && positive('pause_ms') && positive('resume_to_eof_us'),
-    'discard' => positive('generated_bytes') && positive('elapsed_us'),
+      hasQualificationBytes &&
+          positive('bytes') &&
+          positive('pause_ms') &&
+          positive('resume_to_eof_us') &&
+          (platform != 'windows' || run['trailing_bytes'] == 0),
+    'discard' =>
+      hasQualificationBytes &&
+          positive('generated_bytes') &&
+          positive('elapsed_us'),
     _ => false,
   };
 }
 
-bool _validBidirectionalReceipt(Map<String, Object?> run, String platform) {
+bool _validBidirectionalReceipt(Map<String, Object?> run) {
   final sent = run['sent_bytes'];
   final received = run['received_bytes'];
   if (sent is! int || received is! int) return false;
-  if (platform == 'windows') {
-    return received == 0 &&
-        run['exact_output_history_supported'] == false &&
-        run['integrity_scope'] is String &&
-        (run['integrity_scope']! as String).isNotEmpty;
-  }
-  return received == sent;
+  return received == sent &&
+      run['trailing_bytes'] == 0 &&
+      run['integrity_scope'] is String &&
+      (run['integrity_scope']! as String).isNotEmpty;
 }
 
 bool _validFairness(List<Object?> sessions) {

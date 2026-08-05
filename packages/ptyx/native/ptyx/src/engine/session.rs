@@ -72,14 +72,18 @@ impl InputAdmission {
     }
 
     pub(crate) fn close(&self) {
-        if let Ok(mut state) = self.state.lock() {
-            state.open = false;
-        }
+        self.set_closed(None);
     }
 
     pub(crate) fn close_with_failure(&self, failure: OperationError) {
+        self.set_closed(Some(failure));
+    }
+
+    fn set_closed(&self, failure: Option<OperationError>) {
         if let Ok(mut state) = self.state.lock() {
-            state.failure.get_or_insert(failure);
+            if let Some(failure) = failure {
+                state.failure.get_or_insert(failure);
+            }
             state.open = false;
         }
     }

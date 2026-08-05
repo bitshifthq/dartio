@@ -70,6 +70,17 @@ Future<void> main(List<String> arguments) async {
           stderr.writeln(result);
           exitCode = 65;
         }
+      case 'bidirectional-report':
+        await _writeReady();
+        final byteCount = int.parse(arguments[1]);
+        final result = await _readPattern(byteCount, input, echo: true);
+        if (result != 'OK $byteCount') {
+          stderr.writeln(result);
+          exitCode = 65;
+        } else {
+          stdout.writeln('PTYX-BIDI-OK $byteCount');
+          await stdout.flush();
+        }
       case 'ready-cat':
         await _writeReady();
         while (true) {

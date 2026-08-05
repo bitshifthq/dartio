@@ -43,8 +43,11 @@ void main() {
           for (final workload in scorecardWorkloads)
             workload: <String, Object?>{},
           'output': {
+            'repetitions': 3,
+            'warmups': 1,
             'raw_runs': [
-              {'bytes': 1, 'exit_code': 7},
+              for (var index = 0; index < 3; index++)
+                {..._repeatedRun('output'), if (index == 0) 'exit_code': 7},
             ],
           },
           'no_listener': {'exit_code': 7},
@@ -63,7 +66,9 @@ void main() {
         expect(failures, contains('output run 0 exited with 7'));
         expect(
           failures,
-          contains('transport_output must contain at least one raw run'),
+          contains(
+            'transport_output must contain at least three post-warmup raw runs',
+          ),
         );
         expect(failures, contains('no_listener exited with 7'));
         expect(failures, contains('idle_100 created 99 of 100 sessions'));
@@ -78,8 +83,11 @@ void main() {
           'bidirectional': {
             'metric': 'fixture',
             'distribution': {'samples': 1},
+            'repetitions': 3,
+            'warmups': 1,
             'raw_runs': [
-              {..._repeatedRun('bidirectional'), 'received_bytes': 0},
+              for (var index = 0; index < 3; index++)
+                {..._repeatedRun('bidirectional'), 'received_bytes': 0},
             ],
           },
           'rss_after_bytes': 1,
@@ -128,7 +136,11 @@ Map<String, Object?> _scorecardWorkload(String workload) => switch (workload) {
   'discard' => {
     'metric': 'fixture',
     'distribution': {'samples': 1},
-    'raw_runs': [_repeatedRun(workload)],
+    'repetitions': 3,
+    'warmups': 1,
+    'raw_runs': [
+      for (var index = 0; index < 3; index++) _repeatedRun(workload),
+    ],
   },
   'interactive' => {'samples': 1, 'p99_us': 1},
   'no_listener' || 'saturation' => {'exit_code': 0},
@@ -159,27 +171,34 @@ Map<String, Object?> _scorecardWorkload(String workload) => switch (workload) {
 
 Map<String, Object?> _repeatedRun(String workload) => switch (workload) {
   'output' || 'transport_output' || 'input' || 'transport_input' => {
-    'bytes': 1,
+    'bytes': 128 * 1024 * 1024,
+    'trailing_bytes': 0,
     'elapsed_us': 1,
     'mib_per_second': 1.0,
     'exit_code': 0,
   },
   'bidirectional' => {
-    'sent_bytes': 1,
-    'received_bytes': 0,
+    'sent_bytes': 128 * 1024 * 1024,
+    'received_bytes': 128 * 1024 * 1024,
+    'trailing_bytes': 0,
     'elapsed_us': 1,
     'aggregate_mib_per_second': 1.0,
     'exit_code': 0,
-    'exact_output_history_supported': false,
-    'integrity_scope': 'compact terminal report',
+    'exact_output_history_supported': true,
+    'integrity_scope': 'ordered child echo plus terminal receipt',
   },
   'pause_resume' => {
-    'bytes': 1,
+    'bytes': 128 * 1024 * 1024,
+    'trailing_bytes': 0,
     'pause_ms': 1,
     'resume_to_eof_us': 1,
     'exit_code': 0,
   },
-  'discard' => {'generated_bytes': 1, 'elapsed_us': 1, 'exit_code': 0},
+  'discard' => {
+    'generated_bytes': 128 * 1024 * 1024,
+    'elapsed_us': 1,
+    'exit_code': 0,
+  },
   _ => const <String, Object?>{},
 };
 

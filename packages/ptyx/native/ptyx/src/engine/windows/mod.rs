@@ -143,14 +143,6 @@ impl Session {
         }
     }
 
-    fn pull(&mut self, maximum: usize) -> Bytes {
-        self.core.pull_output(maximum)
-    }
-
-    fn credit(&mut self, bytes: usize) -> bool {
-        self.core.credit(bytes)
-    }
-
     fn terminal(&self) -> bool {
         self.exit_status.is_some()
             && self.output_eof
@@ -2305,7 +2297,7 @@ fn refresh_output(
             .is_some_and(|deadline| deadline <= Instant::now());
     if ready && !session.discarding && session.has_output() && session.output_lease_bytes == 0 {
         if let Some(reservation) = notices.try_reserve() {
-            let bytes = session.pull(OUTPUT_BATCH);
+            let bytes = session.pull_output(OUTPUT_BATCH);
             let amount = bytes.len();
             session.mark_output_leased(amount);
             if notices.emit(reservation, Notice::Output { handle, bytes }, counters) {

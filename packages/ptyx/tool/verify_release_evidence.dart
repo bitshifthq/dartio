@@ -25,6 +25,8 @@ const _evidenceKeys = {
   'runtime-windows-x64',
   'runtime-windows-arm64',
   'performance',
+  'performance-production',
+  'performance-direct',
   'integrity',
   'soak',
   'sanitizers',
@@ -302,6 +304,15 @@ List<String> _verifyResult(
     final host = artifact['host'];
     final productionDigest = artifact['production_artifact_sha256'];
     final directDigest = artifact['direct_artifact_sha256'];
+    final comparability = artifact['comparability'];
+    final instrumentation = artifact['instrumentation'];
+    final evidence = manifest['evidence'];
+    final productionDescriptor = evidence is Map<String, Object?>
+        ? evidence['performance-production']
+        : null;
+    final directDescriptor = evidence is Map<String, Object?>
+        ? evidence['performance-direct']
+        : null;
     final measuredProduction = _medianThroughput(productionRuns);
     final measuredDirect = _medianThroughput(directRuns);
     final measuredRatio =
@@ -324,6 +335,43 @@ List<String> _verifyResult(
         RegExp(r'^[a-f0-9]{64}$').hasMatch(productionDigest) &&
         directDigest is String &&
         RegExp(r'^[a-f0-9]{64}$').hasMatch(directDigest);
+    final hasComparableWorkload =
+        comparability is Map<String, Object?> &&
+        comparability['bytes'] is int &&
+        (comparability['bytes']! as int) >= _minimumBenchmarkBytes &&
+        const [
+          'child',
+          'payload_sha256',
+          'raw_mode',
+          'buffer_policy',
+          'timer_boundary',
+          'release_mode',
+        ].every(
+          (name) =>
+              comparability[name] is String &&
+              (comparability[name]! as String).isNotEmpty,
+        ) &&
+        comparability['production_command'] is List<Object?> &&
+        (comparability['production_command']! as List<Object?>).isNotEmpty &&
+        comparability['direct_command'] is List<Object?> &&
+        (comparability['direct_command']! as List<Object?>).isNotEmpty;
+    final hasInstrumentation =
+        instrumentation is Map<String, Object?> &&
+        instrumentation['method'] is String &&
+        (instrumentation['method']! as String).isNotEmpty &&
+        const ['production', 'direct'].every((name) {
+          final value = instrumentation[name];
+          return value is Map<String, Object?> &&
+              value['allocations'] is int &&
+              (value['allocations']! as int) >= 0 &&
+              value['copies'] is int &&
+              (value['copies']! as int) >= 0;
+        });
+    final digestsBound =
+        productionDescriptor is Map<String, Object?> &&
+        directDescriptor is Map<String, Object?> &&
+        productionDescriptor['sha256'] == productionDigest &&
+        directDescriptor['sha256'] == directDigest;
     if (performance is! Map<String, Object?> ||
         ratio != performance['direct_output_ratio'] ||
         ratio is! num ||
@@ -335,6 +383,9 @@ List<String> _verifyResult(
         !_validThroughputRuns(productionRuns, repetitions) ||
         !_validThroughputRuns(directRuns, repetitions) ||
         !hasProvenance ||
+        !hasComparableWorkload ||
+        !hasInstrumentation ||
+        !digestsBound ||
         production is! num ||
         direct is! num ||
         measuredProduction == null ||
@@ -343,11 +394,24 @@ List<String> _verifyResult(
         (direct - measuredDirect).abs() > 0.000001 ||
         measuredRatio == null ||
         measuredRatio + 0.000001 < 0.90 ||
-        (measuredRatio - ratio).abs() > 0.000001) {
+        (measuredRatio - ratio).abs() > 0.000001 ||
+        !_sameThroughputBytes(productionRuns, directRuns, comparability)) {
       failures.add(
         'performance evidence must include reproducible raw runs, '
         'provenance, and an independently recomputed gate',
       );
+    }
+  } else if (key == 'performance-production' || key == 'performance-direct') {
+    final role = key == 'performance-production' ? 'production' : 'direct';
+    final runs = artifact['runs'];
+    final repetitions = artifact['repetitions'];
+    if (artifact['role'] != role ||
+        artifact['command'] is! List<Object?> ||
+        (artifact['command']! as List<Object?>).isEmpty ||
+        repetitions is! int ||
+        repetitions < 3 ||
+        !_validThroughputRuns(runs, repetitions)) {
+      failures.add('$key evidence must contain valid raw throughput runs');
     }
   } else if (key == 'sanitizers') {
     final results = artifact['results'];
@@ -464,6 +528,23 @@ bool _validThroughputRuns(Object? value, int repetitions) {
   return bytes.length == 1;
 }
 
+bool _sameThroughputBytes(
+  Object? production,
+  Object? direct,
+  Object? comparability,
+) {
+  if (comparability is! Map<String, Object?> ||
+      comparability['bytes'] is! int ||
+      production is! List<Object?> ||
+      direct is! List<Object?>) {
+    return false;
+  }
+  final expected = comparability['bytes']! as int;
+  bool matches(Object? value) =>
+      value is Map<String, Object?> && value['bytes'] == expected;
+  return production.every(matches) && direct.every(matches);
+}
+
 double? _medianThroughput(Object? value) {
   if (value is! List<Object?> || value.isEmpty) return null;
   final runs = [
@@ -576,6 +657,8 @@ List<String> _verifySoak(File file, Map<String, Object?> manifest) {
         (snapshot) =>
             snapshot['tree_rss_bytes'] is int &&
             snapshot[resourceKey] is int &&
+            snapshot['tree_cpu_us'] is int &&
+            (snapshot['tree_cpu_us']! as int) >= 0 &&
             snapshot['tree_threads'] is int &&
             snapshot['tree_processes'] is int,
       ) &&
@@ -623,7 +706,10 @@ List<String> _verifySoak(File file, Map<String, Object?> manifest) {
         artifact['resource_counts_stabilized'] == countsStable &&
         artifact['cleanup_rss_within_growth_budget'] == cleanupWithinBudget &&
         artifact['steady_rss_within_growth_budget'] == steadyWithinBudget &&
-        artifact['cleanup_passed'] == true;
+        artifact['cleanup_passed'] == true &&
+        artifact['threads_within_growth_budget'] == true &&
+        artifact['resource_units_within_growth_budget'] == true &&
+        artifact['passed'] == true;
   }
   if (!resourceGatePassed) {
     failures.add('soak evidence must pass resource and RSS gates');
@@ -654,6 +740,11 @@ List<String> _verifyIntegrity(File file, Map<String, Object?> manifest) {
       (artifact['architecture']! as String).isEmpty ||
       command is! List<Object?> ||
       !command.contains('integrity') ||
+      !command.contains('--integrity-bytes=$_multiGigabyte') ||
+      artifact['integrity'] is! Map<String, Object?> ||
+      (artifact['integrity']! as Map<String, Object?>)['byte_count'] !=
+          _multiGigabyte ||
+      artifact['passed'] != true ||
       artifact['fixture_sha256'] is! String ||
       !RegExp(
         r'^[a-f0-9]{64}$',
@@ -673,17 +764,21 @@ List<String> _verifyIntegrity(File file, Map<String, Object?> manifest) {
   final valid =
       output is Map<String, Object?> &&
       output['bytes'] is int &&
-      (output['bytes']! as int) >= _multiGigabyte &&
+      output['bytes'] == _multiGigabyte &&
       output['exit_code'] == 0 &&
+      (output['trailing_bytes'] == null || output['trailing_bytes'] == 0) &&
       input is Map<String, Object?> &&
       input['bytes'] is int &&
-      (input['bytes']! as int) >= _multiGigabyte &&
+      input['bytes'] == _multiGigabyte &&
       input['exit_code'] == 0 &&
+      (input['trailing_bytes'] == null || input['trailing_bytes'] == 0) &&
       bidirectional is Map<String, Object?> &&
       bidirectional['sent_bytes'] is int &&
-      (bidirectional['sent_bytes']! as int) >= _multiGigabyte &&
+      bidirectional['sent_bytes'] == _multiGigabyte &&
       bidirectional['received_bytes'] is int &&
-      (bidirectional['received_bytes']! as int) >= _multiGigabyte &&
+      bidirectional['received_bytes'] == _multiGigabyte &&
+      bidirectional['sent_bytes'] == bidirectional['received_bytes'] &&
+      bidirectional['trailing_bytes'] == 0 &&
       bidirectional['exit_code'] == 0;
   if (!valid) {
     failures.add('integrity evidence must prove four exact 2 GiB directions');

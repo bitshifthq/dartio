@@ -40,6 +40,20 @@ void main() {
       }
     });
 
+    test('reports an exact bidirectional payload receipt', () async {
+      final process = await Process.start(Platform.resolvedExecutable, [
+        File('benchmark/fixture.dart').absolute.path,
+        'bidirectional-report',
+        '3',
+      ]);
+      final output = process.stdout.transform(systemEncoding.decoder).join();
+      process.stdin.add([49, 80, 111]);
+      await process.stdin.close();
+
+      expect(await output, contains('PTYX-BIDI-OK 3'));
+      expect(await process.exitCode, 0);
+    });
+
     test('extracts fixture bytes across split VT sequences', () async {
       final chunks = Stream.fromIterable([
         Uint8List.fromList([0x1b, 0x5b, 0x32]),

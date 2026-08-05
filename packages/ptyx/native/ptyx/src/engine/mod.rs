@@ -78,23 +78,25 @@ impl<T> GenerationRegistry<T> {
     }
 
     pub(crate) fn get(&self, handle: u64) -> Option<&T> {
-        let (index, generation) = decode_handle(handle)?;
-        let slot = self.slots.get(index)?;
-        if slot.generation == generation {
-            slot.value.as_ref()
-        } else {
-            None
-        }
+        self.slot(handle)?.value.as_ref()
     }
 
     pub(crate) fn get_mut(&mut self, handle: u64) -> Option<&mut T> {
+        self.slot_mut(handle)?.value.as_mut()
+    }
+
+    fn slot(&self, handle: u64) -> Option<&Slot<T>> {
         let (index, generation) = decode_handle(handle)?;
-        let slot = self.slots.get_mut(index)?;
-        if slot.generation == generation {
-            slot.value.as_mut()
-        } else {
-            None
-        }
+        self.slots
+            .get(index)
+            .filter(|slot| slot.generation == generation)
+    }
+
+    fn slot_mut(&mut self, handle: u64) -> Option<&mut Slot<T>> {
+        let (index, generation) = decode_handle(handle)?;
+        self.slots
+            .get_mut(index)
+            .filter(|slot| slot.generation == generation)
     }
 
     pub(crate) fn handles(&self) -> Vec<u64> {
@@ -118,11 +120,8 @@ impl<T> GenerationRegistry<T> {
     }
 
     pub(crate) fn remove(&mut self, handle: u64) -> Option<T> {
-        let (index, generation) = decode_handle(handle)?;
-        let slot = self.slots.get_mut(index)?;
-        if slot.generation != generation {
-            return None;
-        }
+        let (index, _) = decode_handle(handle)?;
+        let slot = self.slot_mut(handle)?;
         let value = slot.value.take()?;
         if slot.generation < MAX_NOTICE_GENERATION {
             slot.generation += 1;

@@ -192,6 +192,14 @@ toolchain metadata, artifact digests, exit and byte checks, and medians that
 the verifier recomputes. Sanitizer evidence must retain commands that actually
 enable the named Rust sanitizer; a successful generic test command is not
 qualification evidence.
+The manifest therefore names and hashes separate
+`performance-production` and `performance-direct` raw result files; their
+`runs`, repetitions, workload bytes, and commands must agree with the summary
+performance artifact. Allocation/copy instrumentation and the child, payload,
+raw-mode, buffer-policy, timer-boundary, and release-mode comparability fields
+are mandatory. On Windows, ConPTY report markers allow only their one `LF` or
+`CRLF` line terminator after the marker; any other trailing byte fails the
+workload.
 The manifest is intentionally absent while any requirement remains open; a
 diagnostic scorecard can never authorize a release merely by exiting
 successfully.

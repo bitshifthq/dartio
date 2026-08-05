@@ -57,6 +57,8 @@ Map<String, Object?> _acceptedManifest() => {
       'runtime-windows-x64',
       'runtime-windows-arm64',
       'performance',
+      'performance-production',
+      'performance-direct',
       'integrity',
       'soak',
       'sanitizers',
@@ -114,6 +116,8 @@ Map<String, Object?> _resultEvidence(String key) {
           name: true,
       };
   } else if (key == 'performance') {
+    final productionRaw = jsonEncode(_performanceRawEvidence('production'));
+    final directRaw = jsonEncode(_performanceRawEvidence('direct'));
     result.addAll({
       'direct_output_ratio': 0.90,
       'production_output_mib_s': 128.0,
@@ -144,10 +148,28 @@ Map<String, Object?> _resultEvidence(String key) {
         'dart_version': '3.11.0',
         'native_compiler': 'rustc 1.90.0',
       },
-      'production_artifact_sha256':
-          'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
-      'direct_artifact_sha256':
-          'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+      'production_artifact_sha256': sha256
+          .convert(utf8.encode(productionRaw))
+          .toString(),
+      'direct_artifact_sha256': sha256
+          .convert(utf8.encode(directRaw))
+          .toString(),
+      'comparability': {
+        'bytes': 128 * 1024 * 1024,
+        'child': 'qualification-child',
+        'payload_sha256': _fixtureDigest,
+        'raw_mode': 'pty-raw-no-echo',
+        'buffer_policy': 'same-64KiB-chunks',
+        'timer_boundary': 'ready-gate-to-verified-completion',
+        'release_mode': 'release',
+        'production_command': ['qualification', 'production'],
+        'direct_command': ['qualification', 'direct'],
+      },
+      'instrumentation': {
+        'method': 'allocator-and-copy-counters',
+        'production': {'allocations': 10, 'copies': 1},
+        'direct': {'allocations': 5, 'copies': 0},
+      },
     });
   } else if (key == 'sanitizers') {
     result['results'] = {
@@ -202,9 +224,36 @@ Map<String, Object?> _resultEvidence(String key) {
   return result;
 }
 
+Map<String, Object?> _performanceRawEvidence(String role) => {
+  'schema': 1,
+  'suite': 'ptyx-performance-$role-acceptance',
+  'revision': _revision,
+  'tree_dirty': false,
+  'passed': true,
+  'platform': 'linux',
+  'architecture': 'x64',
+  'command': ['qualification', 'performance-$role'],
+  'checks': {'completed': true},
+  'started_at_utc': '2026-01-01T00:00:00Z',
+  'finished_at_utc': '2026-01-01T00:01:00Z',
+  'role': role,
+  'repetitions': 3,
+  'warmups': 1,
+  'runs': [
+    for (var index = 0; index < 3; index++)
+      {
+        'bytes': 128 * 1024 * 1024,
+        'elapsed_us': role == 'production' ? 1_000_000 : 900_000,
+        'mib_per_second': role == 'production' ? 128.0 : 142.22222222222223,
+        'exit_code': 0,
+      },
+  ],
+};
+
 Map<String, Object?> _soakEvidence() {
   const baseline = {
     'tree_rss_bytes': 1024,
+    'tree_cpu_us': 0,
     'tree_descriptors': 10,
     'tree_threads': 2,
     'tree_processes': 1,
@@ -243,6 +292,9 @@ Map<String, Object?> _soakEvidence() {
     'cleanup_rss_growth_budget_bytes': 32 * 1024 * 1024,
     'cleanup_rss_within_growth_budget': true,
     'cleanup_passed': true,
+    'threads_within_growth_budget': true,
+    'resource_units_within_growth_budget': true,
+    'passed': true,
     'cycles': 1,
     'verified_bytes': 1,
     'long_lived_verified_bytes': 1,
@@ -291,6 +343,7 @@ void main() {
           'integrity' => jsonEncode({
             'schema': 4,
             'suite': 'ptyx-diagnostic-scorecard',
+            'passed': true,
             'revision': _revision,
             'tree_dirty': false,
             'platform': 'linux',
@@ -299,17 +352,27 @@ void main() {
             'fixture_sha256': _fixtureDigest,
             'scorecard_sha256': _scorecardDigest,
             'integrity': {
+              'byte_count': 2 * 1024 * 1024 * 1024,
               'output': {'bytes': 2 * 1024 * 1024 * 1024, 'exit_code': 0},
-              'input': {'bytes': 2 * 1024 * 1024 * 1024, 'exit_code': 0},
+              'input': {
+                'bytes': 2 * 1024 * 1024 * 1024,
+                'trailing_bytes': 0,
+                'exit_code': 0,
+              },
               'bidirectional': {
                 'sent_bytes': 2 * 1024 * 1024 * 1024,
                 'received_bytes': 2 * 1024 * 1024 * 1024,
+                'trailing_bytes': 0,
                 'exit_code': 0,
               },
             },
           }),
           'fixture-aot' => _fixtureAotContent,
           'fixture-source' => _fixtureSourceContent,
+          'performance-production' => jsonEncode(
+            _performanceRawEvidence('production'),
+          ),
+          'performance-direct' => jsonEncode(_performanceRawEvidence('direct')),
           _ => jsonEncode(_resultEvidence(entry.key)),
         };
         final file = File('${directory.path}/${descriptor['path']}')
@@ -350,6 +413,7 @@ void main() {
           'integrity' => jsonEncode({
             'schema': 4,
             'suite': 'ptyx-diagnostic-scorecard',
+            'passed': true,
             'revision': _revision,
             'tree_dirty': false,
             'platform': 'linux',
@@ -358,17 +422,27 @@ void main() {
             'fixture_sha256': _fixtureDigest,
             'scorecard_sha256': _scorecardDigest,
             'integrity': {
+              'byte_count': 2 * 1024 * 1024 * 1024,
               'output': {'bytes': 2 * 1024 * 1024 * 1024, 'exit_code': 0},
-              'input': {'bytes': 2 * 1024 * 1024 * 1024, 'exit_code': 0},
+              'input': {
+                'bytes': 2 * 1024 * 1024 * 1024,
+                'trailing_bytes': 0,
+                'exit_code': 0,
+              },
               'bidirectional': {
                 'sent_bytes': 2 * 1024 * 1024 * 1024,
                 'received_bytes': 2 * 1024 * 1024 * 1024,
+                'trailing_bytes': 0,
                 'exit_code': 0,
               },
             },
           }),
           'fixture-aot' => _fixtureAotContent,
           'fixture-source' => _fixtureSourceContent,
+          'performance-production' => jsonEncode(
+            _performanceRawEvidence('production'),
+          ),
+          'performance-direct' => jsonEncode(_performanceRawEvidence('direct')),
           'fuzz' => jsonEncode({
             ..._resultEvidence('fuzz'),
             'targets': {

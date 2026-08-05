@@ -161,7 +161,7 @@ Future<void> main(List<String> arguments) async {
         repetitions: repetitions,
         warmups: warmups,
         metric: 'aggregate_mib_per_second',
-        run: () => _bidirectionalThroughput(16 * 1024 * 1024),
+        run: () => _bidirectionalThroughput(benchmarkBytes),
       ),
     );
   }
@@ -173,7 +173,7 @@ Future<void> main(List<String> arguments) async {
         repetitions: repetitions,
         warmups: warmups,
         metric: 'resume_to_eof_us',
-        run: () => _pauseResume(8 * 1024 * 1024),
+        run: () => _pauseResume(benchmarkBytes),
       ),
     );
   }
@@ -185,7 +185,7 @@ Future<void> main(List<String> arguments) async {
         repetitions: repetitions,
         warmups: warmups,
         metric: 'elapsed_us',
-        run: () => _discardOutput(32 * 1024 * 1024),
+        run: () => _discardOutput(benchmarkBytes),
       ),
     );
   }
@@ -255,6 +255,7 @@ Future<void> main(List<String> arguments) async {
   if (selected == 'integrity') {
     results['integrity'] = await _runPhase(progress, 'integrity', () async {
       return {
+        'passed': true,
         'byte_count': integrityBytes,
         'output': await _outputThroughput(integrityBytes),
         'input': await _inputThroughput(integrityBytes),
@@ -442,14 +443,23 @@ Future<Map<String, Object?>> _outputThroughput(int byteCount) async {
         received += accepted;
       }
     }
+    var trailingBytes = 0;
+    while (await bytes.readByte().timeout(_timeout) != null) {
+      trailingBytes++;
+    }
+    if (trailingBytes != 0) {
+      throw StateError('output contained $trailingBytes trailing bytes');
+    }
     stopwatch.stop();
     final exitCode = await session.exitCode.timeout(_timeout);
     return {
       'bytes': received,
+      'trailing_bytes': trailingBytes,
       'elapsed_us': stopwatch.elapsedMicroseconds,
       'mib_per_second':
           received / (1024 * 1024) / (stopwatch.elapsedMicroseconds / 1e6),
       'exit_code': exitCode,
+      'integrity_scope': 'ordered child output bytes',
     };
   } finally {
     await bytes.cancel();
@@ -496,13 +506,24 @@ head -c $byteCount /dev/zero
       }
       received += chunk.length;
     }
+    var trailingBytes = 0;
+    while (await bytes.readByte().timeout(_timeout) != null) {
+      trailingBytes++;
+    }
+    if (trailingBytes != 0) {
+      throw StateError(
+        'transport output contained $trailingBytes trailing bytes',
+      );
+    }
     stopwatch.stop();
     return {
       'bytes': received,
+      'trailing_bytes': trailingBytes,
       'elapsed_us': stopwatch.elapsedMicroseconds,
       'mib_per_second':
           received / (1024 * 1024) / (stopwatch.elapsedMicroseconds / 1e6),
       'exit_code': await session.exitCode.timeout(_timeout),
+      'integrity_scope': 'ordered transport output bytes',
     };
   } finally {
     await bytes.cancel();
@@ -542,6 +563,7 @@ Future<Map<String, Object?>> _inputThroughput(int byteCount) async {
       'mib_per_second':
           byteCount / (1024 * 1024) / (stopwatch.elapsedMicroseconds / 1e6),
       'exit_code': exitCode,
+      'integrity_scope': 'ordered child input validation report',
     };
   } finally {
     await bytes.cancel();
@@ -649,21 +671,112 @@ while ($received -lt {bytes}) {
 
 Future<Map<String, Object?>> _bidirectionalThroughput(int byteCount) async {
   if (Platform.isWindows) {
-    final result = await _inputThroughput(byteCount);
-    return {
-      'sent_bytes': result['bytes'],
-      'received_bytes': 0,
-      'elapsed_us': result['elapsed_us'],
-      'aggregate_mib_per_second': result['mib_per_second'],
-      'exit_code': result['exit_code'],
-      'exact_output_history_supported': false,
-      'integrity_scope': 'child-verified input with compact terminal report',
-    };
+    final (:session, :bytes) = await _readySession('bidirectional-report', [
+      '$byteCount',
+    ]);
+    final chunk = Uint8List(64 * 1024);
+    var sent = 0;
+    var received = 0;
+    var trailingBytes = 0;
+    final stopwatch = Stopwatch()..start();
+    try {
+      final sender = Future<void>(() async {
+        while (sent < byteCount) {
+          final count = min(chunk.length, byteCount - sent);
+          _fillPattern(chunk, sent, count);
+          await _writeAfterBackpressure(
+            session,
+            count == chunk.length ? chunk : chunk.sublist(0, count),
+          );
+          sent += count;
+        }
+      });
+      final receiver = Future<void>(() async {
+        final expectedReport = ascii.encode('PTYX-BIDI-OK $byteCount');
+        final reportBytes = <int>[];
+        while (received < byteCount) {
+          final next = await bytes.readChunk().timeout(_timeout);
+          if (next == null) {
+            throw StateError('bidirectional child reached EOF at $received');
+          }
+          for (final byte in next) {
+            if (received == byteCount) {
+              reportBytes.add(byte);
+              continue;
+            }
+            final accepted = _acceptPatternByte(byte, received);
+            if (accepted < 0) {
+              throw StateError(
+                'bidirectional mismatch at $received: '
+                '$byte != ${_pattern(received)}',
+              );
+            }
+            received += accepted;
+          }
+        }
+        while (reportBytes.length < expectedReport.length) {
+          final byte = await bytes.readByte().timeout(_timeout);
+          if (byte == null) {
+            throw StateError('bidirectional receipt ended before its report');
+          }
+          reportBytes.add(byte);
+        }
+        var reportMatches = true;
+        for (var index = 0; index < expectedReport.length; index++) {
+          if (reportBytes[index] != expectedReport[index]) {
+            reportMatches = false;
+            break;
+          }
+        }
+        if (!reportMatches) {
+          throw StateError(
+            'bidirectional receipt mismatch: '
+            '${String.fromCharCodes(reportBytes.take(expectedReport.length))}',
+          );
+        }
+        final reportTrailing = _TrailingLineEnding();
+        for (final byte in reportBytes.skip(expectedReport.length)) {
+          reportTrailing.add(byte);
+        }
+        while (true) {
+          final byte = await bytes.readByte().timeout(_timeout);
+          if (byte == null) break;
+          reportTrailing.add(byte);
+        }
+        trailingBytes = reportTrailing.invalidBytes;
+      });
+      await Future.wait([sender, receiver]);
+      stopwatch.stop();
+      if (sent != byteCount || received != byteCount || trailingBytes != 0) {
+        throw StateError(
+          'bidirectional transfer was not exact: sent=$sent '
+          'received=$received trailing=$trailingBytes',
+        );
+      }
+      final exitCode = await session.exitCode.timeout(_timeout);
+      return {
+        'sent_bytes': sent,
+        'received_bytes': received,
+        'trailing_bytes': trailingBytes,
+        'elapsed_us': stopwatch.elapsedMicroseconds,
+        'aggregate_mib_per_second':
+            (sent + received) /
+            (1024 * 1024) /
+            (stopwatch.elapsedMicroseconds / 1e6),
+        'exit_code': exitCode,
+        'exact_output_history_supported': true,
+        'integrity_scope': 'ordered child echo plus terminal receipt',
+      };
+    } finally {
+      await bytes.cancel();
+      await session.close();
+    }
   }
   final (:session, :bytes) = await _readySession('echo-count', ['$byteCount']);
   final chunk = Uint8List(64 * 1024);
   var sent = 0;
   var received = 0;
+  var trailingBytes = 0;
   final stopwatch = Stopwatch()..start();
   try {
     final sender = Future<void>(() async {
@@ -684,6 +797,10 @@ Future<Map<String, Object?>> _bidirectionalThroughput(int byteCount) async {
           throw StateError('bidirectional child reached EOF at $received');
         }
         for (final byte in next) {
+          if (received == byteCount) {
+            trailingBytes++;
+            continue;
+          }
           final accepted = _acceptPatternByte(byte, received);
           if (accepted < 0) {
             throw StateError(
@@ -696,11 +813,15 @@ Future<Map<String, Object?>> _bidirectionalThroughput(int byteCount) async {
       }
     });
     await Future.wait([sender, receiver]);
+    while (await bytes.readByte().timeout(_timeout) != null) {
+      trailingBytes++;
+    }
     stopwatch.stop();
     final exitCode = await session.exitCode.timeout(_timeout);
     return {
       'sent_bytes': sent,
       'received_bytes': received,
+      'trailing_bytes': trailingBytes,
       'elapsed_us': stopwatch.elapsedMicroseconds,
       'aggregate_mib_per_second':
           (sent + received) /
@@ -784,10 +905,16 @@ Future<Map<String, Object?>> _windowsTerminalOutput(
         'PTYX-OUTPUT-OK $byteCount',
       );
     }
+    if (marker.trailingBytes != 0) {
+      throw StateError(
+        'ConPTY output contained ${marker.trailingBytes} trailing bytes',
+      );
+    }
     final exitCode = await session.exitCode.timeout(_timeout);
     return {
       'bytes': byteCount,
       'observed_transport_bytes': observed,
+      'trailing_bytes': marker.trailingBytes,
       'elapsed_us': stopwatch.elapsedMicroseconds,
       'mib_per_second':
           byteCount / (1024 * 1024) / (stopwatch.elapsedMicroseconds / 1e6),
@@ -830,9 +957,15 @@ Future<Map<String, Object?>> _windowsPauseResume(int byteCount) async {
         'paused ConPTY output omitted its terminal-state report',
       );
     }
+    if (marker.trailingBytes != 0) {
+      throw StateError(
+        'paused ConPTY output contained ${marker.trailingBytes} trailing bytes',
+      );
+    }
     return {
       'bytes': byteCount,
       'observed_transport_bytes': observed,
+      'trailing_bytes': marker.trailingBytes,
       'pause_ms': 250,
       'paused_rss_delta_bytes': rssWhilePaused - rssBefore,
       'resume_to_eof_us': stopwatch.elapsedMicroseconds,
@@ -1592,20 +1725,65 @@ Iterable<String> _nulSeparated(List<int> bytes) sync* {
 final class _MarkerTracker {
   final List<int> _marker;
   var _matchedBytes = 0;
+  final _trailing = _TrailingLineEnding();
 
   _MarkerTracker(String marker) : _marker = ascii.encode(marker);
 
   bool get matched => _matchedBytes == _marker.length;
 
+  int get trailingBytes => _trailing.invalidBytes;
+
   void add(List<int> bytes) {
-    if (matched) return;
-    for (final byte in bytes) {
+    if (matched) {
+      for (final byte in bytes) {
+        _trailing.add(byte);
+      }
+      return;
+    }
+    for (var index = 0; index < bytes.length; index++) {
+      final byte = bytes[index];
       if (byte == _marker[_matchedBytes]) {
         _matchedBytes++;
-        if (matched) return;
+        if (matched) {
+          for (final trailing in bytes.skip(index + 1)) {
+            _trailing.add(trailing);
+          }
+          return;
+        }
       } else {
         _matchedBytes = byte == _marker.first ? 1 : 0;
       }
+    }
+  }
+}
+
+/// Allows the line terminator emitted by a text-mode child report while
+/// rejecting every other byte after the exact marker.
+final class _TrailingLineEnding {
+  var _state = 0;
+  var _invalid = 0;
+
+  int get invalidBytes => _invalid;
+
+  void add(int byte) {
+    switch (_state) {
+      case 0:
+        if (byte == 13) {
+          _state = 1;
+        } else if (byte == 10) {
+          _state = 2;
+        } else {
+          _invalid++;
+        }
+      case 1:
+        if (byte == 10) {
+          _state = 2;
+        } else {
+          _invalid++;
+          _state = 2;
+        }
+      case 2:
+        _invalid++;
     }
   }
 }

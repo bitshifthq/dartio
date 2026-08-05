@@ -216,4 +216,31 @@ mod tests {
         assert_eq!(target.len(), 2);
         assert!(queue.push(Control::Abandon { handle: 1 }));
     }
+
+    #[test]
+    fn lifecycle_controls_are_deduplicated_and_drained_before_credits() {
+        let queue = ControlQueue::new();
+        assert!(queue.push(Control::Credit {
+            handle: 7,
+            bytes: 32,
+        }));
+        assert!(queue.push(Control::Abandon { handle: 7 }));
+        assert!(queue.push(Control::Abandon { handle: 7 }));
+
+        let mut target = VecDeque::new();
+        queue.swap_into(&mut target);
+
+        assert!(matches!(
+            target.pop_front(),
+            Some(Control::Abandon { handle: 7 })
+        ));
+        assert!(matches!(
+            target.pop_front(),
+            Some(Control::Credit {
+                handle: 7,
+                bytes: 32
+            })
+        ));
+        assert!(target.is_empty());
+    }
 }
