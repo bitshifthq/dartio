@@ -487,6 +487,9 @@ fn retire_runtime_sessions(runtime: &Arc<RuntimeEntry>) {
             retire_session_entry(runtime, handle);
         }
     }
+    if let Ok(mut active) = runtime.sessions.try_lock() {
+        active.clear();
+    }
 }
 
 fn active_session(handle: u64) -> Result<(Arc<SessionEntry>, u64), u32> {
@@ -2054,11 +2057,12 @@ pub unsafe extern "C" fn ptyx_session_release(session: *mut u64, error: *mut Err
                 | SessionState::Released => None,
             };
             if let Some(engine_handle) = engine_handle {
-                // Do not discard the adapter's only ownership record until the
-                // native reactor has accepted the abandonment command. A
-                // bounded lifecycle queue may reject it under saturation or
-                // shutdown; retaining the handle lets the caller retry.
+                // A bounded lifecycle queue may reject abandonment under
+                // saturation or shutdown. The adapter then converges the
+                // runtime through its idempotent shutdown path and retires
+                // every remaining public session record.
                 if !abandon_or_shutdown(&entry.runtime, engine_handle) {
+                    sessions.clear();
                     set_error(
                         error,
                         Error::value(
