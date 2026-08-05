@@ -147,12 +147,12 @@ instrumentation:
 
 - `benchmark/results/current-scorecard-macos-x64-d8901fe.json`
 
-A separate 60-second macOS x64 lifecycle soak at revision `7802182` completed
-99 cycles and verified 6,488,064 bytes. Resource counts stabilized and cleanup
+A separate 60-second macOS x64 lifecycle soak at revision `bf06cc2` completed
+91 cycles and verified 5,963,776 bytes. Resource counts stabilized and cleanup
 passed. It is a short local diagnostic, not the required extended qualification
 duration:
 
-- `benchmark/results/current-soak-macos-x64-7802182.json`
+- `benchmark/results/current-soak-macos-x64-bf06cc2.json`
 
 The direct candidate omits the asynchronous Dart stream contract, bounded
 output ownership, native-port delivery, and credit return. Under the
