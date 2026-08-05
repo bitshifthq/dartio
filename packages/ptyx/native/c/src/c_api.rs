@@ -284,6 +284,8 @@ struct RuntimeEntry {
     event_count: AtomicUsize,
     adapter_count: AtomicUsize,
     shut_down: AtomicBool,
+    shutdown_complete: AtomicBool,
+    shutdown_gate: Mutex<()>,
 }
 
 struct SessionEntry {
@@ -347,13 +349,38 @@ fn abandon_or_shutdown(runtime: &Arc<RuntimeEntry>, handle: u64) -> bool {
     // this failure path non-blocking for synchronous C callers while a native
     // owner performs the idempotent shutdown and joins the reactor.
     let owner = Arc::clone(runtime);
-    let _ = std::thread::Builder::new()
+    let spawned = std::thread::Builder::new()
         .name("ptyx-abandon-cleanup".to_owned())
         .spawn(move || {
-            let _ = owner.engine.shutdown();
-        });
+            complete_runtime_shutdown(&owner);
+        })
+        .is_ok();
+    if !spawned {
+        // Thread creation failure is itself an unrecoverable adapter failure.
+        // Leave the runtime non-releasable so the caller can retry the
+        // explicit shutdown path instead of discarding native ownership.
+        runtime.shut_down.store(false, Ordering::Release);
+        return false;
+    }
     retire_runtime_sessions(runtime);
     false
+}
+
+fn complete_runtime_shutdown(runtime: &Arc<RuntimeEntry>) -> bool {
+    if runtime.shutdown_complete.load(Ordering::Acquire) {
+        return true;
+    }
+    let Ok(_gate) = runtime.shutdown_gate.lock() else {
+        return false;
+    };
+    if runtime.shutdown_complete.load(Ordering::Acquire) {
+        return true;
+    }
+    let complete = runtime.engine.shutdown();
+    if complete {
+        runtime.shutdown_complete.store(true, Ordering::Release);
+    }
+    complete
 }
 
 /// Reserves one adapter ownership slot while a private language adapter owns
@@ -820,6 +847,8 @@ pub unsafe extern "C" fn ptyx_runtime_create(
             event_count: AtomicUsize::new(0),
             adapter_count: AtomicUsize::new(0),
             shut_down: AtomicBool::new(false),
+            shutdown_complete: AtomicBool::new(false),
+            shutdown_gate: Mutex::new(()),
         });
         let Ok(mut state) = adapter().lock() else {
             set_error(
@@ -1302,13 +1331,26 @@ pub unsafe extern "C" fn ptyx_runtime_shutdown(runtime: u64, error: *mut Error) 
             return STATUS_STALE_HANDLE;
         };
         if runtime.shut_down.load(Ordering::Acquire) {
+            if !complete_runtime_shutdown(runtime) {
+                set_error(
+                    error,
+                    Error::value(
+                        ERROR_DOMAIN_RUNTIME,
+                        ERROR_INFRASTRUCTURE_LOST,
+                        OPERATION_RUNTIME_SHUTDOWN,
+                        0,
+                    ),
+                );
+                return STATUS_INTERNAL;
+            }
             retire_released_sessions(runtime);
             if let Ok(mut active) = runtime.sessions.lock() {
                 active.clear();
             }
             return STATUS_OK;
         }
-        if !runtime.engine.shutdown() {
+        runtime.shut_down.store(true, Ordering::Release);
+        if !complete_runtime_shutdown(runtime) {
             set_error(
                 error,
                 Error::value(
@@ -1324,7 +1366,6 @@ pub unsafe extern "C" fn ptyx_runtime_shutdown(runtime: u64, error: *mut Error) 
         // consumed. Once the engine has stopped, no event can retire that
         // reservation, so remove the adapter-only tombstone here.
         retire_released_sessions(runtime);
-        runtime.shut_down.store(true, Ordering::Release);
         STATUS_OK
     })
 }
@@ -1353,6 +1394,7 @@ pub unsafe extern "C" fn ptyx_runtime_release(runtime: *mut u64, error: *mut Err
             return STATUS_STALE_HANDLE;
         };
         if !entry.shut_down.load(Ordering::Acquire)
+            || !entry.shutdown_complete.load(Ordering::Acquire)
             || entry.session_count.load(Ordering::Acquire) != 0
             || entry.event_count.load(Ordering::Acquire) != 0
             || entry.adapter_count.load(Ordering::Acquire) != 0

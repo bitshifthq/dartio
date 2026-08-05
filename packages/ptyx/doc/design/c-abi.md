@@ -126,7 +126,12 @@ own capability, state, and native failures. They do not silently start close.
 
 `ptyx_session_close` atomically starts or joins asynchronous close. One
 close-complete event reports convergence. `ptyx_session_release` is a
-nonblocking abandonment operation and does not claim successful close.
+nonblocking abandonment operation and does not claim successful close. If the
+bounded lifecycle queue cannot admit an abandonment, the adapter retains the
+runtime as shutting down, retires its public session records, and completes
+the native shutdown before `ptyx_runtime_shutdown` or `ptyx_runtime_release`
+can report convergence. A failed cleanup-thread start leaves the runtime
+retryable and still owned.
 
 `ptyx_session_cancel_output` commits drain-and-discard for the session output
 direction. A binding invokes it when its output reader or stream is canceled
