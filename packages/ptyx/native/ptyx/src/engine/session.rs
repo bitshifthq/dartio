@@ -213,6 +213,15 @@ impl SessionCore {
         accepted_pending
     }
 
+    pub(crate) fn input_failure_notice(&mut self) -> Option<OperationError> {
+        if self.input_failure_notified {
+            return None;
+        }
+        let failure = self.input_failure?;
+        self.input_failure_notified = true;
+        Some(failure)
+    }
+
     pub(crate) fn pull_output(&mut self, maximum: usize) -> Bytes {
         self.flush_output_tail();
         let amount = maximum.min(self.output_bytes);
@@ -417,6 +426,8 @@ mod tests {
         assert!(session.fail_input(failure));
         assert!(session.input_failed);
         assert_eq!(session.input_failure, Some(failure));
+        assert_eq!(session.input_failure_notice(), Some(failure));
+        assert_eq!(session.input_failure_notice(), None);
         assert!(!admission.has_pending());
         assert!(session.enqueue_write(Bytes::from_static(b"later")).is_err());
     }

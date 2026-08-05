@@ -1719,11 +1719,7 @@ fn notify_input_failure(
     notices: &EventSender<Notice>,
     counters: &mut RuntimeCounters,
 ) {
-    let Some(failure) = session.input_failure else {
-        return;
-    };
-    if !session.input_failure_notified {
-        session.input_failure_notified = true;
+    if let Some(failure) = session.input_failure_notice() {
         if !send_notice(notices, Notice::InputFailed { handle, failure }, counters) {
             mark_notice_failure(session);
         }

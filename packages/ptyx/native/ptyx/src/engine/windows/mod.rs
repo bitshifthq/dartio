@@ -2258,17 +2258,15 @@ fn notify_input_failure(
     failure: OperationError,
 ) {
     session.input_failure.get_or_insert(failure);
-    if session.active && !session.input_failure_notified {
-        session.input_failure_notified = true;
-        send_lifecycle_notice(
-            session,
-            notices,
-            Notice::InputFailed {
-                handle,
-                failure: session.input_failure.unwrap_or(failure),
-            },
-            counters,
-        );
+    if session.active {
+        if let Some(failure) = session.input_failure_notice() {
+            send_lifecycle_notice(
+                session,
+                notices,
+                Notice::InputFailed { handle, failure },
+                counters,
+            );
+        }
     }
 }
 
