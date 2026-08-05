@@ -134,20 +134,18 @@ it has no same-revision direct comparison and does not satisfy the release
 acceptance workload or allocation/copy instrumentation requirements. The exact
 clean artifact is `benchmark/results/transport-output-128k-macos-x64-c928d30.json`.
 
-The exact task revision `0904181` was measured on macOS x64 with the CI-sized
-128 MiB workload and three repetitions. Transport output reached a 102.404
-MiB/s median, transport input 5.570 MiB/s, and bidirectional transfer 5.507
-MiB/s. Interactive p99 latency was 366 microseconds, 16-session active output
-reached 80.946 MiB/s with a 0.981 fairness ratio, forced descendant reclaim
-succeeded, and all 50 spawn/close samples completed. The matching 60-second
-integrity soak completed 93 cycles and verified 6,094,848 bytes with stable
-resource counts and cleanup. These artifacts are diagnostic because the
+The exact task revision `d8901fe` was measured on macOS x64 with the CI-sized
+128 MiB workload and three repetitions. Transport output reached a 102.217
+MiB/s median, transport input 5.176 MiB/s, and bidirectional transfer 5.818
+MiB/s. Interactive p99 latency was 392 microseconds, 16-session active output
+reached 84.189 MiB/s with a 0.972 fairness ratio, forced descendant reclaim
+succeeded, and all 50 spawn/close samples completed. These artifacts are
+diagnostic because the
 scorecard still lacks the required multi-gigabyte acceptance manifest,
 same-revision direct and competitor comparisons, and allocation/copy
 instrumentation:
 
-- `benchmark/results/current-scorecard-macos-x64-0904181.json`
-- `benchmark/results/current-soak-macos-x64-0904181.json`
+- `benchmark/results/current-scorecard-macos-x64-d8901fe.json`
 
 The direct candidate omits the asynchronous Dart stream contract, bounded
 output ownership, native-port delivery, and credit return. Under the
