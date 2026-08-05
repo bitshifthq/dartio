@@ -42,7 +42,9 @@ permissions:
 
 concurrency:
   group: build-native-${{ github.ref }}
-  cancel-in-progress: false
+  # Keep the isolated development branch focused on its latest exact
+  # revision; protected/main validation remains non-canceling.
+  cancel-in-progress: ${{ github.ref == 'refs/heads/codex/ptyx-best-in-class' }}
 
 jobs:
   checks:
