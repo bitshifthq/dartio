@@ -176,13 +176,15 @@ jobs:
             --arg started_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
             --arg finished_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
             'def result($value): {
-              exit_code: (if ($value.outcomes.controller_tests == "success" and
+              exit_code: (if ($value.outcomes.broker_build == "success" and
+                $value.outcomes.controller_tests == "success" and
                 $value.outcomes.broker_tests == "success") then 0 else 1 end),
               command: ($value.command + ["--all-targets"]),
               environment: $value.environment
             };
             def passed($value):
-              ($value.outcomes.controller_tests == "success" and
+              ($value.outcomes.broker_build == "success" and
+                $value.outcomes.controller_tests == "success" and
                 $value.outcomes.broker_tests == "success");
             def checks:
               {
