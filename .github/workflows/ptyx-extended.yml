@@ -55,6 +55,8 @@ jobs:
           printf "DART_SDK=%s\n" "$SDK" >> "$GITHUB_ENV"
           printf "PTYX_DART_SDK=%s\n" "$SDK" >> "$GITHUB_ENV"
       - name: build target broker for controller sanitizer tests
+        id: build-broker
+        continue-on-error: true
         env:
           RUSTFLAGS: -Zsanitizer=${{ matrix.sanitizer }}
           ASAN_OPTIONS: ${{ matrix.options }}
@@ -68,6 +70,8 @@ jobs:
             "$GITHUB_WORKSPACE/packages/ptyx/native/target/x86_64-unknown-linux-gnu/debug/ptyx-broker" \
             >> "$GITHUB_ENV"
       - name: run controller sanitizer tests
+        id: controller-tests
+        continue-on-error: true
         env:
           RUSTFLAGS: -Zsanitizer=${{ matrix.sanitizer }}
           ASAN_OPTIONS: ${{ matrix.options }}
@@ -79,6 +83,8 @@ jobs:
           --manifest-path packages/ptyx/native/Cargo.toml
           --all-targets
       - name: run broker sanitizer tests
+        id: broker-tests
+        continue-on-error: true
         env:
           RUSTFLAGS: -Zsanitizer=${{ matrix.sanitizer }}
           ASAN_OPTIONS: ${{ matrix.options }}
@@ -89,6 +95,52 @@ jobs:
           --target x86_64-unknown-linux-gnu
           --manifest-path packages/ptyx/native/broker/Cargo.toml
           --all-targets
+      - name: write sanitizer evidence
+        if: always()
+        env:
+          BUILD_OUTCOME: ${{ steps.build-broker.outcome }}
+          CONTROLLER_OUTCOME: ${{ steps.controller-tests.outcome }}
+          BROKER_OUTCOME: ${{ steps.broker-tests.outcome }}
+        run: |
+          mkdir -p sanitizer-evidence
+          jq -n \
+            --arg revision "$GITHUB_SHA" \
+            --arg sanitizer "${{ matrix.sanitizer }}" \
+            --arg build_outcome "$BUILD_OUTCOME" \
+            --arg controller_outcome "$CONTROLLER_OUTCOME" \
+            --arg broker_outcome "$BROKER_OUTCOME" \
+            --arg toolchain "nightly-2026-07-20" \
+            --arg target "x86_64-unknown-linux-gnu" \
+            '{
+              schema: 1,
+              suite: "ptyx-sanitizer",
+              revision: $revision,
+              tree_dirty: false,
+              sanitizer: $sanitizer,
+              toolchain: $toolchain,
+              target: $target,
+              checks: {
+                broker_build: ($build_outcome == "success"),
+                controller_tests: ($controller_outcome == "success"),
+                broker_tests: ($broker_outcome == "success")
+              },
+              outcomes: {
+                broker_build: $build_outcome,
+                controller_tests: $controller_outcome,
+                broker_tests: $broker_outcome
+              }
+            }' > "sanitizer-evidence/${{ matrix.sanitizer }}.json"
+      - name: retain sanitizer evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ptyx-sanitizer-${{ matrix.sanitizer }}-${{ github.sha }}
+          path: sanitizer-evidence/${{ matrix.sanitizer }}.json
+          if-no-files-found: error
+          retention-days: 90
+      - name: enforce sanitizer result
+        if: steps.build-broker.outcome != 'success' || steps.controller-tests.outcome != 'success' || steps.broker-tests.outcome != 'success'
+        run: exit 1
 
   miri:
     name: miri-unsafe-model-tests
