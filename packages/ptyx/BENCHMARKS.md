@@ -125,7 +125,7 @@ changing the bounded output budget, credit contract, or interactive batching.
 No raw artifact for that follow-up is retained, so it is not used as
 qualification evidence.
 
-The current clean revision `c928d30` batches native output leases at 128 KiB
+The clean revision `c928d30` batches native output leases at 128 KiB
 while retaining the same 256 KiB session capacity. A source-mode macOS x64
 diagnostic using three 32 MiB repetitions measured 99.621, 100.550, and
 101.141 MiB/s (mean 100.437 MiB/s, standard deviation 0.626 MiB/s), with
