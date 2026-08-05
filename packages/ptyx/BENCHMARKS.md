@@ -92,9 +92,9 @@ immediately before its one-byte gate write; the current timer starts
 immediately after that write. The difference is one bounded API write against
 roughly 0.3-second output samples, but means the historical results are
 directional regression evidence rather than an exactly identical timer
-boundary. At 32 MiB, the current implementation's medians are:
+boundary. At 32 MiB, the retained historical comparison at revision `2336697` reports:
 
-| Workload | Base `4c6120c` | Current `2336697` | Change |
+| Workload | Base `4c6120c` | Historical `2336697` | Change |
 |---|---:|---:|---:|
 | Interactive p99 | 1,675 us | 383 us | 77.1% lower |
 | Output | 89.289 MiB/s | 99.062 MiB/s | 10.9% higher |
