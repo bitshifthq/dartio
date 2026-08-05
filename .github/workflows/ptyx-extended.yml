@@ -103,6 +103,10 @@ jobs:
           BROKER_OUTCOME: ${{ steps.broker-tests.outcome }}
         run: |
           mkdir -p sanitizer-evidence
+          tree_dirty=false
+          if ! git diff --quiet || ! git diff --cached --quiet; then
+            tree_dirty=true
+          fi
           jq -n \
             --arg revision "$GITHUB_SHA" \
             --arg sanitizer "${{ matrix.sanitizer }}" \
@@ -111,14 +115,20 @@ jobs:
             --arg broker_outcome "$BROKER_OUTCOME" \
             --arg toolchain "nightly-2026-07-20" \
             --arg target "x86_64-unknown-linux-gnu" \
+            --argjson tree_dirty "$tree_dirty" \
             '{
               schema: 1,
               suite: "ptyx-sanitizer",
               revision: $revision,
-              tree_dirty: false,
+              tree_dirty: $tree_dirty,
               sanitizer: $sanitizer,
               toolchain: $toolchain,
               target: $target,
+              command: ["cargo", "+nightly-2026-07-20", "test", "-Zbuild-std", "-Zsanitizer=" + $sanitizer, "--target", $target],
+              environment: {
+                ASAN_OPTIONS: "${{ matrix.options }}",
+                TSAN_OPTIONS: "${{ matrix.options }}"
+              },
               checks: {
                 broker_build: ($build_outcome == "success"),
                 controller_tests: ($controller_outcome == "success"),
@@ -141,6 +151,70 @@ jobs:
       - name: enforce sanitizer result
         if: steps.build-broker.outcome != 'success' || steps.controller-tests.outcome != 'success' || steps.broker-tests.outcome != 'success'
         run: exit 1
+
+  sanitizer-bundle:
+    name: sanitizer-evidence-bundle
+    if: always()
+    needs: [sanitizers]
+    runs-on: ubuntu-latest
+    steps:
+      - name: download sanitizer evidence
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: ptyx-sanitizer-*-${{ github.sha }}
+          path: sanitizer-evidence
+          merge-multiple: true
+      - name: combine sanitizer evidence
+        run: |
+          set -euo pipefail
+          address="$(cat sanitizer-evidence/address.json)"
+          thread="$(cat sanitizer-evidence/thread.json)"
+          jq -n \
+            --arg revision "$GITHUB_SHA" \
+            --argjson address "$address" \
+            --argjson thread "$thread" \
+            --arg started_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --arg finished_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            'def result($value): {
+              exit_code: (if ($value.outcomes.controller_tests == "success" and
+                $value.outcomes.broker_tests == "success") then 0 else 1 end),
+              command: ($value.command + ["--all-targets"]),
+              environment: $value.environment
+            };
+            def passed($value):
+              ($value.outcomes.controller_tests == "success" and
+                $value.outcomes.broker_tests == "success");
+            def checks:
+              {
+                address_sanitizer: (passed($address)),
+                leak_sanitizer: (passed($address)),
+                thread_sanitizer: (passed($thread))
+              };
+            {
+              schema: 1,
+              suite: "ptyx-sanitizers-acceptance",
+              revision: $revision,
+              tree_dirty: ($address.tree_dirty or $thread.tree_dirty),
+              platform: "linux",
+              architecture: "x64",
+              command: ["ptyx-extended", "sanitizers"],
+              started_at_utc: $started_at,
+              finished_at_utc: $finished_at,
+              passed: (checks | to_entries | all(.value == true)),
+              checks: checks,
+              results: {
+                address_sanitizer: result($address),
+                leak_sanitizer: result($address),
+                thread_sanitizer: result($thread)
+              }
+            }' > sanitizers.json
+      - name: retain combined sanitizer evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ptyx-sanitizers-${{ github.sha }}
+          path: sanitizers.json
+          if-no-files-found: error
+          retention-days: 90
 
   miri:
     name: miri-unsafe-model-tests
