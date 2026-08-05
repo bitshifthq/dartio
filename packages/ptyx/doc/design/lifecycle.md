@@ -46,7 +46,7 @@ resources.
 | spawning | validation, acquisition, process creation, or registration fails | failed | rollback releases every acquired resource before spawn-failed |
 | spawning | consumer releases or activation lease expires | closing | native abandonment owns complete cleanup |
 | open | first close, owner loss, port loss, or infrastructure failure commits | closing | later live operations are rejected |
-| closing | resources are released or quarantined with a retained failure | closed | one close-complete event records the result |
+| closing | resources are released; any cleanup failure is retained in the close result | closed | one close-complete event records the result |
 | closed | repeated close or release | closed | the cached result or idempotent release is used |
 
 ## Input
